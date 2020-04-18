@@ -196,6 +196,7 @@ st-mono| simpleterm monocolor,
 	Se=\E[2 q,
 	Ss=\E[%p1%d q,
 	Smulx=\E[4:%p1%dm,
+	Sync=\EP=%p1%ds\E\\,
 
 st| simpleterm,
 	use=st-mono,

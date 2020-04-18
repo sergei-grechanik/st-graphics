@@ -14,6 +14,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 #include <wchar.h>
 
@@ -256,6 +257,32 @@ static const Rune utfmax[UTF_SIZ + 1] = {0x10FFFF, 0x7F, 0x7FF, 0xFFFF, 0x10FFFF
 /* Converts a diacritic to a row/column/etc number. The result is 1-base, 0
  * means "couldn't convert". Defined in rowcolumn_diacritics_helpers.c */
 uint16_t diacritic_to_num(uint32_t code);
+
+static int su = 0;
+struct timespec sutv;
+
+static void
+tsync_begin()
+{
+	clock_gettime(CLOCK_MONOTONIC, &sutv);
+	su = 1;
+}
+
+static void
+tsync_end()
+{
+	su = 0;
+}
+
+int
+tinsync(uint timeout)
+{
+	struct timespec now;
+	if (su && !clock_gettime(CLOCK_MONOTONIC, &now)
+	       && TIMEDIFF(now, sutv) >= timeout)
+		su = 0;
+	return su;
+}
 
 ssize_t
 xwrite(int fd, const char *s, size_t len)
@@ -849,6 +876,9 @@ ttynew(const char *line, char *cmd, const char *out, char **args)
 	return cmdfd;
 }
 
+static int twrite_aborted = 0;
+int ttyread_pending() { return twrite_aborted; }
+
 size_t
 ttyread(void)
 {
@@ -861,7 +891,7 @@ ttyread(void)
 		return 0;
 
 	/* append read bytes to unprocessed bytes */
-	ret = read(cmdfd, buf+buflen, LEN(buf)-buflen);
+	ret = twrite_aborted ? 1 : read(cmdfd, buf+buflen, LEN(buf)-buflen);
 
 	switch (ret) {
 	case 0:
@@ -869,7 +899,7 @@ ttyread(void)
 	case -1:
 		die("couldn't read from shell: %s\n", strerror(errno));
 	default:
-		buflen += ret;
+		buflen += twrite_aborted ? 0 : ret;
 		if (already_processing) {
 			/* Avoid recursive call to twrite() */
 			return ret;
@@ -1061,6 +1091,7 @@ tsetdirtattr(int attr)
 void
 tfulldirt(void)
 {
+	tsync_end();
 	tsetdirt(0, term.row-1);
 }
 
@@ -1839,6 +1870,12 @@ tsetmode(int priv, int set, const int *args, int narg)
 			case 2004: /* 2004: bracketed paste mode */
 				xsetmode(set, MODE_BRCKTPASTE);
 				break;
+			case 2026: /* Synchronized Update */
+				if (set)
+					tsync_begin();
+				else
+					tsync_end();
+				break;
 			/* Not implemented mouse modes. See comments there. */
 			case 1001: /* mouse highlight mode; can hang the
 				      terminal by design when implemented. */
@@ -2297,6 +2334,13 @@ strhandle(void)
 	case 'k': /* old title set compatibility */
 		xsettitle(strescseq.args[0]);
 		return;
+	case 'P': /* DCS -- Device Control String */
+		/* https://gitlab.com/gnachman/iterm2/-/wikis/synchronized-updates-spec */
+		if (strstr(strescseq.buf, "=1s") == strescseq.buf)
+			tsync_begin();  /* BSU */
+		else if (strstr(strescseq.buf, "=2s") == strescseq.buf)
+			tsync_end();  /* ESU */
+		return;
 	case '_': /* APC -- Application Program Command */
 		if (gr_parse_command(strescseq.buf, strescseq.len)) {
 			GraphicsCommandResult *res = &graphics_command_result;
@@ -2317,7 +2361,6 @@ strhandle(void)
 			return;
 		}
 		return;
-	case 'P': /* DCS -- Device Control String */
 	case '^': /* PM -- Privacy Message */
 		return;
 	}
@@ -2964,6 +3007,9 @@ twrite(const char *buf, int buflen, int show_ctrl)
 		tfulldirt();
 	}
 
+	int su0 = su;
+	twrite_aborted = 0;
+
 	for (n = 0; n < buflen; n += charsize) {
 		if (IS_SET(MODE_UTF8)) {
 			/* process a complete utf8 char */
@@ -2973,6 +3019,10 @@ twrite(const char *buf, int buflen, int show_ctrl)
 		} else {
 			u = buf[n] & 0xFF;
 			charsize = 1;
+		}
+		if (su0 && !su) {
+			twrite_aborted = 1;
+			break;  // ESU - allow rendering before a new BSU
 		}
 		if (show_ctrl && ISCONTROL(u)) {
 			if (u & 0x80) {

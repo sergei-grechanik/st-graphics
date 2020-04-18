@@ -65,6 +65,12 @@ static double minlatency = 2;
 static double maxlatency = 33;
 
 /*
+ * Synchronized-Update timeout in ms
+ * https://gitlab.com/gnachman/iterm2/-/wikis/synchronized-updates-spec
+ */
+static uint su_timeout = 500;
+
+/*
  * blinking timeout (set to 0 to disable blinking) for the terminal blinking
  * attribute.
  */
