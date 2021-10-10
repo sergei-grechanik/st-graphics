@@ -1018,7 +1018,8 @@ xloadfonts(const char *fontstr, double fontsize)
 			FcPatternAddDouble(pattern, FC_PIXEL_SIZE, 12);
 			usedfontsize = 12;
 		}
-		defaultfontsize = usedfontsize;
+		if (defaultfontsize <= 0)
+			defaultfontsize = usedfontsize;
 	}
 
 	if (xloadfont(&dc.font, pattern))
@@ -1028,7 +1029,7 @@ xloadfonts(const char *fontstr, double fontsize)
 		FcPatternGetDouble(dc.font.match->pattern,
 		                   FC_PIXEL_SIZE, 0, &fontval);
 		usedfontsize = fontval;
-		if (fontsize == 0)
+		if (defaultfontsize <= 0 && fontsize == 0)
 			defaultfontsize = fontval;
 	}
 
