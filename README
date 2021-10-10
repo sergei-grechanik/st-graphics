@@ -1,3 +1,10 @@
+My personal fork of st
+----------------------
+
+This is my personal fork of st (https://st.suckless.org/). It's so personal that
+I even keep my config.h here.
+
+
 st - simple terminal
 --------------------
 st is a simple terminal emulator for X which sucks less.
