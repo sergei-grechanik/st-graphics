@@ -19,6 +19,7 @@ char *argv0;
 #include "arg.h"
 #include "st.h"
 #include "win.h"
+#include "graphics.h"
 
 /* types used in config.h */
 typedef struct {
@@ -59,6 +60,8 @@ static void zoom(const Arg *);
 static void zoomabs(const Arg *);
 static void zoomreset(const Arg *);
 static void ttysend(const Arg *);
+static void previewimage(const Arg *);
+static void togglegrdebug(const Arg *);
 
 /* config.h for applying patches and the configuration. */
 #include "config.h"
@@ -145,6 +148,7 @@ static inline ushort sixd_to_16bit(int);
 static int xmakeglyphfontspecs(XftGlyphFontSpec *, const Glyph *, int, int, int);
 static void xdrawglyphfontspecs(const XftGlyphFontSpec *, Glyph, int, int, int);
 static void xdrawglyph(Glyph, int, int);
+static void xdrawimages(Glyph, Line, int x1, int y1, int x2);
 static void xclear(int, int, int, int);
 static int xgeommasktogravity(int);
 static int ximopen(Display *);
@@ -221,6 +225,7 @@ static DC dc;
 static XWindow xw;
 static XSelection xsel;
 static TermWindow win;
+static unsigned int mouse_col = 0, mouse_row = 0;
 
 /* Font Ring Cache */
 enum {
@@ -327,6 +332,23 @@ void
 ttysend(const Arg *arg)
 {
 	ttywrite(arg->s, strlen(arg->s), 1);
+}
+
+void
+previewimage(const Arg *arg)
+{
+	Glyph g = getglyphat(mouse_col, mouse_row);
+	if (g.mode & ATTR_IMAGE) {
+		uint32_t image_id = g.fg & 0xFFFFFF;
+		gr_preview_image(image_id, arg->s);
+	}
+}
+
+void
+togglegrdebug(const Arg *arg)
+{
+	graphics_debug_mode = !graphics_debug_mode;
+	redraw();
 }
 
 int
@@ -452,6 +474,9 @@ mouseaction(XEvent *e, uint release)
 
 	/* ignore Button<N>mask for Button<N> - it's set on release */
 	uint state = e->xbutton.state & ~buttonmask(e->xbutton.button);
+
+	mouse_col = evcol(e);
+	mouse_row = evrow(e);
 
 	for (ms = mshortcuts; ms < mshortcuts + LEN(mshortcuts); ms++) {
 		if (ms->release == release &&
@@ -1242,6 +1267,9 @@ xinit(int cols, int rows)
 	xsel.xtarget = XInternAtom(xw.dpy, "UTF8_STRING", 0);
 	if (xsel.xtarget == None)
 		xsel.xtarget = XA_STRING;
+
+	// Initialize the graphics (image display) module.
+	gr_init(xw.dpy, xw.vis, xw.cmap);
 }
 
 int
@@ -1268,6 +1296,11 @@ xmakeglyphfontspecs(XftGlyphFontSpec *specs, const Glyph *glyphs, int len, int x
 		/* Skip dummy wide-character spacing. */
 		if (mode == ATTR_WDUMMY)
 			continue;
+
+		/* Draw spaces for image placeholders (images will be drawn
+		 * separately). */
+		if (mode & ATTR_IMAGE)
+			rune = ' ';
 
 		/* Determine font for glyph if different from previous glyph. */
 		if (prevmode != mode) {
@@ -1519,6 +1552,9 @@ xdrawglyph(Glyph g, int x, int y)
 
 	numspecs = xmakeglyphfontspecs(&spec, &g, 1, x, y);
 	xdrawglyphfontspecs(&spec, g, numspecs, x, y);
+    if (g.mode & ATTR_IMAGE) {
+        xdrawimages(g, &g - x, x, y, x + 1);
+    }
 }
 
 void
@@ -1529,10 +1565,17 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 	/* remove the old cursor */
 	if (selected(ox, oy))
 		og.mode ^= ATTR_REVERSE;
-	xdrawglyph(og, ox, oy);
+	// If the old cursor was on the image cell, the whole line has already been
+	// redrawn.
+	if (!(og.mode & ATTR_IMAGE))
+		xdrawglyph(og, ox, oy);
 
 	if (IS_SET(MODE_HIDE))
 		return;
+
+    // If it's an image, just draw a ballot box for simplicity.
+    if (g.mode & ATTR_IMAGE)
+        g.u = 0x2610;
 
 	/*
 	 * Select the right color for the right mode.
@@ -1607,6 +1650,64 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 	}
 }
 
+/* Draw (or queue for drawing) image cells between columns x1 and x2 assuming
+ * that they belong to the same image id. */
+void
+xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
+	int x_pix_start = win.hborderpx + x1 * win.cw;
+	int x_pix = x_pix_start;
+	int y_pix = win.vborderpx + y1 * win.ch;
+	uint32_t image_id = base.fg & 0xFFFFFF;
+	int last_col = 0;
+	int last_row = 0;
+	int last_start_col = 0;
+	for (int i = 0; i < x2 - x1; ++i) {
+		uint32_t cur_row = line[x1 + i].u & 0xFFFF;
+		uint32_t cur_col = (line[x1 + i].u >> 16) & 0xFFFF;
+		// If the row is not specified, assume it's the same as the row of the
+		// previous cell.
+		if (cur_row == 0) cur_row = last_row;
+		// If the column is not specified and the row is the same as the
+		// row of the previous cell, then assume that the column is the
+		// next one.
+		if (cur_col == 0 && cur_row == last_row)
+			cur_col = last_col + 1;
+		// If we couldn't infer row and column, start from the top left corner.
+		if (cur_row == 0) cur_row = 1;
+		if (cur_col == 0) cur_col = 1;
+		// If this cell breaks a contiguous stripe of image cells, draw that
+		// line and start a new one.
+		if (cur_col != last_col + 1 || cur_row != last_row) {
+			if (last_row != 0)
+				gr_append_imagerect(
+					xw.buf, image_id, last_start_col - 1,
+					last_col, last_row - 1, last_row, x_pix,
+					y_pix, win.cw, win.ch,
+					base.mode & ATTR_REVERSE);
+			last_start_col = cur_col;
+			x_pix = x_pix_start + i*win.cw;
+		}
+		last_row = cur_row;
+		last_col = cur_col;
+	}
+	// Draw the last contiguous stripe.
+	if (last_row != 0)
+		gr_append_imagerect(xw.buf, image_id, last_start_col - 1,
+				    last_col, last_row - 1, last_row, x_pix,
+				    y_pix, win.cw, win.ch,
+				    base.mode & ATTR_REVERSE);
+}
+
+/* Prepare for image drawing. */
+void xstartimagedraw() {
+	gr_start_drawing(xw.buf, win.cw, win.ch);
+}
+
+/* Draw all queued image cells. */
+void xfinishimagedraw() {
+	gr_finish_drawing(xw.buf);
+}
+
 void
 xsetenv(void)
 {
@@ -1667,6 +1768,8 @@ xdrawline(Line line, int x1, int y1, int x2)
 			new.mode ^= ATTR_REVERSE;
 		if (i > 0 && ATTRCMP(base, new)) {
 			xdrawglyphfontspecs(specs, base, i, ox, y1);
+			if (base.mode & ATTR_IMAGE)
+				xdrawimages(base, line, ox, y1, x);
 			specs += i;
 			numspecs -= i;
 			i = 0;
@@ -1679,6 +1782,8 @@ xdrawline(Line line, int x1, int y1, int x2)
 	}
 	if (i > 0)
 		xdrawglyphfontspecs(specs, base, i, ox, y1);
+	if (i > 0 && base.mode & ATTR_IMAGE)
+		xdrawimages(base, line, ox, y1, x);
 }
 
 void
@@ -2013,6 +2118,11 @@ run(void)
 			}
 		}
 
+		if (graphics_uploading) {
+			if (!gr_check_if_still_uploading())
+				redraw();
+		}
+
 		draw();
 		XFlush(xw.dpy);
 		drawing = 0;
@@ -2099,6 +2209,8 @@ run:
 	xsetenv();
 	selinit();
 	run();
+
+	gr_deinit();
 
 	return 0;
 }

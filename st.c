@@ -19,6 +19,7 @@
 
 #include "st.h"
 #include "win.h"
+#include "graphics.h"
 
 #if   defined(__linux)
  #include <pty.h>
@@ -35,6 +36,9 @@
 #define ESC_ARG_SIZ   16
 #define STR_BUF_SIZ   ESC_BUF_SIZ
 #define STR_ARG_SIZ   ESC_ARG_SIZ
+
+/* PUA character used as an image placeholder */
+#define IMAGE_PLACEHOLDER_CHAR 0xEEEE
 
 /* macros */
 #define IS_SET(flag)		((term.mode & (flag)) != 0)
@@ -213,7 +217,6 @@ static Rune utf8decodebyte(char, size_t *);
 static char utf8encodebyte(Rune, size_t);
 static size_t utf8validate(Rune *, size_t);
 
-static char *base64dec(const char *);
 static char base64dec_getc(const char **);
 
 static ssize_t xwrite(int, const char *, size_t);
@@ -231,6 +234,9 @@ static const uchar utfbyte[UTF_SIZ + 1] = {0x80,    0, 0xC0, 0xE0, 0xF0};
 static const uchar utfmask[UTF_SIZ + 1] = {0xC0, 0x80, 0xE0, 0xF0, 0xF8};
 static const Rune utfmin[UTF_SIZ + 1] = {       0,    0,  0x80,  0x800,  0x10000};
 static const Rune utfmax[UTF_SIZ + 1] = {0x10FFFF, 0x7F, 0x7FF, 0xFFFF, 0x10FFFF};
+
+/* Defined in rowcolumn_diacritics_helpers.c */
+uint16_t diacritic_to_num(uint32_t code);
 
 ssize_t
 xwrite(int fd, const char *s, size_t len)
@@ -615,6 +621,12 @@ getsel(void)
 		for ( ; gp <= last; ++gp) {
 			if (gp->mode & ATTR_WDUMMY)
 				continue;
+
+			if (gp->mode & ATTR_IMAGE) {
+				// TODO: Copy diacritics as well
+				ptr += utf8encode(IMAGE_PLACEHOLDER_CHAR, ptr);
+				continue;
+			}
 
 			ptr += utf8encode(gp->u, ptr);
 		}
@@ -1215,6 +1227,11 @@ tsetchar(Rune u, const Glyph *attr, int x, int y)
 	term.dirty[y] = 1;
 	term.line[y][x] = *attr;
 	term.line[y][x].u = u;
+
+	if (u == IMAGE_PLACEHOLDER_CHAR) {
+		term.line[y][x].u = 0;
+		term.line[y][x].mode |= ATTR_IMAGE;
+	}
 }
 
 void
@@ -1949,8 +1966,18 @@ strhandle(void)
 	case 'k': /* old title set compatibility */
 		xsettitle(strescseq.args[0]);
 		return;
-	case 'P': /* DCS -- Device Control String */
 	case '_': /* APC -- Application Program Command */
+		if (gr_parse_command(strescseq.buf, strescseq.len)) {
+			GraphicsCommandResult *res = &graphics_command_result;
+			if (res->response[0]) {
+				ttywrite(res->response, strlen(res->response), 0);
+			}
+			if (res->redraw)
+				redraw();
+			return;
+		}
+		return;
+	case 'P': /* DCS -- Device Control String */
 	case '^': /* PM -- Privacy Message */
 		return;
 	}
@@ -2452,6 +2479,29 @@ check_control_code:
 	if (selected(term.c.x, term.c.y))
 		selclear();
 
+	if (width == 0) {
+		// It's probably a combining char. Combining characters are not
+		// supported, so we just ignore them, unless it denotes the row and
+		// column of an image character.
+		if (term.c.y <= 0 && term.c.x <= 0)
+			return;
+		else if (term.c.x == 0)
+			gp = &term.line[term.c.y-1][term.col-1];
+		else if (term.c.state & CURSOR_WRAPNEXT)
+			gp = &term.line[term.c.y][term.c.x];
+		else
+			gp = &term.line[term.c.y][term.c.x-1];
+		uint16_t num = diacritic_to_num(u);
+		if (num && (gp->mode & ATTR_IMAGE)) {
+			if (!(gp->u & 0xFFFF))
+				gp->u |= (num & 0xFFFF);
+			else if (!(gp->u & 0xFFFF0000))
+				gp->u |= (num & 0xFFFF) << 16;
+		}
+		term.lastc = u;
+		return;
+	}
+
 	gp = &term.line[term.c.y][term.c.x];
 	if (IS_SET(MODE_WRAP) && (term.c.state & CURSOR_WRAPNEXT)) {
 		gp->mode |= ATTR_WRAP;
@@ -2613,6 +2663,8 @@ drawregion(int x1, int y1, int x2, int y2)
 {
 	int y;
 
+	xstartimagedraw();
+
 	for (y = y1; y < y2; y++) {
 		if (!term.dirty[y])
 			continue;
@@ -2620,6 +2672,8 @@ drawregion(int x1, int y1, int x2, int y2)
 		term.dirty[y] = 0;
 		xdrawline(term.line[y], x1, y, x2);
 	}
+
+	xfinishimagedraw();
 }
 
 void
@@ -2638,6 +2692,11 @@ draw(void)
 	if (term.line[term.c.y][cx].mode & ATTR_WDUMMY)
 		cx--;
 
+	// If the old cursor is on the image cell, redraw the whole line, otherwise
+	// image cells with relative positioning will be drawn incorrectly.
+	if (term.line[term.ocy][term.ocx].mode & ATTR_IMAGE)
+		term.dirty[term.ocy] = 1;
+
 	drawregion(0, 0, term.col, term.row);
 	xdrawcursor(cx, term.c.y, term.line[term.c.y][cx],
 			term.ocx, term.ocy, term.line[term.ocy][term.ocx]);
@@ -2653,4 +2712,10 @@ redraw(void)
 {
 	tfulldirt();
 	draw();
+}
+
+Glyph
+getglyphat(int col, int row)
+{
+	return term.line[row][col];
 }
