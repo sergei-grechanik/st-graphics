@@ -44,7 +44,8 @@ with open("./rowcolumn_diacritics_helpers.c", "w") as file:
               str(range_start_num) + ";",
               file=file)
 
-    print("int diacritic_to_num(uint32_t code)\n{", file=file)
+    print("#include <stdint.h>\n", file=file)
+    print("uint16_t diacritic_to_num(uint32_t code)\n{", file=file)
     print("\tswitch (code) {", file=file)
 
     for code in codes:

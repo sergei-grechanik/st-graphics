@@ -36,6 +36,9 @@
 #define STR_BUF_SIZ   ESC_BUF_SIZ
 #define STR_ARG_SIZ   ESC_ARG_SIZ
 
+/* PUA character used as an image placeholder */
+#define IMAGE_PLACEHOLDER_CHAR 0xEEEE
+
 /* macros */
 #define IS_SET(flag)		((term.mode & (flag)) != 0)
 #define ISCONTROLC0(c)		(BETWEEN(c, 0, 0x1f) || (c) == 0x7f)
@@ -230,6 +233,9 @@ static const uchar utfbyte[UTF_SIZ + 1] = {0x80,    0, 0xC0, 0xE0, 0xF0};
 static const uchar utfmask[UTF_SIZ + 1] = {0xC0, 0x80, 0xE0, 0xF0, 0xF8};
 static const Rune utfmin[UTF_SIZ + 1] = {       0,    0,  0x80,  0x800,  0x10000};
 static const Rune utfmax[UTF_SIZ + 1] = {0x10FFFF, 0x7F, 0x7FF, 0xFFFF, 0x10FFFF};
+
+/* Defined in rowcolumn_diacritics_helpers.c */
+uint16_t diacritic_to_num(uint32_t code);
 
 ssize_t
 xwrite(int fd, const char *s, size_t len)
@@ -1222,6 +1228,11 @@ tsetchar(Rune u, const Glyph *attr, int x, int y)
 	term.dirty[y] = 1;
 	term.line[y][x] = *attr;
 	term.line[y][x].u = u;
+
+	if (u == IMAGE_PLACEHOLDER_CHAR) {
+		term.line[y][x].u = 0;
+		term.line[y][x].mode |= ATTR_IMAGE;
+	}
 }
 
 void
@@ -2407,6 +2418,29 @@ check_control_code:
 	}
 	if (selected(term.c.x, term.c.y))
 		selclear();
+
+	if (width == 0) {
+		// It's probably a combining char. Combining characters are not
+		// supported, so we just ignore them, unless it denotes the row and
+		// column of an image character.
+		if (term.c.y <= 0 && term.c.x <= 0)
+			return;
+		else if (term.c.x == 0)
+			gp = &term.line[term.c.y-1][term.col-1];
+		else if (term.c.state & CURSOR_WRAPNEXT)
+			gp = &term.line[term.c.y][term.c.x];
+		else
+			gp = &term.line[term.c.y][term.c.x-1];
+		uint16_t num = diacritic_to_num(u);
+		if (num && (gp->mode & ATTR_IMAGE)) {
+			if (!(gp->u & 0xFFFF))
+				gp->u |= (num & 0xFFFF);
+			else if (!(gp->u & 0xFFFF0000))
+				gp->u |= (num & 0xFFFF) << 16;
+		}
+		term.lastc = u;
+		return;
+	}
 
 	gp = &term.line[term.c.y][term.c.x];
 	if (IS_SET(MODE_WRAP) && (term.c.state & CURSOR_WRAPNEXT)) {

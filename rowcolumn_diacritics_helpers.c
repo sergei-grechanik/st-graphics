@@ -1,4 +1,6 @@
-int diacritic_to_num(uint32_t code)
+#include <stdint.h>
+
+uint16_t diacritic_to_num(uint32_t code)
 {
 	switch (code) {
 	case 0x300:

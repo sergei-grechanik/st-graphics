@@ -19,6 +19,7 @@ char *argv0;
 #include "arg.h"
 #include "st.h"
 #include "win.h"
+#include "graphics.h"
 
 /* types used in config.h */
 typedef struct {
@@ -150,6 +151,7 @@ static inline ushort sixd_to_16bit(int);
 static int xmakeglyphfontspecs(XftGlyphFontSpec *, const Glyph *, int, int, int);
 static void xdrawglyphfontspecs(const XftGlyphFontSpec *, Glyph, int, int, int);
 static void xdrawglyph(Glyph, int, int);
+static void xdrawimages(Line, int x1, int y1, int x2);
 static void xclear(int, int, int, int);
 static int xgeommasktogravity(int);
 static int ximopen(Display *);
@@ -1231,6 +1233,9 @@ xinit(int cols, int rows)
 	xsel.xtarget = XInternAtom(xw.dpy, "UTF8_STRING", 0);
 	if (xsel.xtarget == None)
 		xsel.xtarget = XA_STRING;
+
+	// Initialize the graphics (image display) module.
+	graphicsinit(xw.dpy, xw.vis, xw.cmap);
 }
 
 int
@@ -1257,6 +1262,11 @@ xmakeglyphfontspecs(XftGlyphFontSpec *specs, const Glyph *glyphs, int len, int x
 		/* Skip dummy wide-character spacing. */
 		if (mode == ATTR_WDUMMY)
 			continue;
+
+		/* Draw spaces for image placeholders (images will be drawn
+		 * separately). */
+		if (mode & ATTR_IMAGE)
+			rune = ' ';
 
 		/* Determine font for glyph if different from previous glyph. */
 		if (prevmode != mode) {
@@ -1596,6 +1606,50 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 	}
 }
 
+/* Draw image cells between columns x1 and x2 assuming that they belong to the
+ * same image id. */
+void
+xdrawimages(Line line, int x1, int y1, int x2) {
+	int x_pix_start = win.hborderpx + x1 * win.cw;
+	int x_pix = x_pix_start;
+	int y_pix = win.vborderpx + y1 * win.ch;
+	Glyph base = line[x1];
+	uint32_t image_id = base.fg & 0xFFFFFF;
+	int last_col = 0;
+	int last_row = 0;
+	int last_start_col = 0;
+	for (int i = 0; i < x2 - x1; ++i) {
+		uint32_t cur_row = line[x1 + i].u & 0xFFFF;
+		uint32_t cur_col = (line[x1 + i].u >> 16) & 0xFFFF;
+		// If the row is not specified, assume it's the same as the row of the
+		// previous cell.
+		if (cur_row == 0) cur_row = last_row;
+		// If the column is not specified and the row is the same as the
+		// row of the previous cell, then assume that the column is the
+		// next one.
+		if (cur_col == 0 && cur_row == last_row)
+			cur_col = last_col + 1;
+		// If we couldn't infer row and column, start from the top left corner.
+		if (cur_row == 0) cur_row = 1;
+		if (cur_col == 0) cur_col = 1;
+		// If this cell breaks a contiguous stripe of image cells, draw that
+		// line and start a new one.
+		if (cur_col != last_col + 1 || cur_row != last_row) {
+			if (last_row != 0)
+				gdrawimagestripe(xw.buf, image_id, last_start_col, last_col,
+								 last_row, x_pix, y_pix, win.cw, win.ch);
+			last_start_col = cur_col;
+			x_pix = x_pix_start + i*win.cw;
+		}
+		last_row = cur_row;
+		last_col = cur_col;
+	}
+	// Draw the last contiguous stripe.
+	if (last_row != 0)
+		gdrawimagestripe(xw.buf, image_id, last_start_col, last_col, last_row,
+						 x_pix, y_pix, win.cw, win.ch);
+}
+
 void
 xsetenv(void)
 {
@@ -1656,6 +1710,8 @@ xdrawline(Line line, int x1, int y1, int x2)
 			new.mode ^= ATTR_REVERSE;
 		if (i > 0 && ATTRCMP(base, new)) {
 			xdrawglyphfontspecs(specs, base, i, ox, y1);
+			if (base.mode & ATTR_IMAGE)
+				xdrawimages(line, ox, y1, x);
 			specs += i;
 			numspecs -= i;
 			i = 0;
@@ -1668,6 +1724,8 @@ xdrawline(Line line, int x1, int y1, int x2)
 	}
 	if (i > 0)
 		xdrawglyphfontspecs(specs, base, i, ox, y1);
+	if (i > 0 &&base.mode & ATTR_IMAGE)
+		xdrawimages(line, ox, y1, x);
 }
 
 void
