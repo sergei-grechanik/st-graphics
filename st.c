@@ -20,6 +20,8 @@
 #include "st.h"
 #include "win.h"
 
+int gparsecommand(char *buf, size_t len);
+
 #if   defined(__linux)
  #include <pty.h>
 #elif defined(__OpenBSD__) || defined(__NetBSD__) || defined(__APPLE__)
@@ -215,7 +217,6 @@ static Rune utf8decodebyte(char, size_t *);
 static char utf8encodebyte(Rune, size_t);
 static size_t utf8validate(Rune *, size_t);
 
-static char *base64dec(const char *);
 static char base64dec_getc(const char **);
 
 static ssize_t xwrite(int, const char *, size_t);
@@ -1916,8 +1917,11 @@ strhandle(void)
 	case 'k': /* old title set compatibility */
 		xsettitle(strescseq.args[0]);
 		return;
-	case 'P': /* DCS -- Device Control String */
 	case '_': /* APC -- Application Program Command */
+		if (gparsecommand(strescseq.buf, strescseq.len))
+			return;
+		return;
+	case 'P': /* DCS -- Device Control String */
 	case '^': /* PM -- Privacy Message */
 		return;
 	}

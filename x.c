@@ -151,7 +151,7 @@ static inline ushort sixd_to_16bit(int);
 static int xmakeglyphfontspecs(XftGlyphFontSpec *, const Glyph *, int, int, int);
 static void xdrawglyphfontspecs(const XftGlyphFontSpec *, Glyph, int, int, int);
 static void xdrawglyph(Glyph, int, int);
-static void xdrawimages(Line, int x1, int y1, int x2);
+static void xdrawimages(Glyph, Line, int x1, int y1, int x2);
 static void xclear(int, int, int, int);
 static int xgeommasktogravity(int);
 static int ximopen(Display *);
@@ -1518,6 +1518,9 @@ xdrawglyph(Glyph g, int x, int y)
 
 	numspecs = xmakeglyphfontspecs(&spec, &g, 1, x, y);
 	xdrawglyphfontspecs(&spec, g, numspecs, x, y);
+    if (g.mode & ATTR_IMAGE) {
+        xdrawimages(g, &g - x, x, y, x + 1);
+    }
 }
 
 void
@@ -1532,6 +1535,10 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 
 	if (IS_SET(MODE_HIDE))
 		return;
+
+    // If it's an image, just draw a ballot box for simplicity.
+    if (g.mode & ATTR_IMAGE)
+        g.u = 0x2610;
 
 	/*
 	 * Select the right color for the right mode.
@@ -1609,11 +1616,10 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 /* Draw image cells between columns x1 and x2 assuming that they belong to the
  * same image id. */
 void
-xdrawimages(Line line, int x1, int y1, int x2) {
+xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 	int x_pix_start = win.hborderpx + x1 * win.cw;
 	int x_pix = x_pix_start;
 	int y_pix = win.vborderpx + y1 * win.ch;
-	Glyph base = line[x1];
 	uint32_t image_id = base.fg & 0xFFFFFF;
 	int last_col = 0;
 	int last_row = 0;
@@ -1636,8 +1642,8 @@ xdrawimages(Line line, int x1, int y1, int x2) {
 		// line and start a new one.
 		if (cur_col != last_col + 1 || cur_row != last_row) {
 			if (last_row != 0)
-				gdrawimagestripe(xw.buf, image_id, last_start_col, last_col,
-								 last_row, x_pix, y_pix, win.cw, win.ch);
+				gdrawimagestripe(xw.buf, image_id, last_start_col - 1, last_col,
+								 last_row - 1, x_pix, y_pix, win.cw, win.ch, base.mode & ATTR_REVERSE);
 			last_start_col = cur_col;
 			x_pix = x_pix_start + i*win.cw;
 		}
@@ -1646,8 +1652,8 @@ xdrawimages(Line line, int x1, int y1, int x2) {
 	}
 	// Draw the last contiguous stripe.
 	if (last_row != 0)
-		gdrawimagestripe(xw.buf, image_id, last_start_col, last_col, last_row,
-						 x_pix, y_pix, win.cw, win.ch);
+		gdrawimagestripe(xw.buf, image_id, last_start_col - 1, last_col, last_row - 1,
+						 x_pix, y_pix, win.cw, win.ch, base.mode & ATTR_REVERSE);
 }
 
 void
@@ -1711,7 +1717,7 @@ xdrawline(Line line, int x1, int y1, int x2)
 		if (i > 0 && ATTRCMP(base, new)) {
 			xdrawglyphfontspecs(specs, base, i, ox, y1);
 			if (base.mode & ATTR_IMAGE)
-				xdrawimages(line, ox, y1, x);
+				xdrawimages(base, line, ox, y1, x);
 			specs += i;
 			numspecs -= i;
 			i = 0;
@@ -1724,8 +1730,8 @@ xdrawline(Line line, int x1, int y1, int x2)
 	}
 	if (i > 0)
 		xdrawglyphfontspecs(specs, base, i, ox, y1);
-	if (i > 0 &&base.mode & ATTR_IMAGE)
-		xdrawimages(line, ox, y1, x);
+	if (i > 0 && base.mode & ATTR_IMAGE)
+		xdrawimages(base, line, ox, y1, x);
 }
 
 void
