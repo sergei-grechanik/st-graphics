@@ -3,48 +3,33 @@
 uint16_t diacritic_to_num(uint32_t code)
 {
 	switch (code) {
-	case 0x300:
-	case 0x301:
-	case 0x302:
-	case 0x303:
-	case 0x304:
 	case 0x305:
-	case 0x306:
-	case 0x307:
-	case 0x308:
-	case 0x309:
-	case 0x30a:
-	case 0x30b:
-	case 0x30c:
+		return code - 0x305 + 1;
 	case 0x30d:
 	case 0x30e:
-	case 0x30f:
+		return code - 0x30d + 2;
 	case 0x310:
-	case 0x311:
+		return code - 0x310 + 4;
 	case 0x312:
-	case 0x313:
-	case 0x314:
-		return code - 0x300 + 1;
+		return code - 0x312 + 5;
 	case 0x33d:
 	case 0x33e:
 	case 0x33f:
-		return code - 0x33d + 22;
-	case 0x342:
-		return code - 0x342 + 25;
+		return code - 0x33d + 6;
 	case 0x346:
-		return code - 0x346 + 26;
+		return code - 0x346 + 9;
 	case 0x34a:
 	case 0x34b:
 	case 0x34c:
-		return code - 0x34a + 27;
+		return code - 0x34a + 10;
 	case 0x350:
 	case 0x351:
 	case 0x352:
-		return code - 0x350 + 30;
+		return code - 0x350 + 13;
 	case 0x357:
-		return code - 0x357 + 33;
+		return code - 0x357 + 16;
 	case 0x35b:
-		return code - 0x35b + 34;
+		return code - 0x35b + 17;
 	case 0x363:
 	case 0x364:
 	case 0x365:
@@ -58,39 +43,39 @@ uint16_t diacritic_to_num(uint32_t code)
 	case 0x36d:
 	case 0x36e:
 	case 0x36f:
-		return code - 0x363 + 35;
+		return code - 0x363 + 18;
 	case 0x483:
 	case 0x484:
 	case 0x485:
 	case 0x486:
 	case 0x487:
-		return code - 0x483 + 48;
+		return code - 0x483 + 31;
 	case 0x592:
 	case 0x593:
 	case 0x594:
 	case 0x595:
-		return code - 0x592 + 53;
+		return code - 0x592 + 36;
 	case 0x597:
 	case 0x598:
 	case 0x599:
-		return code - 0x597 + 57;
+		return code - 0x597 + 40;
 	case 0x59c:
 	case 0x59d:
 	case 0x59e:
 	case 0x59f:
 	case 0x5a0:
 	case 0x5a1:
-		return code - 0x59c + 60;
+		return code - 0x59c + 43;
 	case 0x5a8:
 	case 0x5a9:
-		return code - 0x5a8 + 66;
+		return code - 0x5a8 + 49;
 	case 0x5ab:
 	case 0x5ac:
-		return code - 0x5ab + 68;
+		return code - 0x5ab + 51;
 	case 0x5af:
-		return code - 0x5af + 70;
+		return code - 0x5af + 53;
 	case 0x5c4:
-		return code - 0x5c4 + 71;
+		return code - 0x5c4 + 54;
 	case 0x610:
 	case 0x611:
 	case 0x612:
@@ -99,19 +84,16 @@ uint16_t diacritic_to_num(uint32_t code)
 	case 0x615:
 	case 0x616:
 	case 0x617:
-		return code - 0x610 + 72;
-	case 0x653:
-	case 0x654:
-		return code - 0x653 + 80;
+		return code - 0x610 + 55;
 	case 0x657:
 	case 0x658:
 	case 0x659:
 	case 0x65a:
 	case 0x65b:
-		return code - 0x657 + 82;
+		return code - 0x657 + 63;
 	case 0x65d:
 	case 0x65e:
-		return code - 0x65d + 87;
+		return code - 0x65d + 68;
 	case 0x6d6:
 	case 0x6d7:
 	case 0x6d8:
@@ -119,45 +101,45 @@ uint16_t diacritic_to_num(uint32_t code)
 	case 0x6da:
 	case 0x6db:
 	case 0x6dc:
-		return code - 0x6d6 + 89;
+		return code - 0x6d6 + 70;
 	case 0x6df:
 	case 0x6e0:
 	case 0x6e1:
 	case 0x6e2:
-		return code - 0x6df + 96;
+		return code - 0x6df + 77;
 	case 0x6e4:
-		return code - 0x6e4 + 100;
+		return code - 0x6e4 + 81;
 	case 0x6e7:
 	case 0x6e8:
-		return code - 0x6e7 + 101;
+		return code - 0x6e7 + 82;
 	case 0x6eb:
 	case 0x6ec:
-		return code - 0x6eb + 103;
+		return code - 0x6eb + 84;
 	case 0x730:
-		return code - 0x730 + 105;
+		return code - 0x730 + 86;
 	case 0x732:
 	case 0x733:
-		return code - 0x732 + 106;
+		return code - 0x732 + 87;
 	case 0x735:
 	case 0x736:
-		return code - 0x735 + 108;
+		return code - 0x735 + 89;
 	case 0x73a:
-		return code - 0x73a + 110;
+		return code - 0x73a + 91;
 	case 0x73d:
-		return code - 0x73d + 111;
+		return code - 0x73d + 92;
 	case 0x73f:
 	case 0x740:
 	case 0x741:
-		return code - 0x73f + 112;
+		return code - 0x73f + 93;
 	case 0x743:
-		return code - 0x743 + 115;
+		return code - 0x743 + 96;
 	case 0x745:
-		return code - 0x745 + 116;
+		return code - 0x745 + 97;
 	case 0x747:
-		return code - 0x747 + 117;
+		return code - 0x747 + 98;
 	case 0x749:
 	case 0x74a:
-		return code - 0x749 + 118;
+		return code - 0x749 + 99;
 	case 0x7eb:
 	case 0x7ec:
 	case 0x7ed:
@@ -165,14 +147,14 @@ uint16_t diacritic_to_num(uint32_t code)
 	case 0x7ef:
 	case 0x7f0:
 	case 0x7f1:
-		return code - 0x7eb + 120;
+		return code - 0x7eb + 101;
 	case 0x7f3:
-		return code - 0x7f3 + 127;
+		return code - 0x7f3 + 108;
 	case 0x816:
 	case 0x817:
 	case 0x818:
 	case 0x819:
-		return code - 0x816 + 128;
+		return code - 0x816 + 109;
 	case 0x81b:
 	case 0x81c:
 	case 0x81d:
@@ -182,38 +164,38 @@ uint16_t diacritic_to_num(uint32_t code)
 	case 0x821:
 	case 0x822:
 	case 0x823:
-		return code - 0x81b + 132;
+		return code - 0x81b + 113;
 	case 0x825:
 	case 0x826:
 	case 0x827:
-		return code - 0x825 + 141;
+		return code - 0x825 + 122;
 	case 0x829:
 	case 0x82a:
 	case 0x82b:
 	case 0x82c:
 	case 0x82d:
-		return code - 0x829 + 144;
+		return code - 0x829 + 125;
 	case 0x951:
-		return code - 0x951 + 149;
+		return code - 0x951 + 130;
 	case 0x953:
 	case 0x954:
-		return code - 0x953 + 150;
+		return code - 0x953 + 131;
 	case 0xf82:
 	case 0xf83:
-		return code - 0xf82 + 152;
+		return code - 0xf82 + 133;
 	case 0xf86:
 	case 0xf87:
-		return code - 0xf86 + 154;
+		return code - 0xf86 + 135;
 	case 0x135d:
 	case 0x135e:
 	case 0x135f:
-		return code - 0x135d + 156;
+		return code - 0x135d + 137;
 	case 0x17dd:
-		return code - 0x17dd + 159;
+		return code - 0x17dd + 140;
 	case 0x193a:
-		return code - 0x193a + 160;
+		return code - 0x193a + 141;
 	case 0x1a17:
-		return code - 0x1a17 + 161;
+		return code - 0x1a17 + 142;
 	case 0x1a75:
 	case 0x1a76:
 	case 0x1a77:
@@ -222,9 +204,9 @@ uint16_t diacritic_to_num(uint32_t code)
 	case 0x1a7a:
 	case 0x1a7b:
 	case 0x1a7c:
-		return code - 0x1a75 + 162;
+		return code - 0x1a75 + 143;
 	case 0x1b6b:
-		return code - 0x1b6b + 170;
+		return code - 0x1b6b + 151;
 	case 0x1b6d:
 	case 0x1b6e:
 	case 0x1b6f:
@@ -232,19 +214,19 @@ uint16_t diacritic_to_num(uint32_t code)
 	case 0x1b71:
 	case 0x1b72:
 	case 0x1b73:
-		return code - 0x1b6d + 171;
+		return code - 0x1b6d + 152;
 	case 0x1cd0:
 	case 0x1cd1:
 	case 0x1cd2:
-		return code - 0x1cd0 + 178;
+		return code - 0x1cd0 + 159;
 	case 0x1cda:
 	case 0x1cdb:
-		return code - 0x1cda + 181;
+		return code - 0x1cda + 162;
 	case 0x1ce0:
-		return code - 0x1ce0 + 183;
+		return code - 0x1ce0 + 164;
 	case 0x1dc0:
 	case 0x1dc1:
-		return code - 0x1dc0 + 184;
+		return code - 0x1dc0 + 165;
 	case 0x1dc3:
 	case 0x1dc4:
 	case 0x1dc5:
@@ -252,10 +234,10 @@ uint16_t diacritic_to_num(uint32_t code)
 	case 0x1dc7:
 	case 0x1dc8:
 	case 0x1dc9:
-		return code - 0x1dc3 + 186;
+		return code - 0x1dc3 + 167;
 	case 0x1dcb:
 	case 0x1dcc:
-		return code - 0x1dcb + 193;
+		return code - 0x1dcb + 174;
 	case 0x1dd1:
 	case 0x1dd2:
 	case 0x1dd3:
@@ -278,32 +260,32 @@ uint16_t diacritic_to_num(uint32_t code)
 	case 0x1de4:
 	case 0x1de5:
 	case 0x1de6:
-		return code - 0x1dd1 + 195;
+		return code - 0x1dd1 + 176;
 	case 0x1dfe:
-		return code - 0x1dfe + 217;
+		return code - 0x1dfe + 198;
 	case 0x20d0:
 	case 0x20d1:
-		return code - 0x20d0 + 218;
+		return code - 0x20d0 + 199;
 	case 0x20d4:
 	case 0x20d5:
 	case 0x20d6:
 	case 0x20d7:
-		return code - 0x20d4 + 220;
+		return code - 0x20d4 + 201;
 	case 0x20db:
 	case 0x20dc:
-		return code - 0x20db + 224;
+		return code - 0x20db + 205;
 	case 0x20e1:
-		return code - 0x20e1 + 226;
+		return code - 0x20e1 + 207;
 	case 0x20e7:
-		return code - 0x20e7 + 227;
+		return code - 0x20e7 + 208;
 	case 0x20e9:
-		return code - 0x20e9 + 228;
+		return code - 0x20e9 + 209;
 	case 0x20f0:
-		return code - 0x20f0 + 229;
+		return code - 0x20f0 + 210;
 	case 0x2cef:
 	case 0x2cf0:
 	case 0x2cf1:
-		return code - 0x2cef + 230;
+		return code - 0x2cef + 211;
 	case 0x2de0:
 	case 0x2de1:
 	case 0x2de2:
@@ -336,15 +318,15 @@ uint16_t diacritic_to_num(uint32_t code)
 	case 0x2dfd:
 	case 0x2dfe:
 	case 0x2dff:
-		return code - 0x2de0 + 233;
+		return code - 0x2de0 + 214;
 	case 0xa66f:
-		return code - 0xa66f + 265;
+		return code - 0xa66f + 246;
 	case 0xa67c:
 	case 0xa67d:
-		return code - 0xa67c + 266;
+		return code - 0xa67c + 247;
 	case 0xa6f0:
 	case 0xa6f1:
-		return code - 0xa6f0 + 268;
+		return code - 0xa6f0 + 249;
 	case 0xa8e0:
 	case 0xa8e1:
 	case 0xa8e2:
@@ -363,20 +345,20 @@ uint16_t diacritic_to_num(uint32_t code)
 	case 0xa8ef:
 	case 0xa8f0:
 	case 0xa8f1:
-		return code - 0xa8e0 + 270;
+		return code - 0xa8e0 + 251;
 	case 0xaab0:
-		return code - 0xaab0 + 288;
+		return code - 0xaab0 + 269;
 	case 0xaab2:
 	case 0xaab3:
-		return code - 0xaab2 + 289;
+		return code - 0xaab2 + 270;
 	case 0xaab7:
 	case 0xaab8:
-		return code - 0xaab7 + 291;
+		return code - 0xaab7 + 272;
 	case 0xaabe:
 	case 0xaabf:
-		return code - 0xaabe + 293;
+		return code - 0xaabe + 274;
 	case 0xaac1:
-		return code - 0xaac1 + 295;
+		return code - 0xaac1 + 276;
 	case 0xfe20:
 	case 0xfe21:
 	case 0xfe22:
@@ -384,26 +366,26 @@ uint16_t diacritic_to_num(uint32_t code)
 	case 0xfe24:
 	case 0xfe25:
 	case 0xfe26:
-		return code - 0xfe20 + 296;
+		return code - 0xfe20 + 277;
 	case 0x10a0f:
-		return code - 0x10a0f + 303;
+		return code - 0x10a0f + 284;
 	case 0x10a38:
-		return code - 0x10a38 + 304;
+		return code - 0x10a38 + 285;
 	case 0x1d185:
 	case 0x1d186:
 	case 0x1d187:
 	case 0x1d188:
 	case 0x1d189:
-		return code - 0x1d185 + 305;
+		return code - 0x1d185 + 286;
 	case 0x1d1aa:
 	case 0x1d1ab:
 	case 0x1d1ac:
 	case 0x1d1ad:
-		return code - 0x1d1aa + 310;
+		return code - 0x1d1aa + 291;
 	case 0x1d242:
 	case 0x1d243:
 	case 0x1d244:
-		return code - 0x1d242 + 314;
+		return code - 0x1d242 + 295;
 	}
 	return 0;
 }
