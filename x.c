@@ -1531,7 +1531,10 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 	/* remove the old cursor */
 	if (selected(ox, oy))
 		og.mode ^= ATTR_REVERSE;
-	xdrawglyph(og, ox, oy);
+	// If the old cursor was on the image cell, the whole line has already been
+	// redrawn.
+	if (!(og.mode & ATTR_IMAGE))
+		xdrawglyph(og, ox, oy);
 
 	if (IS_SET(MODE_HIDE))
 		return;

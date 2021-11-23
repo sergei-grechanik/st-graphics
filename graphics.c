@@ -18,13 +18,19 @@ char *base64dec(const char *src);
 #define MAX_FILENAME_SIZE 256
 #define MAX_CELL_IMAGES 256
 
+enum scale_mode {
+	SCALE_MODE_CONTAIN = 0,
+	SCALE_MODE_FILL = 1
+};
+
 typedef struct {
 	uint32_t image_id;
 	uint16_t rows, cols;
 	time_t atime;
 	unsigned disk_size;
-	Imlib_Image loaded_image;
-	uint16_t loaded_cw, loaded_ch;
+	Imlib_Image scaled_image;
+	uint16_t scaled_cw, scaled_ch;
+	char scale_mode;
 } CellImage;
 
 static CellImage cell_images[MAX_CELL_IMAGES] = {{0}};
@@ -32,12 +38,12 @@ static unsigned cell_images_disk_size = 0;
 static unsigned cell_images_ram_size = 0;
 static uint32_t last_image_id = 0;
 static char temp_dir[] = "/tmp/st-images-XXXXXX";
-static char reverse_table[256];
+static unsigned char reverse_table[256];
 
 void graphicsinit(Display *disp, Visual *vis, Colormap cm)
 {
 	if (!mkdtemp(temp_dir)) {
-	    fprintf(stderr, "Could now create temporary dir from template %s\n",
+	    fprintf(stderr, "Could not create temporary dir from template %s\n",
 				temp_dir);
 	    abort();
 	}
@@ -67,17 +73,17 @@ static void gimagefilename(CellImage *img, char *out, size_t max_len) {
 }
 
 static unsigned gimageramsize(CellImage *img) {
-	return (unsigned)img->rows * img->cols * img->loaded_ch * img->loaded_cw;
+	return (unsigned)img->rows * img->cols * img->scaled_ch * img->scaled_cw;
 }
 
 static void gunloadimage(CellImage *img) {
-	if (!img->loaded_image)
+	if (!img->scaled_image)
 		return;
-	imlib_context_set_image(img->loaded_image);
+	imlib_context_set_image(img->scaled_image);
 	imlib_free_image();
 	cell_images_ram_size -= gimageramsize(img);
-	img->loaded_image = NULL;
-	img->loaded_ch = img->loaded_cw = 0;
+	img->scaled_image = NULL;
+	img->scaled_ch = img->scaled_cw = 0;
 }
 
 static void gdeleteimage(CellImage *img) {
@@ -117,7 +123,7 @@ static void gtouchimage(CellImage* img) {
 }
 
 static void gloadimage(CellImage *img, int cw, int ch) {
-	if (img->loaded_image && img->loaded_ch == ch && img->loaded_cw == cw)
+	if (img->scaled_image && img->scaled_ch == ch && img->scaled_cw == cw)
 		return;
 	gunloadimage(img);
 
@@ -132,27 +138,47 @@ static void gloadimage(CellImage *img, int cw, int ch) {
 	int orig_w = imlib_image_get_width();
 	int orig_h = imlib_image_get_height();
 
-	int loaded_w = (int)img->cols*cw;
-	int loaded_h = (int)img->rows*ch;
-	img->loaded_image = imlib_create_image(loaded_w, loaded_h);
-	if (!img->loaded_image) {
+	int scaled_w = (int)img->cols*cw;
+	int scaled_h = (int)img->rows*ch;
+	img->scaled_image = imlib_create_image(scaled_w, scaled_h);
+	if (!img->scaled_image) {
 		fprintf(stderr, "error: imlib_create_image returned null\n");
 		return;
 	}
-	imlib_context_set_image(img->loaded_image);
+	imlib_context_set_image(img->scaled_image);
 	imlib_image_set_has_alpha(1);
 	imlib_context_set_blend(0);
 	imlib_context_set_color(0, 0, 0, 0);
 	imlib_image_fill_rectangle(0, 0, (int)img->cols*cw, (int)img->rows*ch);
 	imlib_context_set_blend(1);
-	imlib_blend_image_onto_image(image, 1, 0, 0, orig_w, orig_h, 0, 0, loaded_w,
-								 loaded_h);
+	if (img->scale_mode == SCALE_MODE_FILL) {
+		imlib_blend_image_onto_image(image, 1, 0, 0, orig_w, orig_h, 0, 0, scaled_w,
+									 scaled_h);
+	}
+	else {
+		int dest_x, dest_y;
+		int dest_w, dest_h;
+		if (scaled_w*orig_h > orig_w*scaled_h) {
+			// If the box is wider than the original image, fit to height.
+			dest_h = scaled_h;
+			dest_y = 0;
+			dest_w = orig_w * scaled_h / orig_h;
+			dest_x = (scaled_w - dest_w) / 2;
+		} else {
+			// Otherwise, fit to width.
+			dest_w = scaled_w;
+			dest_x = 0;
+			dest_h = orig_h * scaled_w / orig_w;
+			dest_y = (scaled_h - dest_h) / 2;
+		}
+		imlib_blend_image_onto_image(image, 1, 0, 0, orig_w, orig_h, dest_x, dest_y, dest_w, dest_h);
+	}
 
 	imlib_context_set_image(image);
 	imlib_free_image();
 
-	img->loaded_ch = ch;
-	img->loaded_cw = cw;
+	img->scaled_ch = ch;
+	img->scaled_cw = cw;
 	cell_images_ram_size += gimageramsize(img);
 }
 
@@ -163,19 +189,19 @@ void gdrawimagestripe(Drawable buf, uint32_t image_id, int start_col, int end_co
 	if (image_id == 0)
 		image_id = last_image_id;
 	CellImage *cell_image = gfindimage(image_id);
-	Imlib_Image loaded_image;
+	Imlib_Image scaled_image;
 	if (!cell_image) {
 		return;
 	}
 	gloadimage(cell_image, cw, ch);
 	gtouchimage(cell_image);
 
-	if (!cell_image->loaded_image) {
+	if (!cell_image->scaled_image) {
 		fprintf(stderr, "error: could not load image %d\n", image_id);
 		return;
 	}
 
-	imlib_context_set_image(cell_image->loaded_image);
+	imlib_context_set_image(cell_image->scaled_image);
 	imlib_context_set_drawable(buf);
 	if (reverse) {
 		Imlib_Color_Modifier cm = imlib_create_color_modifier();
