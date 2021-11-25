@@ -65,6 +65,12 @@ with open("./rowcolumn_diacritics_helpers.c", "w") as file:
     print("\treturn 0;", file=file)
     print("}", file=file)
 
+with open("./rowcolumn_diacritics.sh", "w") as file:
+    print("ROWCOLUMN_DIACRITICS=(", file=file, end="")
+    for code in codes:
+        print('"\\U' + format(code, 'x') + '" ', file=file, end="")
+    print(")", file=file)
+
 with open("./cell-image-placeholder.txt", "w") as file:
     img_char = chr(0xEEEE)
     for row_code in codes:

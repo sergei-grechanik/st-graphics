@@ -60,6 +60,7 @@ static void zoom(const Arg *);
 static void zoomabs(const Arg *);
 static void zoomreset(const Arg *);
 static void ttysend(const Arg *);
+static void previewimage(const Arg *);
 
 /* config.h for applying patches and the configuration. */
 #include "config.h"
@@ -228,6 +229,7 @@ static DC dc;
 static XWindow xw;
 static XSelection xsel;
 static TermWindow win;
+static unsigned int mouse_col = 0, mouse_row = 0;
 
 /* Font Ring Cache */
 enum {
@@ -334,6 +336,16 @@ void
 ttysend(const Arg *arg)
 {
 	ttywrite(arg->s, strlen(arg->s), 1);
+}
+
+void
+previewimage(const Arg *arg)
+{
+	Glyph g = getglyphat(mouse_col, mouse_row);
+	if (g.mode & ATTR_IMAGE) {
+		uint32_t image_id = g.fg & 0xFFFFFF;
+		gpreviewimage(image_id, arg->s);
+	}
 }
 
 int
@@ -452,6 +464,9 @@ mouseaction(XEvent *e, uint release)
 
 	/* ignore Button<N>mask for Button<N> - it's set on release */
 	uint state = e->xbutton.state & ~buttonmask(e->xbutton.button);
+
+	mouse_col = evcol(e);
+	mouse_row = evrow(e);
 
 	for (ms = mshortcuts; ms < mshortcuts + LEN(mshortcuts); ms++) {
 		if (ms->release == release &&

@@ -106,6 +106,8 @@ void selextend(int, int, int, int);
 int selected(int, int);
 char *getsel(void);
 
+Glyph getglyphat(int, int);
+
 size_t utf8encode(Rune, char *);
 char *base64dec(const char *src);
 

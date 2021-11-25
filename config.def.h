@@ -179,6 +179,8 @@ static MouseShortcut mshortcuts[] = {
 	{ XK_ANY_MOD,           Button4, ttysend,        {.s = "\031"} },
 	{ ShiftMask,            Button5, ttysend,        {.s = "\033[6;2~"} },
 	{ XK_ANY_MOD,           Button5, ttysend,        {.s = "\005"} },
+	// Ctrl+Shift+RightClick to preview image in feh.
+	{ ControlMask|ShiftMask,Button3, previewimage,   {.s = "feh"} },
 };
 
 /* Internal keyboard shortcuts. */

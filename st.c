@@ -2655,3 +2655,9 @@ redraw(void)
 	tfulldirt();
 	draw();
 }
+
+Glyph
+getglyphat(int col, int row)
+{
+	return term.line[row][col];
+}

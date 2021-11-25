@@ -182,6 +182,19 @@ static void gloadimage(CellImage *img, int cw, int ch) {
 	cell_images_ram_size += gimageramsize(img);
 }
 
+void gpreviewimage(uint32_t image_id, const char *exec) {
+	char command[256];
+	CellImage *img = gfindimage(image_id);
+	if (img) {
+		char filename[MAX_FILENAME_SIZE];
+		gimagefilename(img, filename, MAX_FILENAME_SIZE);
+		snprintf(command, 255, "%s %s", exec, filename);
+	} else {
+		snprintf(command, 255, "xmessage 'Cannot find image with id=%u'", image_id);
+	}
+	(void)system(command);
+}
+
 void gdrawimagestripe(Drawable buf, uint32_t image_id, int start_col, int end_col, int row,
 					  int x_pix, int y_pix, int cw, int ch, int reverse)
 {
