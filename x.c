@@ -2176,5 +2176,7 @@ run:
 	selinit();
 	run();
 
+	graphicsdeinit();
+
 	return 0;
 }

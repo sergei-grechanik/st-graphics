@@ -9,11 +9,10 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <assert.h>
+#include <ctype.h>
 
 #include "graphics.h"
 
-// Defined in st.c
-char *base64dec(const char *src);
 
 #define MAX_FILENAME_SIZE 256
 #define MAX_CELL_IMAGES 256
@@ -33,10 +32,16 @@ typedef struct {
 	char scale_mode;
 } CellImage;
 
+static CellImage *gfindimage(uint32_t image_id);
+static void gimagefilename(CellImage *img, char *out, size_t max_len);
+static void gdeleteimage(CellImage *img);
+static char *gbase64dec(const char *src, size_t *size);
+
 static CellImage cell_images[MAX_CELL_IMAGES] = {{0}};
 static unsigned cell_images_disk_size = 0;
 static unsigned cell_images_ram_size = 0;
 static uint32_t last_image_id = 0;
+static uint32_t current_upload_image_id = 0;
 static char temp_dir[] = "/tmp/st-images-XXXXXX";
 static unsigned char reverse_table[256];
 
@@ -58,6 +63,12 @@ void graphicsinit(Display *disp, Visual *vis, Colormap cm)
 		reverse_table[i] = 255 - i;
 }
 
+void graphicsdeinit() {
+	for (size_t i = 0; i < MAX_CELL_IMAGES; ++i)
+		gdeleteimage(&cell_images[i]);
+	remove(temp_dir);
+}
+
 static CellImage *gfindimage(uint32_t image_id) {
 	if (!image_id)
 		return NULL;
@@ -69,7 +80,7 @@ static CellImage *gfindimage(uint32_t image_id) {
 }
 
 static void gimagefilename(CellImage *img, char *out, size_t max_len) {
-	snprintf(out, max_len, "%s/img-%d", temp_dir, img->image_id);
+	snprintf(out, max_len, "%s/img-%.3d", temp_dir, img->image_id);
 }
 
 static unsigned gimageramsize(CellImage *img) {
@@ -188,17 +199,49 @@ void gpreviewimage(uint32_t image_id, const char *exec) {
 	if (img) {
 		char filename[MAX_FILENAME_SIZE];
 		gimagefilename(img, filename, MAX_FILENAME_SIZE);
-		snprintf(command, 255, "%s %s", exec, filename);
+		if (snprintf(command, 255, "%s %s", exec, filename) > 255) {
+			fprintf(stderr, "error: command too long: %s\n", command);
+			return;
+		}
 	} else {
 		snprintf(command, 255, "xmessage 'Cannot find image with id=%u'", image_id);
 	}
-	(void)system(command);
+	if (system(command) != 0)
+		fprintf(stderr, "error: could not execute command %s\n", command);
+}
+
+void gappenddata(CellImage *img, const char *payload, int more) {
+	if (!img)
+		img = gfindimage(current_upload_image_id);
+	if (!img) {
+		fprintf(stderr, "error: don't know which image to append data to\n");
+		return;
+	}
+	size_t data_size = 0;
+	char *data = gbase64dec(payload, &data_size);
+	char filename[MAX_FILENAME_SIZE];
+	gimagefilename(img, filename, MAX_FILENAME_SIZE);
+	FILE *file = fopen(filename, img->disk_size ? "a" : "w");
+	if (!file) {
+		fprintf(stderr, "error: couldn't open file to append data: %s\n", filename);
+		return;
+	}
+	fwrite(data, 1, data_size, file);
+	img->disk_size += data_size;
+	fprintf(stderr, "%d(%d) ", data_size, strlen(payload));
+	if (!more)
+		fprintf(stderr, "\nDisk size: %d\n", img->disk_size);
+	fclose(file);
+	free(data);
+	if (more)
+		current_upload_image_id = img->image_id;
+	else
+		current_upload_image_id = 0;
 }
 
 void gdrawimagestripe(Drawable buf, uint32_t image_id, int start_col, int end_col, int row,
 					  int x_pix, int y_pix, int cw, int ch, int reverse)
 {
-	fprintf(stderr, "stripe [%d;%d):%d at (%d, %d)\n", start_col, end_col, row, x_pix, y_pix);
 	if (image_id == 0)
 		image_id = last_image_id;
 	CellImage *cell_image = gfindimage(image_id);
@@ -248,6 +291,7 @@ typedef struct {
 	uint32_t image_id;
 	uint32_t image_number;
 	uint32_t placement_id;
+	int has_more;
 	int more;
 	int error;
 } GraphicsCommand;
@@ -271,13 +315,19 @@ static void gtransmitdata(GraphicsCommand *cmd) {
 		if (!img)
 			return;
 		last_image_id = cmd->image_id;
-		char *filename = base64dec(cmd->payload);
+		char *filename = gbase64dec(cmd->payload, NULL);
 		char tmp_filename[MAX_FILENAME_SIZE];
 		gimagefilename(img, tmp_filename, MAX_FILENAME_SIZE);
 		if (symlink(filename, tmp_filename)) {
 			fprintf(stderr, "error: could not create a symlink from %s to %s\n", filename, tmp_filename);
 		}
 		free(filename);
+	} else if (cmd->transmission_medium == 'd') {
+		img = gnewimagewithid(cmd->image_id);
+		if (!img)
+			return;
+		last_image_id = cmd->image_id;
+		gappenddata(img, cmd->payload, cmd->more);
 	} else {
 		fprintf(stderr, "error: transmission medium '%c' is not supported: %s\n", cmd->transmission_medium, cmd->command);
 		cmd->error = 1;
@@ -291,9 +341,13 @@ static void gtransmitdata(GraphicsCommand *cmd) {
 static void gruncommand(GraphicsCommand *cmd) {
 	switch (cmd->action) {
 		case 0:
-			fprintf(stderr, "error: no action specified: %s\n", cmd->command);
-			cmd->error = 1;
-			return;
+			if (cmd->has_more) {
+				gappenddata(NULL, cmd->payload, cmd->more);
+			} else {
+				fprintf(stderr, "error: no action specified: %s\n", cmd->command);
+				cmd->error = 1;
+			}
+			break;
 		case 't':
 			gtransmitdata(cmd);
 			break;
@@ -365,6 +419,10 @@ static void gsetkeyvalue(GraphicsCommand *cmd, char *key_start, char *key_end, c
 		case 'r':
 			cmd->rows = num;
 			break;
+		case 'm':
+			cmd->has_more = 1;
+			cmd->more = num;
+			break;
 		default:
 			fprintf(stderr, "error: unsupported key: %s\n", key_start);
 			cmd->error = 1;
@@ -432,4 +490,58 @@ int gparsecommand(char *buf, size_t len) {
 
 	gruncommand(&cmd);
 	return 1;
+}
+
+static const char g_base64_digits[] = {
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 62, 0, 0, 0,
+	63, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 0, 0, 0, -1, 0, 0, 0, 0, 1,
+	2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+	22, 23, 24, 25, 0, 0, 0, 0, 0, 0, 26, 27, 28, 29, 30, 31, 32, 33, 34,
+	35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+};
+
+static char
+gbase64dec_getc(const char **src)
+{
+	while (**src && !isprint(**src))
+		(*src)++;
+	return **src ? *((*src)++) : '=';  /* emulate padding if string ends */
+}
+
+char *
+gbase64dec(const char *src, size_t *size)
+{
+	size_t in_len = strlen(src);
+	char *result, *dst;
+
+	result = dst = malloc((in_len + 3) / 4 * 3 + 1);
+	while (*src) {
+		int a = g_base64_digits[(unsigned char) gbase64dec_getc(&src)];
+		int b = g_base64_digits[(unsigned char) gbase64dec_getc(&src)];
+		int c = g_base64_digits[(unsigned char) gbase64dec_getc(&src)];
+		int d = g_base64_digits[(unsigned char) gbase64dec_getc(&src)];
+
+		if (a == -1 || b == -1)
+			break;
+
+		*dst++ = (a << 2) | ((b & 0x30) >> 4);
+		if (c == -1)
+			break;
+		*dst++ = ((b & 0x0f) << 4) | ((c & 0x3c) >> 2);
+		if (d == -1)
+			break;
+		*dst++ = ((c & 0x03) << 6) | d;
+	}
+	*dst = '\0';
+	if (size) {
+		*size = dst - result;
+	}
+	return result;
 }

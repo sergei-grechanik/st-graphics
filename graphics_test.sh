@@ -94,3 +94,30 @@ for row in `seq 0 9`; do
     line 0 19 $row
     echo
 done
+
+
+TMPDIR="$(mktemp -d)"
+test_direct() {
+    rm $TMPDIR/chunk_* 2> /dev/null
+    cat neuschwanstein.jpg | base64 -w0 | split -b $1 - "$TMPDIR/chunk_"
+    local FIRST=1
+    for CHUNK in $TMPDIR/chunk_*; do
+        if [[ -n "$FIRST" ]]; then
+            echo -en "\e_Ga=t,t=d,i=$2,r=4,c=29,m=1;"
+            cat $CHUNK
+            echo -en "\e\\"
+        else
+            echo -en "\e_Gm=1;"
+            cat $CHUNK
+            echo -en "\e\\"
+        fi
+        FIRST=""
+    done
+    echo -en "\e_Gm=0;\e\\"
+    ID=$2
+    box 0 28 0 3
+}
+
+test_direct 4096 9
+test_direct 1000 10
+test_direct 100000 11

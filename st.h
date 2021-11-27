@@ -109,7 +109,6 @@ char *getsel(void);
 Glyph getglyphat(int, int);
 
 size_t utf8encode(Rune, char *);
-char *base64dec(const char *src);
 
 void *xmalloc(size_t);
 void *xrealloc(void *, size_t);
