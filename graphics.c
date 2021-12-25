@@ -17,9 +17,16 @@
 #define MAX_FILENAME_SIZE 256
 #define MAX_CELL_IMAGES 256
 
-enum scale_mode {
+enum ScaleMode {
 	SCALE_MODE_CONTAIN = 0,
 	SCALE_MODE_FILL = 1
+};
+
+enum ImageStatus {
+	STATUS_UNINITIALIZED = 0,
+	STATUS_UPLOADING = 1,
+	STATUS_ON_DISK = 2,
+	STATUS_IN_RAM = 3
 };
 
 typedef struct {
@@ -27,14 +34,19 @@ typedef struct {
 	uint16_t rows, cols;
 	time_t atime;
 	unsigned disk_size;
-	Imlib_Image scaled_image;
-	uint16_t scaled_cw, scaled_ch;
 	char scale_mode;
+	char status;
+	uint16_t scaled_cw, scaled_ch;
+	union {
+		Imlib_Image scaled_image;
+		FILE *open_file;
+	};
 } CellImage;
 
 static CellImage *gfindimage(uint32_t image_id);
 static void gimagefilename(CellImage *img, char *out, size_t max_len);
 static void gdeleteimage(CellImage *img);
+static void gchecklimits();
 static char *gbase64dec(const char *src, size_t *size);
 
 static CellImage cell_images[MAX_CELL_IMAGES] = {{0}};
@@ -42,8 +54,15 @@ static unsigned cell_images_disk_size = 0;
 static unsigned cell_images_ram_size = 0;
 static uint32_t last_image_id = 0;
 static uint32_t current_upload_image_id = 0;
+static time_t last_uploading_time = 0;
 static char temp_dir[] = "/tmp/st-images-XXXXXX";
 static unsigned char reverse_table[256];
+static size_t max_image_disk_size = 20 * 1024 * 1024;
+static size_t max_total_disk_size = 300 * 1024 * 1024;
+static size_t max_total_ram_size = 300 * 1024 * 1024;
+
+int graphics_uploading = 0;
+int graphics_command_needs_redraw = 0;
 
 void graphicsinit(Display *disp, Visual *vis, Colormap cm)
 {
@@ -88,22 +107,47 @@ static unsigned gimageramsize(CellImage *img) {
 }
 
 static void gunloadimage(CellImage *img) {
-	if (!img->scaled_image)
+	if (img->status != STATUS_IN_RAM || !img->scaled_image)
 		return;
 	imlib_context_set_image(img->scaled_image);
 	imlib_free_image();
 	cell_images_ram_size -= gimageramsize(img);
 	img->scaled_image = NULL;
 	img->scaled_ch = img->scaled_cw = 0;
+	img->status = STATUS_ON_DISK;
 }
 
 static void gdeleteimage(CellImage *img) {
 	gunloadimage(img);
+	if (img->status == STATUS_UPLOADING && img->open_file) {
+		fclose(img->open_file);
+	}
 	char filename[MAX_FILENAME_SIZE];
 	gimagefilename(img, filename, MAX_FILENAME_SIZE);
 	remove(filename);
 	cell_images_disk_size -= img->disk_size;
 	memset(img, 0, sizeof(CellImage));
+}
+
+static CellImage *getoldestimage() {
+	CellImage *oldest_image = NULL;
+	for (size_t i = 0; i < MAX_CELL_IMAGES; ++i) {
+		CellImage *img = &cell_images[i];
+		if (img->image_id == 0)
+			continue;
+		if (!oldest_image || difftime(img->atime, oldest_image->atime) < 0)
+			oldest_image = img;
+	}
+	return oldest_image;
+}
+
+static void gchecklimits() {
+	fprintf(stderr, "before ram: %u disk: %u\n", cell_images_ram_size, cell_images_disk_size);
+	while (cell_images_disk_size > max_total_disk_size)
+		gdeleteimage(getoldestimage());
+	while (cell_images_ram_size > max_total_ram_size)
+		gunloadimage(getoldestimage());
+	fprintf(stderr, "after ram: %u disk: %u\n", cell_images_ram_size, cell_images_disk_size);
 }
 
 static CellImage *gnewimage() {
@@ -134,7 +178,10 @@ static void gtouchimage(CellImage* img) {
 }
 
 static void gloadimage(CellImage *img, int cw, int ch) {
-	if (img->scaled_image && img->scaled_ch == ch && img->scaled_cw == cw)
+	if (img->status == STATUS_IN_RAM && img->scaled_image &&
+		img->scaled_ch == ch && img->scaled_cw == cw)
+		return;
+	if (img->status < STATUS_ON_DISK)
 		return;
 	gunloadimage(img);
 
@@ -162,11 +209,12 @@ static void gloadimage(CellImage *img, int cw, int ch) {
 	imlib_context_set_color(0, 0, 0, 0);
 	imlib_image_fill_rectangle(0, 0, (int)img->cols*cw, (int)img->rows*ch);
 	imlib_context_set_blend(1);
-	if (img->scale_mode == SCALE_MODE_FILL) {
+	if (orig_w == 0 || orig_h == 0) {
+		fprintf(stderr, "warning: image of zero size\n");
+	} else if (img->scale_mode == SCALE_MODE_FILL) {
 		imlib_blend_image_onto_image(image, 1, 0, 0, orig_w, orig_h, 0, 0, scaled_w,
 									 scaled_h);
-	}
-	else {
+	} else {
 		int dest_x, dest_y;
 		int dest_w, dest_h;
 		if (scaled_w*orig_h > orig_w*scaled_h) {
@@ -191,20 +239,27 @@ static void gloadimage(CellImage *img, int cw, int ch) {
 	img->scaled_ch = ch;
 	img->scaled_cw = cw;
 	cell_images_ram_size += gimageramsize(img);
+	img->status = STATUS_IN_RAM;
 }
 
 void gpreviewimage(uint32_t image_id, const char *exec) {
 	char command[256];
+	size_t len;
 	CellImage *img = gfindimage(image_id);
 	if (img) {
 		char filename[MAX_FILENAME_SIZE];
 		gimagefilename(img, filename, MAX_FILENAME_SIZE);
-		if (snprintf(command, 255, "%s %s", exec, filename) > 255) {
-			fprintf(stderr, "error: command too long: %s\n", command);
-			return;
+		if (img->status < STATUS_ON_DISK) {
+			len = snprintf(command, 255, "xmessage 'Image with id=%u is not fully copied to %s'", image_id, filename);
+		} else {
+			len = snprintf(command, 255, "%s %s", exec, filename);
 		}
 	} else {
-		snprintf(command, 255, "xmessage 'Cannot find image with id=%u'", image_id);
+		len = snprintf(command, 255, "xmessage 'Cannot find image with id=%u'", image_id);
+	}
+	if (len > 255) {
+		fprintf(stderr, "error: command too long: %s\n", command);
+		snprintf(command, 255, "xmessage 'error: command too long'");
 	}
 	if (system(command) != 0)
 		fprintf(stderr, "error: could not execute command %s\n", command);
@@ -217,47 +272,87 @@ void gappenddata(CellImage *img, const char *payload, int more) {
 		fprintf(stderr, "error: don't know which image to append data to\n");
 		return;
 	}
-	size_t data_size = 0;
-	char *data = gbase64dec(payload, &data_size);
-	char filename[MAX_FILENAME_SIZE];
-	gimagefilename(img, filename, MAX_FILENAME_SIZE);
-	FILE *file = fopen(filename, img->disk_size ? "a" : "w");
-	if (!file) {
-		fprintf(stderr, "error: couldn't open file to append data: %s\n", filename);
+	if (img->status != STATUS_UPLOADING) {
+		fprintf(stderr, "error: can't append data to image because it is not being uploaded\n");
 		return;
 	}
-	fwrite(data, 1, data_size, file);
-	img->disk_size += data_size;
-	fprintf(stderr, "%d(%d) ", data_size, strlen(payload));
-	if (!more)
-		fprintf(stderr, "\nDisk size: %d\n", img->disk_size);
-	fclose(file);
-	free(data);
-	if (more)
-		current_upload_image_id = img->image_id;
-	else
+	size_t data_size = 0;
+	char *data = gbase64dec(payload, &data_size);
+	fprintf(stderr, "appending %u -> %u\n", data_size, img->disk_size + data_size);
+	if (img->disk_size + data_size > max_image_disk_size) {
+		free(data);
+		fprintf(stderr, "error: the size of the image is over the limit\n");
+		gdeleteimage(img);
 		current_upload_image_id = 0;
+		return;
+	}
+	if (!img->open_file) {
+		char filename[MAX_FILENAME_SIZE];
+		gimagefilename(img, filename, MAX_FILENAME_SIZE);
+		FILE *file = fopen(filename, img->disk_size ? "a" : "w");
+		if (!file) {
+			fprintf(stderr, "error: couldn't open file to append data: %s\n", filename);
+			return;
+		}
+		img->open_file = file;
+	}
+	fwrite(data, 1, data_size, img->open_file);
+	free(data);
+	img->disk_size += data_size;
+	cell_images_disk_size += data_size;
+	gtouchimage(img);
+	if (more) {
+		current_upload_image_id = img->image_id;
+		time(&last_uploading_time);
+	} else {
+		current_upload_image_id = 0;
+		img->status = STATUS_ON_DISK;
+		if (img->open_file)
+			fclose(img->open_file);
+		graphics_uploading--;
+	}
+	gchecklimits();
+}
+
+/// Checks if we are still really uploading something. Returns 1 if we may be
+/// and 0 if we aren't. If certain amount of time has passed since the last data
+/// transmission command, we assume that all all uploads have failed.
+int gcheckifstilluploading() {
+	if (!graphics_uploading)
+		return 0;
+	time_t cur_time;
+	time(&cur_time);
+	double dt = difftime(last_uploading_time, cur_time);
+	if (difftime(last_uploading_time, cur_time) < -1.0)
+		graphics_uploading = 0;
+	return graphics_uploading;
 }
 
 void gdrawimagestripe(Drawable buf, uint32_t image_id, int start_col, int end_col, int row,
 					  int x_pix, int y_pix, int cw, int ch, int reverse)
 {
-	if (image_id == 0)
-		image_id = last_image_id;
-	CellImage *cell_image = gfindimage(image_id);
-	Imlib_Image scaled_image;
-	if (!cell_image) {
+	// If we are uploading data then we shouldn't do heavy computation (like
+	// displaying graphics), mostly because some versions of tmux may drop
+	// pass-through commands if the terminal is too slow.
+    if (graphics_uploading)
 		return;
-	}
-	gloadimage(cell_image, cw, ch);
-	gtouchimage(cell_image);
 
-	if (!cell_image->scaled_image) {
+    if (image_id == 0) image_id = last_image_id;
+    CellImage *img = gfindimage(image_id);
+    Imlib_Image scaled_image;
+    if (!img) {
+	return;
+	}
+	gloadimage(img, cw, ch);
+
+	if (img->status != STATUS_IN_RAM || !img->scaled_image) {
 		fprintf(stderr, "error: could not load image %d\n", image_id);
 		return;
 	}
 
-	imlib_context_set_image(cell_image->scaled_image);
+	gtouchimage(img);
+
+	imlib_context_set_image(img->scaled_image);
 	imlib_context_set_drawable(buf);
 	if (reverse) {
 		Imlib_Color_Modifier cm = imlib_create_color_modifier();
@@ -320,6 +415,8 @@ static void gtransmitdata(GraphicsCommand *cmd) {
 		gimagefilename(img, tmp_filename, MAX_FILENAME_SIZE);
 		if (symlink(filename, tmp_filename)) {
 			fprintf(stderr, "error: could not create a symlink from %s to %s\n", filename, tmp_filename);
+		} else {
+			img->status = STATUS_ON_DISK;
 		}
 		free(filename);
 	} else if (cmd->transmission_medium == 'd') {
@@ -327,6 +424,8 @@ static void gtransmitdata(GraphicsCommand *cmd) {
 		if (!img)
 			return;
 		last_image_id = cmd->image_id;
+		img->status = STATUS_UPLOADING;
+		graphics_uploading++;
 		gappenddata(img, cmd->payload, cmd->more);
 	} else {
 		fprintf(stderr, "error: transmission medium '%c' is not supported: %s\n", cmd->transmission_medium, cmd->command);
@@ -431,6 +530,11 @@ static void gsetkeyvalue(GraphicsCommand *cmd, char *key_start, char *key_end, c
 }
 
 int gparsecommand(char *buf, size_t len) {
+	graphics_command_needs_redraw = 0;
+
+	static int cmdnum = 0;
+	fprintf(stderr, "--------------------- Command %d -----------\n", cmdnum++);
+	static clock_t start, end;
 	if (buf[0] != 'G')
 		return 0;
 	++buf;
@@ -489,6 +593,9 @@ int gparsecommand(char *buf, size_t len) {
 		return 1;
 
 	gruncommand(&cmd);
+	end = clock();
+	fprintf(stderr, "time: %lg ram: %u disk: %u\n", (((double) (end - start))*1000 / CLOCKS_PER_SEC), cell_images_ram_size, cell_images_disk_size);
+	start = end;
 	return 1;
 }
 

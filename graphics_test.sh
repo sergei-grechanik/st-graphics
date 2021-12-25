@@ -1,5 +1,37 @@
 #!/bin/bash
 
+stty_orig=`stty -g`
+stty -echo
+stty susp undef
+
+cleanup() {
+    stty $stty_orig
+}
+
+trap cleanup EXIT TERM
+
+INSIDE_TMUX=""
+if [[ -n "$TMUX" ]] && [[ "$TERM" =~ "screen" ]]; then
+    INSIDE_TMUX="1"
+fi
+
+if [[ -n "$INSIDE_TMUX" ]]; then
+    # If we are in tmux we have to wrap the command in Ptmux.
+    start_gr_command() {
+        echo -en '\ePtmux;\e\e_G'
+    }
+    end_gr_command() {
+        echo -en '\e\e\\\e\\'
+    }
+else
+    start_gr_command() {
+        echo -en '\e_G'
+    }
+    end_gr_command() {
+        echo -en '\e\\'
+    }
+fi
+
 . rowcolumn_diacritics.sh
 
 [[ -f wikipedia.png ]] || \
@@ -30,13 +62,15 @@ setimg() {
     echo -en "\e[38;5;${1}m"
 }
 
-echo -en "\e_Ga=t,t=f,i=1,r=10,c=20;"
+start_gr_command
+echo -n "a=t,t=f,i=1,r=10,c=20;"
 echo -n "$(realpath wikipedia.png | tr -d '\n' | base64 -w0)"
-echo -en "\e\\"
+end_gr_command
 
-echo -en "\e_Ga=t,i=2,r=10,t=f,c=72;"
+start_gr_command
+echo -n "a=t,i=2,r=10,t=f,c=72;"
 echo -n "$(realpath neuschwanstein.jpg | tr -d '\n' | base64 -w0)"
-echo -en "\e\\"
+end_gr_command
 
 ID=1
 BG=2
@@ -48,25 +82,30 @@ box 0 71 0 9 > _2.txt
 
 paste -d "" _1.txt _2.txt
 
-echo -en "\e_Ga=t,t=f,i=3,r=1,c=1;"
+start_gr_command
+echo -n "a=t,t=f,i=3,r=1,c=1;"
 echo -n "$(realpath wikipedia.png | tr -d '\n' | base64 -w0)"
-echo -en "\e\\"
+end_gr_command
 
-echo -en "\e_Ga=t,t=f,i=4,r=1,c=2;"
+start_gr_command
+echo -n "a=t,t=f,i=4,r=1,c=2;"
 echo -n "$(realpath wikipedia.png | tr -d '\n' | base64 -w0)"
-echo -en "\e\\"
+end_gr_command
 
-echo -en "\e_Ga=t,t=f,i=5,r=2,c=1;"
+start_gr_command
+echo -n "a=t,t=f,i=5,r=2,c=1;"
 echo -n "$(realpath wikipedia.png | tr -d '\n' | base64 -w0)"
-echo -en "\e\\"
+end_gr_command
 
-echo -en "\e_Ga=t,t=f,i=6,r=2,c=2;"
+start_gr_command
+echo -n "a=t,t=f,i=6,r=2,c=2;"
 echo -n "$(realpath wikipedia.png | tr -d '\n' | base64 -w0)"
-echo -en "\e\\"
+end_gr_command
 
-echo -en "\e_Ga=t,t=f,i=7,r=1,c=10;"
+start_gr_command
+echo -n "a=t,t=f,i=7,r=1,c=10;"
 echo -n "$(realpath wikipedia.png | tr -d '\n' | base64 -w0)"
-echo -en "\e\\"
+end_gr_command
 
 BG=1
 
@@ -84,9 +123,10 @@ ID=6
 box 0 1 0 1 > _2.txt
 paste -d "" _1.txt _2.txt
 
-echo -en "\e_Ga=t,t=f,i=8,r=10,c=20;"
+start_gr_command
+echo -n "a=t,t=f,i=8,r=10,c=20;"
 echo -n "$(realpath transparency.png | tr -d '\n' | base64 -w0)"
-echo -en "\e\\"
+end_gr_command
 
 ID=8
 for row in `seq 0 9`; do
@@ -100,24 +140,28 @@ TMPDIR="$(mktemp -d)"
 test_direct() {
     rm $TMPDIR/chunk_* 2> /dev/null
     cat neuschwanstein.jpg | base64 -w0 | split -b $1 - "$TMPDIR/chunk_"
-    local FIRST=1
+    echo ======
+    start_gr_command
+    echo -n "a=t,t=d,i=$2,r=4,c=29,m=1;"
+    end_gr_command
+    # We need to wait a bit before we start transmission, in the script it will
+    # be done using the read or something like this
+    sleep 0.3
     for CHUNK in $TMPDIR/chunk_*; do
-        if [[ -n "$FIRST" ]]; then
-            echo -en "\e_Ga=t,t=d,i=$2,r=4,c=29,m=1;"
-            cat $CHUNK
-            echo -en "\e\\"
-        else
-            echo -en "\e_Gm=1;"
-            cat $CHUNK
-            echo -en "\e\\"
-        fi
-        FIRST=""
+        start_gr_command
+        echo -n "m=1;"
+        cat $CHUNK
+        end_gr_command
     done
-    echo -en "\e_Gm=0;\e\\"
+    start_gr_command
+    echo -n "m=0;"
+    end_gr_command
     ID=$2
     box 0 28 0 3
 }
 
-test_direct 4096 9
-test_direct 1000 10
-test_direct 100000 11
+test_directs() {
+    test_direct 3800 9
+}
+
+test_directs

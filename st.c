@@ -19,8 +19,7 @@
 
 #include "st.h"
 #include "win.h"
-
-int gparsecommand(char *buf, size_t len);
+#include "graphics.h"
 
 #if   defined(__linux)
  #include <pty.h>
@@ -1924,8 +1923,11 @@ strhandle(void)
 		xsettitle(strescseq.args[0]);
 		return;
 	case '_': /* APC -- Application Program Command */
-		if (gparsecommand(strescseq.buf, strescseq.len))
+		if (gparsecommand(strescseq.buf, strescseq.len)) {
+			if (graphics_command_needs_redraw)
+				redraw();
 			return;
+		}
 		return;
 	case 'P': /* DCS -- Device Control String */
 	case '^': /* PM -- Privacy Message */
