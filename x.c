@@ -61,6 +61,7 @@ static void zoomabs(const Arg *);
 static void zoomreset(const Arg *);
 static void ttysend(const Arg *);
 static void previewimage(const Arg *);
+static void togglegrdebug(const Arg *);
 
 /* config.h for applying patches and the configuration. */
 #include "config.h"
@@ -346,6 +347,12 @@ previewimage(const Arg *arg)
 		uint32_t image_id = g.fg & 0xFFFFFF;
 		gpreviewimage(image_id, arg->s);
 	}
+}
+
+void
+togglegrdebug(const Arg *arg)
+{
+	graphics_debug_mode = !graphics_debug_mode;
 }
 
 int
@@ -1631,8 +1638,8 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 	}
 }
 
-/* Draw image cells between columns x1 and x2 assuming that they belong to the
- * same image id. */
+/* Draw (or queue for drawing) image cells between columns x1 and x2 assuming
+ * that they belong to the same image id. */
 void
 xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 	int x_pix_start = win.hborderpx + x1 * win.cw;
@@ -1660,8 +1667,8 @@ xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 		// line and start a new one.
 		if (cur_col != last_col + 1 || cur_row != last_row) {
 			if (last_row != 0)
-				gdrawimagestripe(xw.buf, image_id, last_start_col - 1, last_col,
-								 last_row - 1, x_pix, y_pix, win.cw, win.ch, base.mode & ATTR_REVERSE);
+				gr_appendimagerect(xw.buf, image_id, last_start_col - 1, last_col,
+								 last_row - 1, last_row, x_pix, y_pix, win.cw, win.ch, base.mode & ATTR_REVERSE);
 			last_start_col = cur_col;
 			x_pix = x_pix_start + i*win.cw;
 		}
@@ -1670,8 +1677,13 @@ xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 	}
 	// Draw the last contiguous stripe.
 	if (last_row != 0)
-		gdrawimagestripe(xw.buf, image_id, last_start_col - 1, last_col, last_row - 1,
+		gr_appendimagerect(xw.buf, image_id, last_start_col - 1, last_col, last_row - 1, last_row,
 						 x_pix, y_pix, win.cw, win.ch, base.mode & ATTR_REVERSE);
+}
+
+/* Draw all queued image cells. */
+void xfinishimagedraw() {
+	gr_drawimagerects(xw.buf);
 }
 
 void

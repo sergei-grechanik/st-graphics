@@ -72,6 +72,8 @@ echo -n "a=t,i=2,r=10,t=f,c=72;"
 echo -n "$(realpath neuschwanstein.jpg | tr -d '\n' | base64 -w0)"
 end_gr_command
 
+echo "Wikipedia logo and neuschwanstein side by side:"
+
 ID=1
 BG=2
 box 0 19 0 9 > _1.txt
@@ -81,6 +83,8 @@ BG=3
 box 0 71 0 9 > _2.txt
 
 paste -d "" _1.txt _2.txt
+
+echo "Wikipedia logo in different sizes:"
 
 start_gr_command
 echo -n "a=t,t=f,i=3,r=1,c=1;"
@@ -123,6 +127,8 @@ ID=6
 box 0 1 0 1 > _2.txt
 paste -d "" _1.txt _2.txt
 
+echo "Transparency test:"
+
 start_gr_command
 echo -n "a=t,t=f,i=8,r=10,c=20;"
 echo -n "$(realpath transparency.png | tr -d '\n' | base64 -w0)"
@@ -135,24 +141,62 @@ for row in `seq 0 9`; do
     echo
 done
 
+echo "Neuschwanstein with blocks of wikipedia inside:"
+
+BG=0
+
+N=0
+ID=2 line 0 71 $N; echo
+N=1
+ID=2 line 0 71 $N; echo
+N=2
+ID=2 line 0 9 $N; ID=1 line 5 14 $N; ID=2 line 20 29 $N; ID=1 line 5 14 $N; ID=2 line 40 71 $N; echo
+N=3
+ID=2 line 0 9 $N; ID=1 line 5 14 $N; ID=2 line 20 29 $N; ID=1 line 5 14 $N; ID=2 line 40 40 $N;
+ID=1 line 1 9 $N; ID=2 line 50 50 $N; ID=1 line 11 19 $N; ID=2 line 60 71 $N; echo
+N=4
+ID=2 line 0 9 $N; ID=1 line 5 14 $N; ID=2 line 20 29 $N; ID=1 line 5 14 $N; ID=2 line 40 40 $N;
+ID=1 line 1 9 $N; ID=2 line 50 50 $N; ID=1 line 11 19 $N; ID=2 line 60 71 $N; echo
+N=5
+ID=2 line 0 9 $N; ID=1 line 5 14 $N; ID=2 line 20 29 $N; ID=1 line 5 14 $N; ID=2 line 40 40 $N;
+ID=1 line 1 9 $N; ID=2 line 50 50 $N; ID=1 line 11 19 $N; ID=2 line 60 71 $N; echo
+N=6
+ID=2 line 0 40 $N; ID=1 line 1 19 $N; ID=2 line 60 71 $N; echo
+N=7
+ID=2 line 0 40 $N; ID=1 line 1 19 $N; ID=2 line 60 71 $N; echo
+N=8
+ID=2 line 0 40 $N; ID=1 line 1 19 7; ID=2 line 60 71 $N; echo
+N=9
+ID=2 line 0 40 $N; ID=1 line 1 9 8; ID=2 line 50 50 $N; ID=1 line 11 19 8; ID=2 line 60 71 $N; echo
+
+echo "Part of wiki logo, lower half indented:"
+
+ID=1 line 0 9 3; echo "aaaaaaaaaa"
+ID=1 line 0 9 4; echo "aaaaaaaaaa"
+echo -n "bbbbbbbbbb"; ID=1 line 0 9 5; echo
+echo -n "bbbbbbbbbb"; ID=1 line 0 9 6; echo
+
+echo "Direct uploading test:"
 
 TMPDIR="$(mktemp -d)"
 test_direct() {
     rm $TMPDIR/chunk_* 2> /dev/null
-    cat neuschwanstein.jpg | base64 -w0 | split -b $1 - "$TMPDIR/chunk_"
-    echo ======
+    file=neuschwanstein.jpg
+    cat "$file" | base64 -w0 | split -b $1 - "$TMPDIR/chunk_"
     start_gr_command
-    echo -n "a=t,t=d,i=$2,r=4,c=29,m=1;"
+    echo -n "a=t,t=d,i=$2,r=4,c=29,m=1,S=$(wc -c < "$file");"
     end_gr_command
     # We need to wait a bit before we start transmission, in the script it will
     # be done using the read or something like this
     sleep 0.3
-    for CHUNK in $TMPDIR/chunk_*; do
-        start_gr_command
-        echo -n "m=1;"
-        cat $CHUNK
-        end_gr_command
-    done
+    if [[ -z "$3" ]]; then
+        for CHUNK in $TMPDIR/chunk_*; do
+            start_gr_command
+            echo -n "m=1;"
+            cat $CHUNK
+            end_gr_command
+        done
+    fi
     start_gr_command
     echo -n "m=0;"
     end_gr_command
@@ -160,8 +204,24 @@ test_direct() {
     box 0 28 0 3
 }
 
-test_directs() {
-    test_direct 3800 9
-}
+test_direct 3800 9
 
-test_directs
+echo "Invalid image (broken uploading):"
+test_direct 3800 200 t
+
+echo "Invalid image (not uploaded):"
+
+BG=2
+ID=201
+box 0 20 0 1
+
+echo "Invalid image (non-image file):"
+
+start_gr_command
+echo -n "a=t,t=f,i=202,r=1,c=1;"
+echo -n "$(realpath README | tr -d '\n' | base64 -w0)"
+end_gr_command
+
+BG=3
+ID=202
+box 0 20 0 1

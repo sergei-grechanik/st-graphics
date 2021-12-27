@@ -1924,7 +1924,8 @@ strhandle(void)
 		return;
 	case '_': /* APC -- Application Program Command */
 		if (gparsecommand(strescseq.buf, strescseq.len)) {
-			if (graphics_command_needs_redraw)
+			GraphicsCommandResult *res = &graphics_command_result;
+			if (res->redraw)
 				redraw();
 			return;
 		}
@@ -2618,6 +2619,8 @@ drawregion(int x1, int y1, int x2, int y2)
 		term.dirty[y] = 0;
 		xdrawline(term.line[y], x1, y, x2);
 	}
+
+	xfinishimagedraw();
 }
 
 void

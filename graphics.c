@@ -15,7 +15,9 @@
 
 
 #define MAX_FILENAME_SIZE 256
+#define MAX_INFO_LEN 256
 #define MAX_CELL_IMAGES 256
+#define MAX_IMAGE_RECTS 20
 
 enum ScaleMode {
 	SCALE_MODE_CONTAIN = 0,
@@ -25,8 +27,9 @@ enum ScaleMode {
 enum ImageStatus {
 	STATUS_UNINITIALIZED = 0,
 	STATUS_UPLOADING = 1,
-	STATUS_ON_DISK = 2,
-	STATUS_IN_RAM = 3
+	STATUS_UPLOADING_ERROR = 2,
+	STATUS_ON_DISK = 3,
+	STATUS_IN_RAM = 4
 };
 
 typedef struct {
@@ -34,6 +37,7 @@ typedef struct {
 	uint16_t rows, cols;
 	time_t atime;
 	unsigned disk_size;
+	unsigned expected_size;
 	char scale_mode;
 	char status;
 	uint16_t scaled_cw, scaled_ch;
@@ -42,6 +46,14 @@ typedef struct {
 		FILE *open_file;
 	};
 } CellImage;
+
+typedef struct {
+	uint32_t image_id;
+	int x_pix, y_pix;
+	int start_col, end_col, start_row, end_row;
+	int cw, ch;
+	int reverse;
+} ImageRect;
 
 static CellImage *gfindimage(uint32_t image_id);
 static void gimagefilename(CellImage *img, char *out, size_t max_len);
@@ -61,8 +73,11 @@ static size_t max_image_disk_size = 20 * 1024 * 1024;
 static size_t max_total_disk_size = 300 * 1024 * 1024;
 static size_t max_total_ram_size = 300 * 1024 * 1024;
 
-int graphics_uploading = 0;
-int graphics_command_needs_redraw = 0;
+char graphics_debug_mode = 0;
+char graphics_uploading = 0;
+GraphicsCommandResult graphics_command_result = {0};
+
+static ImageRect image_rects[MAX_IMAGE_RECTS] = {{0}};
 
 void graphicsinit(Display *disp, Visual *vis, Colormap cm)
 {
@@ -121,6 +136,7 @@ static void gdeleteimage(CellImage *img) {
 	gunloadimage(img);
 	if (img->status == STATUS_UPLOADING && img->open_file) {
 		fclose(img->open_file);
+		img->open_file = NULL;
 	}
 	char filename[MAX_FILENAME_SIZE];
 	gimagefilename(img, filename, MAX_FILENAME_SIZE);
@@ -142,12 +158,20 @@ static CellImage *getoldestimage() {
 }
 
 static void gchecklimits() {
-	fprintf(stderr, "before ram: %u disk: %u\n", cell_images_ram_size, cell_images_disk_size);
-	while (cell_images_disk_size > max_total_disk_size)
+	if (graphics_debug_mode)
+		fprintf(stderr, "Checking limits ram: %u KiB disk: %u KiB\n", cell_images_ram_size/1024, cell_images_disk_size/1024);
+	char changed = 0;
+	while (cell_images_disk_size > max_total_disk_size) {
 		gdeleteimage(getoldestimage());
-	while (cell_images_ram_size > max_total_ram_size)
+		changed = 1;
+	}
+	while (cell_images_ram_size > max_total_ram_size) {
 		gunloadimage(getoldestimage());
-	fprintf(stderr, "after ram: %u disk: %u\n", cell_images_ram_size, cell_images_disk_size);
+		changed = 1;
+	}
+	if (graphics_debug_mode && changed) {
+		fprintf(stderr, "After cleaning ram: %u KiB disk: %u KiB\n", cell_images_ram_size/1024, cell_images_disk_size/1024);
+	}
 }
 
 static CellImage *gnewimage() {
@@ -278,7 +302,8 @@ void gappenddata(CellImage *img, const char *payload, int more) {
 	}
 	size_t data_size = 0;
 	char *data = gbase64dec(payload, &data_size);
-	fprintf(stderr, "appending %u -> %u\n", data_size, img->disk_size + data_size);
+	if (graphics_debug_mode)
+		fprintf(stderr, "appending %u + %zu = %zu bytes\n", img->disk_size, data_size, img->disk_size + data_size);
 	if (img->disk_size + data_size > max_image_disk_size) {
 		free(data);
 		fprintf(stderr, "error: the size of the image is over the limit\n");
@@ -305,11 +330,21 @@ void gappenddata(CellImage *img, const char *payload, int more) {
 		current_upload_image_id = img->image_id;
 		time(&last_uploading_time);
 	} else {
+		if (graphics_uploading) {
+			graphics_uploading--;
+			if (!graphics_uploading)
+				graphics_command_result.redraw = 1;
+		}
 		current_upload_image_id = 0;
-		img->status = STATUS_ON_DISK;
-		if (img->open_file)
+		if (img->open_file) {
 			fclose(img->open_file);
-		graphics_uploading--;
+			img->open_file = NULL;
+		}
+		img->status = STATUS_ON_DISK;
+		if (img->expected_size && img->expected_size != img->disk_size) {
+			img->status = STATUS_UPLOADING_ERROR;
+			fprintf(stderr, "error: the size of the uploaded image %u doesn't match the expected size %u\n", img->disk_size, img->expected_size);
+		}
 	}
 	gchecklimits();
 }
@@ -328,25 +363,42 @@ int gcheckifstilluploading() {
 	return graphics_uploading;
 }
 
-void gdrawimagestripe(Drawable buf, uint32_t image_id, int start_col, int end_col, int row,
-					  int x_pix, int y_pix, int cw, int ch, int reverse)
-{
+static void gr_displayinfo(Drawable buf, ImageRect *rect, int col1, int col2, const char *message) {
+	int w_pix = (rect->end_col - rect->start_col) * rect->cw;
+	int h_pix = (rect->end_row - rect->start_row) * rect->ch;
+	Display *disp = imlib_context_get_display();
+	GC gc = XCreateGC(disp, buf, 0, NULL);
+	char info[MAX_INFO_LEN];
+	snprintf(info, MAX_INFO_LEN, "%s%u [%d:%d)x[%d:%d)", message, rect->image_id, rect->start_col, rect->end_col, rect->start_row, rect->end_row);
+	XSetForeground(disp, gc, col1);
+	XDrawString(disp, buf, gc, rect->x_pix + 4, rect->y_pix + h_pix - 3, info, strlen(info));
+	XSetForeground(disp, gc, col2);
+	XDrawString(disp, buf, gc, rect->x_pix + 2, rect->y_pix + h_pix - 5, info, strlen(info));
+}
+
+static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 	// If we are uploading data then we shouldn't do heavy computation (like
 	// displaying graphics), mostly because some versions of tmux may drop
 	// pass-through commands if the terminal is too slow.
     if (graphics_uploading)
 		return;
 
-    if (image_id == 0) image_id = last_image_id;
-    CellImage *img = gfindimage(image_id);
+    if (rect->image_id == 0) {
+		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "id=");
+		return;
+	}
+    CellImage *img = gfindimage(rect->image_id);
     Imlib_Image scaled_image;
     if (!img) {
-	return;
+		fprintf(stderr, "error: could not find image %d\n", rect->image_id);
+		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "error id=");
+		return;
 	}
-	gloadimage(img, cw, ch);
+	gloadimage(img, rect->cw, rect->ch);
 
 	if (img->status != STATUS_IN_RAM || !img->scaled_image) {
-		fprintf(stderr, "error: could not load image %d\n", image_id);
+		fprintf(stderr, "error: could not load image %d\n", rect->image_id);
+		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "error id=");
 		return;
 	}
 
@@ -354,18 +406,109 @@ void gdrawimagestripe(Drawable buf, uint32_t image_id, int start_col, int end_co
 
 	imlib_context_set_image(img->scaled_image);
 	imlib_context_set_drawable(buf);
-	if (reverse) {
+	if (rect->reverse) {
 		Imlib_Color_Modifier cm = imlib_create_color_modifier();
 		imlib_context_set_color_modifier(cm);
 		imlib_set_color_modifier_tables(reverse_table, reverse_table, reverse_table, NULL);
 	}
+	int w_pix = (rect->end_col - rect->start_col) * rect->cw;
+	int h_pix = (rect->end_row - rect->start_row) * rect->ch;
 	imlib_render_image_part_on_drawable_at_size(
-	    start_col * cw, row * ch, (end_col - start_col) * cw, ch, x_pix,
-	    y_pix, (end_col - start_col) * cw, ch);
-	if (reverse) {
+	    rect->start_col * rect->cw, rect->start_row * rect->ch,
+		w_pix, h_pix,
+		rect->x_pix, rect->y_pix,
+		w_pix, h_pix);
+	if (rect->reverse) {
 		imlib_free_color_modifier();
 		imlib_context_set_color_modifier(NULL);
 	}
+
+	// In debug mode draw bounding boxes and print info.
+	if (graphics_debug_mode) {
+		Display *disp = imlib_context_get_display();
+		GC gc = XCreateGC(disp, buf, 0, NULL);
+		XSetForeground(disp, gc, 0x00FF00);
+		XDrawRectangle(disp, buf, gc, rect->x_pix, rect->y_pix, w_pix-1, h_pix-1);
+		XSetForeground(disp, gc, 0xFF0000);
+		XDrawRectangle(disp, buf, gc, rect->x_pix+1, rect->y_pix+1, w_pix-3, h_pix-3);
+		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "# ");
+	}
+}
+
+static void gr_freerect(ImageRect *rect) {
+	memset(rect, 0, sizeof(ImageRect));
+}
+
+static int gr_getrectbottom(ImageRect *rect) {
+	return rect->y_pix + (rect->end_row - rect->start_row) *rect->ch;
+}
+
+void gr_drawimagerects(Drawable buf) {
+	for (size_t i = 0; i < MAX_IMAGE_RECTS; ++i) {
+		ImageRect *rect = &image_rects[i];
+		if (!rect->image_id)
+			continue;
+		gr_drawimagerect(buf, rect);
+		gr_freerect(rect);
+	}
+}
+
+void gr_appendimagerect(Drawable buf, uint32_t image_id, int start_col, int end_col, int start_row, int end_row,
+					  int x_pix, int y_pix, int cw, int ch, int reverse)
+{
+	ImageRect new_rect;
+	new_rect.image_id = image_id;
+	new_rect.start_col = start_col;
+	new_rect.end_col = end_col;
+	new_rect.start_row = start_row;
+	new_rect.end_row = end_row;
+	new_rect.x_pix = x_pix;
+	new_rect.y_pix = y_pix;
+	new_rect.ch = ch;
+	new_rect.cw = cw;
+	new_rect.reverse = reverse;
+
+	// Display some red text in debug mode.
+	if (graphics_debug_mode)
+		gr_displayinfo(buf, &new_rect, 0x000000, 0xFF0000, "? ");
+
+	// If it's the empty image (image_id=0) or an empty rectangle, do nothing.
+	if (image_id == 0 || end_col - start_col <= 0 || end_row - start_row <= 0)
+		return;
+	// Try to find a rect to merge with.
+	ImageRect *free_rect = NULL;
+	for (size_t i = 0; i < MAX_IMAGE_RECTS; ++i) {
+		ImageRect *rect = &image_rects[i];
+		if (rect->image_id == 0) {
+			if (!free_rect)
+				free_rect = rect;
+			continue;
+		}
+		if (rect->image_id != image_id || rect->cw != cw || rect->ch != ch ||
+			rect->reverse != reverse)
+			continue;
+		// We only support the case when the new stripe is added to the bottom
+		// of an existing rectangle and they are perfectly aligned.
+		if (rect->end_row == start_row && gr_getrectbottom(rect) == y_pix) {
+			if (rect->start_col == start_col && rect->end_col == end_col && rect->x_pix == x_pix) {
+				rect->end_row = end_row;
+				return;
+			}
+		}
+	}
+	// If we haven't merged the new rect with any existing rect, and there is no
+	// free rect, we have to render one of the existing rects.
+	if (!free_rect) {
+		for (size_t i = 0; i < MAX_IMAGE_RECTS; ++i) {
+			ImageRect *rect = &image_rects[i];
+			if (!free_rect || gr_getrectbottom(free_rect) > gr_getrectbottom(rect))
+				free_rect = rect;
+		}
+		gr_drawimagerect(buf, free_rect);
+		gr_freerect(free_rect);
+	}
+	// Start a new rectangle in `free_rect`.
+	*free_rect = new_rect;
 }
 
 static size_t findchar(char *buf, size_t start, size_t len, char c) {
@@ -389,26 +532,28 @@ typedef struct {
 	int has_more;
 	int more;
 	int error;
+	int size;
+	int offset;
 } GraphicsCommand;
 
-static void gtransmitdata(GraphicsCommand *cmd) {
+static CellImage *gtransmitdata(GraphicsCommand *cmd) {
 	if (cmd->image_number != 0) {
 		fprintf(stderr, "error: image numbers (I) are not supported: %s\n", cmd->command);
 		cmd->error = 1;
-		return;
+		return NULL;
 	}
 
 	if (cmd->image_id == 0) {
 		fprintf(stderr, "error: image id is not specified or zero: %s\n", cmd->command);
 		cmd->error = 1;
-		return;
+		return NULL;
 	}
 
 	CellImage *img = NULL;
 	if (cmd->transmission_medium == 'f') {
 		img = gnewimagewithid(cmd->image_id);
 		if (!img)
-			return;
+			return NULL;
 		last_image_id = cmd->image_id;
 		char *filename = gbase64dec(cmd->payload, NULL);
 		char tmp_filename[MAX_FILENAME_SIZE];
@@ -422,7 +567,8 @@ static void gtransmitdata(GraphicsCommand *cmd) {
 	} else if (cmd->transmission_medium == 'd') {
 		img = gnewimagewithid(cmd->image_id);
 		if (!img)
-			return;
+			return NULL;
+		img->expected_size = cmd->size;
 		last_image_id = cmd->image_id;
 		img->status = STATUS_UPLOADING;
 		graphics_uploading++;
@@ -430,14 +576,16 @@ static void gtransmitdata(GraphicsCommand *cmd) {
 	} else {
 		fprintf(stderr, "error: transmission medium '%c' is not supported: %s\n", cmd->transmission_medium, cmd->command);
 		cmd->error = 1;
-		return;
+		return NULL;
 	}
 
 	img->rows = cmd->rows;
 	img->cols = cmd->columns;
+	return img;
 }
 
 static void gruncommand(GraphicsCommand *cmd) {
+	CellImage *img = NULL;
 	switch (cmd->action) {
 		case 0:
 			if (cmd->has_more) {
@@ -522,6 +670,9 @@ static void gsetkeyvalue(GraphicsCommand *cmd, char *key_start, char *key_end, c
 			cmd->has_more = 1;
 			cmd->more = num;
 			break;
+		case 'S':
+			cmd->size = num;
+			break;
 		default:
 			fprintf(stderr, "error: unsupported key: %s\n", key_start);
 			cmd->error = 1;
@@ -530,13 +681,17 @@ static void gsetkeyvalue(GraphicsCommand *cmd, char *key_start, char *key_end, c
 }
 
 int gparsecommand(char *buf, size_t len) {
-	graphics_command_needs_redraw = 0;
-
-	static int cmdnum = 0;
-	fprintf(stderr, "--------------------- Command %d -----------\n", cmdnum++);
-	static clock_t start, end;
 	if (buf[0] != 'G')
 		return 0;
+
+	memset(&graphics_command_result, 0, sizeof(GraphicsCommandResult));
+
+	static int cmdnum = 0;
+	if (graphics_debug_mode)
+		fprintf(stderr, "### Command %d: %.50s\n", cmdnum, buf);
+	cmdnum++;
+
+	// Eat the 'G'.
 	++buf;
 
 	GraphicsCommand cmd = {.command = buf};
@@ -593,9 +748,6 @@ int gparsecommand(char *buf, size_t len) {
 		return 1;
 
 	gruncommand(&cmd);
-	end = clock();
-	fprintf(stderr, "time: %lg ram: %u disk: %u\n", (((double) (end - start))*1000 / CLOCKS_PER_SEC), cell_images_ram_size, cell_images_disk_size);
-	start = end;
 	return 1;
 }
 
