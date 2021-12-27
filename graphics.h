@@ -20,8 +20,12 @@ extern char graphics_debug_mode;
 /// it is not recommended to do anything computationally heavy.
 extern char graphics_uploading;
 
+#define MAX_GRAPHICS_RESPONSE_LEN 256
+
 typedef struct {
 	char redraw;
+	char response[MAX_GRAPHICS_RESPONSE_LEN];
+	char error;
 } GraphicsCommandResult;
 
 extern GraphicsCommandResult graphics_command_result;

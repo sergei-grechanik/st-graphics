@@ -6,6 +6,7 @@
 #include <Imlib2.h>
 #include <time.h>
 #include <string.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <assert.h>
@@ -65,6 +66,7 @@ static CellImage cell_images[MAX_CELL_IMAGES] = {{0}};
 static unsigned cell_images_disk_size = 0;
 static unsigned cell_images_ram_size = 0;
 static uint32_t last_image_id = 0;
+static int last_cw = 0, last_ch = 0;
 static uint32_t current_upload_image_id = 0;
 static time_t last_uploading_time = 0;
 static char temp_dir[] = "/tmp/st-images-XXXXXX";
@@ -456,6 +458,9 @@ void gr_drawimagerects(Drawable buf) {
 void gr_appendimagerect(Drawable buf, uint32_t image_id, int start_col, int end_col, int start_row, int end_row,
 					  int x_pix, int y_pix, int cw, int ch, int reverse)
 {
+	last_cw = cw;
+	last_ch = ch;
+
 	ImageRect new_rect;
 	new_rect.image_id = image_id;
 	new_rect.start_col = start_col;
@@ -531,21 +536,46 @@ typedef struct {
 	uint32_t placement_id;
 	int has_more;
 	int more;
-	int error;
 	int size;
 	int offset;
 } GraphicsCommand;
 
+static void gr_createresponse(GraphicsCommand *cmd, const char *msg) {
+	if (cmd->image_id && cmd->image_number) {
+		snprintf(graphics_command_result.response, MAX_GRAPHICS_RESPONSE_LEN,
+				 "\033_Gi=%u,I=%u;%s\033\\", cmd->image_id, cmd->image_number,
+				 msg);
+	} else if (!cmd->image_id && cmd->image_number) {
+		snprintf(graphics_command_result.response, MAX_GRAPHICS_RESPONSE_LEN,
+				 "\033_GI=%u;%s\033\\", cmd->image_number, msg);
+	} else {
+		snprintf(graphics_command_result.response, MAX_GRAPHICS_RESPONSE_LEN,
+				 "\033_Gi=%u;%s\033\\", cmd->image_id, msg);
+	}
+}
+
+static void gr_reporterror(GraphicsCommand *cmd, const char *format, ...) {
+	char errmsg[MAX_GRAPHICS_RESPONSE_LEN];
+	graphics_command_result.error = 1;
+  	va_list args;
+	va_start(args, format);
+	vsnprintf(errmsg, MAX_GRAPHICS_RESPONSE_LEN, format, args);
+	va_end(args);
+	if (cmd)
+		fprintf(stderr, "%s  in command: %s\n", errmsg, cmd->command);
+	else
+		fprintf(stderr, "%s\n", errmsg);
+	gr_createresponse(cmd, errmsg);
+}
+
 static CellImage *gtransmitdata(GraphicsCommand *cmd) {
 	if (cmd->image_number != 0) {
-		fprintf(stderr, "error: image numbers (I) are not supported: %s\n", cmd->command);
-		cmd->error = 1;
+		gr_reporterror(cmd, "EINVAL: image numbers (I) are not supported");
 		return NULL;
 	}
 
 	if (cmd->image_id == 0) {
-		fprintf(stderr, "error: image id is not specified or zero: %s\n", cmd->command);
-		cmd->error = 1;
+		gr_reporterror(cmd, "EINVAL: image id is not specified or zero");
 		return NULL;
 	}
 
@@ -558,8 +588,9 @@ static CellImage *gtransmitdata(GraphicsCommand *cmd) {
 		char *filename = gbase64dec(cmd->payload, NULL);
 		char tmp_filename[MAX_FILENAME_SIZE];
 		gimagefilename(img, tmp_filename, MAX_FILENAME_SIZE);
-		if (symlink(filename, tmp_filename)) {
-			fprintf(stderr, "error: could not create a symlink from %s to %s\n", filename, tmp_filename);
+		if (access(filename, R_OK) != 0 || symlink(filename, tmp_filename)) {
+			gr_reporterror(cmd, "EINVAL: could not create a symlink from %s to %s", filename, tmp_filename);
+			img->status = STATUS_UPLOADING_ERROR;
 		} else {
 			img->status = STATUS_ON_DISK;
 		}
@@ -574,8 +605,7 @@ static CellImage *gtransmitdata(GraphicsCommand *cmd) {
 		graphics_uploading++;
 		gappenddata(img, cmd->payload, cmd->more);
 	} else {
-		fprintf(stderr, "error: transmission medium '%c' is not supported: %s\n", cmd->transmission_medium, cmd->command);
-		cmd->error = 1;
+		gr_reporterror(cmd, "EINVAL: transmission medium '%c' is not supported", cmd->transmission_medium);
 		return NULL;
 	}
 
@@ -591,8 +621,7 @@ static void gruncommand(GraphicsCommand *cmd) {
 			if (cmd->has_more) {
 				gappenddata(NULL, cmd->payload, cmd->more);
 			} else {
-				fprintf(stderr, "error: no action specified: %s\n", cmd->command);
-				cmd->error = 1;
+				gr_reporterror(cmd, "EINVAL: no action specified");
 			}
 			break;
 		case 't':
@@ -605,30 +634,27 @@ static void gruncommand(GraphicsCommand *cmd) {
 		case 'T':
 			// transmit and display
 		default:
-			fprintf(stderr, "error: unsupported action: %c\n", cmd->action);
+			gr_reporterror(cmd, "EINVAL: unsupported action: %c", cmd->action);
 			return;
 	}
 }
 
 static void gsetkeyvalue(GraphicsCommand *cmd, char *key_start, char *key_end, char *value_start, char *value_end) {
 	if (key_end - key_start != 1) {
-		fprintf(stderr, "error: unknown key of length %ld: %s\n", key_end - key_start, key_start);
-		cmd->error = 1;
+		gr_reporterror(cmd, "EINVAL: unknown key of length %ld: %s", key_end - key_start, key_start);
 		return;
 	}
 	long num = 0;
 	if (*key_start == 'a' || *key_start == 't') {
 		if (value_end - value_start != 1) {
-			fprintf(stderr, "error: value of 'a' or 't' must be a single char: %s\n", key_start);
-			cmd->error = 1;
+			gr_reporterror(cmd, "EINVAL: value of 'a' or 't' must be a single char: %s", key_start);
 			return;
 		}
 	} else {
 		char *num_end = NULL;
 		num = strtol(value_start, &num_end, 10);
 		if (num_end != value_end) {
-			fprintf(stderr, "error: could not parse number value: %s\n", key_start);
-			cmd->error = 1;
+			gr_reporterror(cmd, "EINVAL: could not parse number value: %s", key_start);
 			return;
 		}
 	}
@@ -674,8 +700,7 @@ static void gsetkeyvalue(GraphicsCommand *cmd, char *key_start, char *key_end, c
 			cmd->size = num;
 			break;
 		default:
-			fprintf(stderr, "error: unsupported key: %s\n", key_start);
-			cmd->error = 1;
+			gr_reporterror(cmd, "EINVAL: unsupported key: %s", key_start);
 			return;
 	}
 }
@@ -709,11 +734,8 @@ int gparsecommand(char *buf, size_t len) {
 				case '\0':
 					state = *c == ',' ? 'k' : 'p';
 					key_end = c;
-					fprintf(stderr,
-						"error: key without value at "
-						"char %ld of %s\n",
-						c - buf, buf);
-					cmd.error = 1;
+					gr_reporterror(&cmd,
+						"EINVAL: key without value at char %ld: %s", c);
 					break;
 				case '=':
 					key_end = c;
@@ -744,10 +766,14 @@ int gparsecommand(char *buf, size_t len) {
 		++c;
 	}
 
-	if (cmd.error)
-		return 1;
+	if (!graphics_command_result.error)
+		gruncommand(&cmd);
 
-	gruncommand(&cmd);
+	if (cmd.quiet) {
+		if (!graphics_command_result.error || cmd.quiet >= 2)
+			graphics_command_result.response[0] = '\0';
+	}
+
 	return 1;
 }
 

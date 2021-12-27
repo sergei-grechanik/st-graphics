@@ -1925,6 +1925,10 @@ strhandle(void)
 	case '_': /* APC -- Application Program Command */
 		if (gparsecommand(strescseq.buf, strescseq.len)) {
 			GraphicsCommandResult *res = &graphics_command_result;
+			if (res->response[0]) {
+				fprintf(stderr, "response: %s\n", res->response);
+				ttywrite(res->response, strlen(res->response), 0);
+			}
 			if (res->redraw)
 				redraw();
 			return;

@@ -225,3 +225,66 @@ end_gr_command
 BG=3
 ID=202
 box 0 20 0 1
+
+read_response() {
+    TERM_RESPONSE=""
+    while read -r -d '\' -t 0.1 TERM_RESPONSE; do
+        echo "Response: $(sed 's/\x1b/^[/g' <<< "$TERM_RESPONSE")"
+    done
+}
+
+echo "There shouldn't be any responses here:"
+
+read_response
+echo
+
+echo "Now testing responses"
+
+echo "Invalid image (file doesn't exist):"
+start_gr_command
+echo -n "a=t,t=f,i=203,r=1,c=1;"
+echo -n "$(echo __dummy__nonexisting | tr -d '\n' | base64 -w0)"
+end_gr_command
+read_response
+
+echo "Invalid transmission medium:"
+start_gr_command
+echo -n "a=t,t=X,i=204,r=1,c=1;"
+echo -n "$(echo __dummy__nonexisting | tr -d '\n' | base64 -w0)"
+end_gr_command
+read_response
+
+echo "Invalid action:"
+start_gr_command
+echo -n "a=X,t=f,i=205,r=1,c=1;"
+echo -n "$(echo __dummy__nonexisting | tr -d '\n' | base64 -w0)"
+end_gr_command
+read_response
+
+echo "No action:"
+start_gr_command
+echo -n "t=f,i=206,r=1,c=1;"
+echo -n "$(echo __dummy__nonexisting | tr -d '\n' | base64 -w0)"
+end_gr_command
+read_response
+
+echo "Unknown key:"
+start_gr_command
+echo -n "key=1,a=t,t=f,i=207,r=1,c=1;"
+echo -n "$(echo __dummy__nonexisting | tr -d '\n' | base64 -w0)"
+end_gr_command
+read_response
+
+echo "Key without value:"
+start_gr_command
+echo -n "a=t,t=f,i,r=1,c=1;"
+echo -n "$(echo __dummy__nonexisting | tr -d '\n' | base64 -w0)"
+end_gr_command
+read_response
+
+echo "Zero image id:"
+start_gr_command
+echo -n "a=t,t=f,i=0,r=1,c=1;"
+echo -n "$(echo __dummy__nonexisting | tr -d '\n' | base64 -w0)"
+end_gr_command
+read_response
