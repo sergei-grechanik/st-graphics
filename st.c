@@ -1926,7 +1926,6 @@ strhandle(void)
 		if (gparsecommand(strescseq.buf, strescseq.len)) {
 			GraphicsCommandResult *res = &graphics_command_result;
 			if (res->response[0]) {
-				fprintf(stderr, "response: %s\n", res->response);
 				ttywrite(res->response, strlen(res->response), 0);
 			}
 			if (res->redraw)
@@ -2615,6 +2614,8 @@ void
 drawregion(int x1, int y1, int x2, int y2)
 {
 	int y;
+
+	xstartimagedraw();
 
 	for (y = y1; y < y2; y++) {
 		if (!term.dirty[y])

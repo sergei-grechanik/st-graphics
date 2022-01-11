@@ -7,7 +7,8 @@ void graphicsinit(Display *disp, Visual *vis, Colormap cm);
 void graphicsdeinit();
 void gr_appendimagerect(Drawable buf, uint32_t image_id, int start_col, int end_col, int start_row, int end_row,
 					  int x_pix, int y_pix, int cw, int ch, int reverse);
-void gr_drawimagerects(Drawable buf);
+void gr_start_drawing(Drawable buf, int cw, int ch);
+void gr_finish_drawing(Drawable buf);
 int gparsecommand(char *buf, size_t len);
 void gpreviewimage(uint32_t image_id, const char *command);
 

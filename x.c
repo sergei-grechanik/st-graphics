@@ -353,6 +353,7 @@ void
 togglegrdebug(const Arg *arg)
 {
 	graphics_debug_mode = !graphics_debug_mode;
+	redraw();
 }
 
 int
@@ -1681,9 +1682,14 @@ xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 						 x_pix, y_pix, win.cw, win.ch, base.mode & ATTR_REVERSE);
 }
 
+/* Prepare for image drawing. */
+void xstartimagedraw() {
+	gr_start_drawing(xw.buf, win.cw, win.ch);
+}
+
 /* Draw all queued image cells. */
 void xfinishimagedraw() {
-	gr_drawimagerects(xw.buf);
+	gr_finish_drawing(xw.buf);
 }
 
 void
