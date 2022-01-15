@@ -44,6 +44,7 @@ typedef struct {
 	char scale_mode;
 	char status;
 	char uploading_failure;
+	char quiet;
 	uint16_t scaled_cw, scaled_ch;
 	union {
 		Imlib_Image scaled_image;
@@ -207,13 +208,15 @@ static CellImage *gnewimage() {
 	return oldest_image;
 }
 
-static CellImage *gnewimagewithid(uint32_t id) {
+static CellImage *gnewimagewithid(uint32_t id, int cols, int rows) {
 	CellImage *image = gfindimage(id);
 	if (image)
 		gdeleteimage(image);
 	else
 		image = gnewimage();
 	image->image_id = id;
+	image->cols = cols;
+	image->rows = rows;
 	return image;
 }
 
@@ -248,7 +251,7 @@ static void gloadimage(CellImage *img, int cw, int ch) {
 	if (!img->scaled_image) {
 		if (img->status != STATUS_RAM_LOADING_ERROR) {
 			fprintf(stderr,
-				"error: imlib_create_image returned null\n");
+				"error: imlib_create_image(%d, %d) returned null\n", scaled_w, scaled_h);
 		}
 		img->status = STATUS_RAM_LOADING_ERROR;
 		return;
@@ -259,6 +262,7 @@ static void gloadimage(CellImage *img, int cw, int ch) {
 	imlib_context_set_color(0, 0, 0, 0);
 	imlib_image_fill_rectangle(0, 0, (int)img->cols * cw,
 				   (int)img->rows * ch);
+	imlib_context_set_anti_alias(1);
 	imlib_context_set_blend(1);
 	if (orig_w == 0 || orig_h == 0) {
 		fprintf(stderr, "warning: image of zero size\n");
@@ -391,6 +395,7 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 
 	gtouchimage(img);
 
+	imlib_context_set_anti_alias(0);
 	imlib_context_set_image(img->scaled_image);
 	imlib_context_set_drawable(buf);
 	if (rect->reverse) {
@@ -582,6 +587,16 @@ static void gr_createresponse(uint32_t image_id, uint32_t image_number,
 	}
 }
 
+static void gr_reportsuccess_cmd(GraphicsCommand *cmd) {
+	if (cmd->quiet < 1)
+		gr_createresponse(cmd->image_id, cmd->image_number, "OK");
+}
+
+static void gr_reportsuccess_img(CellImage *img) {
+	if (img->quiet < 1)
+		gr_createresponse(img->image_id, 0, "OK");
+}
+
 static void gr_reporterror_cmd(GraphicsCommand *cmd, const char *format, ...) {
 	char errmsg[MAX_GRAPHICS_RESPONSE_LEN];
 	graphics_command_result.error = 1;
@@ -591,7 +606,8 @@ static void gr_reporterror_cmd(GraphicsCommand *cmd, const char *format, ...) {
 	va_end(args);
 
 	fprintf(stderr, "%s  in command: %s\n", errmsg, cmd->command);
-	gr_createresponse(cmd->image_id, cmd->image_number, errmsg);
+	if (cmd->quiet < 2)
+		gr_createresponse(cmd->image_id, cmd->image_number, errmsg);
 }
 
 static void gr_reporterror_img(CellImage *img, const char *format, ...) {
@@ -603,13 +619,16 @@ static void gr_reporterror_img(CellImage *img, const char *format, ...) {
 	va_end(args);
 
 	fprintf(stderr, "%s  id=%u\n", errmsg, img->image_id);
-	gr_createresponse(img->image_id, 0, errmsg);
+	if (img->quiet < 2)
+		gr_createresponse(img->image_id, 0, errmsg);
 }
 
-static void gr_loadimage_or_reporterror(CellImage *img) {
+static void gr_loadimage_and_report(CellImage *img) {
 	gloadimage(img, last_cw, last_ch);
 	if (img->status != STATUS_IN_RAM) {
-		gr_reporterror_img(img, "EIO: could not load image");
+		gr_reporterror_img(img, "EBADF: could not load image");
+	} else {
+		gr_reportsuccess_img(img);
 	}
 }
 
@@ -713,7 +732,7 @@ static void gappenddata(CellImage *img, const char *payload, int more) {
 			img->uploading_failure = ERROR_UNEXPECTED_SIZE;
 			gr_reportuploaderror(img);
 		} else {
-			gr_loadimage_or_reporterror(img);
+			gr_loadimage_and_report(img);
 		}
 	}
 	gchecklimits();
@@ -734,7 +753,7 @@ static CellImage *gtransmitdata(GraphicsCommand *cmd) {
 
 	CellImage *img = NULL;
 	if (cmd->transmission_medium == 'f') {
-		img = gnewimagewithid(cmd->image_id);
+		img = gnewimagewithid(cmd->image_id, cmd->columns, cmd->rows);
 		if (!img)
 			return NULL;
 		last_image_id = cmd->image_id;
@@ -744,22 +763,23 @@ static CellImage *gtransmitdata(GraphicsCommand *cmd) {
 		if (access(filename, R_OK) != 0 ||
 		    symlink(filename, tmp_filename)) {
 			gr_reporterror_cmd(cmd,
-					   "EINVAL: could not create a symlink "
+					   "EBADF: could not create a symlink "
 					   "from %s to %s",
 					   filename, tmp_filename);
 			img->status = STATUS_UPLOADING_ERROR;
 		} else {
 			img->status = STATUS_ON_DISK;
-			gr_loadimage_or_reporterror(img);
+			gr_loadimage_and_report(img);
 		}
 		free(filename);
 	} else if (cmd->transmission_medium == 'd') {
-		img = gnewimagewithid(cmd->image_id);
+		img = gnewimagewithid(cmd->image_id, cmd->columns, cmd->rows);
 		if (!img)
 			return NULL;
 		img->expected_size = cmd->size;
 		last_image_id = cmd->image_id;
 		img->status = STATUS_UPLOADING;
+		img->quiet = cmd->quiet;
 		graphics_uploading++;
 		gappenddata(img, cmd->payload, cmd->more);
 	} else {
@@ -770,8 +790,6 @@ static CellImage *gtransmitdata(GraphicsCommand *cmd) {
 		return NULL;
 	}
 
-	img->rows = cmd->rows;
-	img->cols = cmd->columns;
 	return img;
 }
 

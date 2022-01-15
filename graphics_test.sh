@@ -41,6 +41,13 @@ fi
 [[ -f transparency.png ]] || \
     curl -o transparency.png https://upload.wikimedia.org/wikipedia/commons/4/47/PNG_transparency_demonstration_1.png
 
+read_response() {
+    TERM_RESPONSE=""
+    while read -r -d '\' -t 0.1 TERM_RESPONSE; do
+        echo "        $(sed 's/\x1b/^[/g' <<< "$TERM_RESPONSE")"
+    done
+}
+
 line() {
     echo -en "\e[48;5;${BG}m"
     echo -en "\e[38;5;${ID}m"
@@ -63,12 +70,12 @@ setimg() {
 }
 
 start_gr_command
-echo -n "a=t,t=f,i=1,r=10,c=20;"
+echo -n "a=t,t=f,i=1,r=10,c=20,q=1;"
 echo -n "$(realpath wikipedia.png | tr -d '\n' | base64 -w0)"
 end_gr_command
 
 start_gr_command
-echo -n "a=t,i=2,r=10,t=f,c=72;"
+echo -n "a=t,i=2,r=10,t=f,c=72,q=1;"
 echo -n "$(realpath neuschwanstein.jpg | tr -d '\n' | base64 -w0)"
 end_gr_command
 
@@ -87,27 +94,27 @@ paste -d "" _1.txt _2.txt
 echo "Wikipedia logo in different sizes:"
 
 start_gr_command
-echo -n "a=t,t=f,i=3,r=1,c=1;"
+echo -n "a=t,t=f,i=3,r=1,c=1,q=1;"
 echo -n "$(realpath wikipedia.png | tr -d '\n' | base64 -w0)"
 end_gr_command
 
 start_gr_command
-echo -n "a=t,t=f,i=4,r=1,c=2;"
+echo -n "a=t,t=f,i=4,r=1,c=2,q=1;"
 echo -n "$(realpath wikipedia.png | tr -d '\n' | base64 -w0)"
 end_gr_command
 
 start_gr_command
-echo -n "a=t,t=f,i=5,r=2,c=1;"
+echo -n "a=t,t=f,i=5,r=2,c=1,q=1;"
 echo -n "$(realpath wikipedia.png | tr -d '\n' | base64 -w0)"
 end_gr_command
 
 start_gr_command
-echo -n "a=t,t=f,i=6,r=2,c=2;"
+echo -n "a=t,t=f,i=6,r=2,c=2,q=1;"
 echo -n "$(realpath wikipedia.png | tr -d '\n' | base64 -w0)"
 end_gr_command
 
 start_gr_command
-echo -n "a=t,t=f,i=7,r=1,c=10;"
+echo -n "a=t,t=f,i=7,r=1,c=10,q=1;"
 echo -n "$(realpath wikipedia.png | tr -d '\n' | base64 -w0)"
 end_gr_command
 
@@ -130,7 +137,7 @@ paste -d "" _1.txt _2.txt
 echo "Transparency test:"
 
 start_gr_command
-echo -n "a=t,t=f,i=8,r=10,c=20;"
+echo -n "a=t,t=f,i=8,r=10,c=20,q=1;"
 echo -n "$(realpath transparency.png | tr -d '\n' | base64 -w0)"
 end_gr_command
 
@@ -184,7 +191,7 @@ test_direct() {
     file=neuschwanstein.jpg
     cat "$file" | base64 -w0 | split -b $1 - "$TMPDIR/chunk_"
     start_gr_command
-    echo -n "a=t,t=d,i=$2,r=4,c=29,m=1,S=$(wc -c < "$file");"
+    echo -n "a=t,t=d,i=$2,r=4,c=29,m=1,S=$(wc -c < "$file"),q=$QUIET;"
     end_gr_command
     # We need to wait a bit before we start transmission, in the script it will
     # be done using the read or something like this
@@ -204,9 +211,11 @@ test_direct() {
     box 0 28 0 3
 }
 
+QUIET=1
 test_direct 3800 9
 
 echo "Invalid image (broken uploading):"
+QUIET=2
 test_direct 3800 200 t
 
 echo "Invalid image (not uploaded):"
@@ -218,20 +227,13 @@ box 0 20 0 1
 echo "Invalid image (non-image file):"
 
 start_gr_command
-echo -n "a=t,t=f,i=202,r=1,c=1;"
+echo -n "a=t,t=f,i=202,r=1,c=1,q=2;"
 echo -n "$(realpath README | tr -d '\n' | base64 -w0)"
 end_gr_command
 
 BG=3
 ID=202
 box 0 20 0 1
-
-read_response() {
-    TERM_RESPONSE=""
-    while read -r -d '\' -t 0.1 TERM_RESPONSE; do
-        echo "Response: $(sed 's/\x1b/^[/g' <<< "$TERM_RESPONSE")"
-    done
-}
 
 echo "There shouldn't be any responses here:"
 
@@ -240,37 +242,51 @@ echo
 
 echo "Now testing responses"
 
+echo "OK after uploading by filename:"
+start_gr_command
+echo -n "a=t,t=f,i=203,r=10,c=20;"
+echo -n "$(realpath wikipedia.png | tr -d '\n' | base64 -w0)"
+end_gr_command
+read_response
+
 echo "Invalid image (file doesn't exist):"
 start_gr_command
-echo -n "a=t,t=f,i=203,r=1,c=1;"
+echo -n "a=t,t=f,i=250,r=1,c=1;"
 echo -n "$(echo __dummy__nonexisting | tr -d '\n' | base64 -w0)"
+end_gr_command
+read_response
+
+echo "Invalid image (non-image file):"
+start_gr_command
+echo -n "a=t,t=f,i=250,r=1,c=1;"
+echo -n "$(echo $0 | tr -d '\n' | base64 -w0)"
 end_gr_command
 read_response
 
 echo "Invalid transmission medium:"
 start_gr_command
-echo -n "a=t,t=X,i=204,r=1,c=1;"
+echo -n "a=t,t=X,i=250,r=1,c=1;"
 echo -n "$(echo __dummy__nonexisting | tr -d '\n' | base64 -w0)"
 end_gr_command
 read_response
 
 echo "Invalid action:"
 start_gr_command
-echo -n "a=X,t=f,i=205,r=1,c=1;"
+echo -n "a=X,t=f,i=250,r=1,c=1;"
 echo -n "$(echo __dummy__nonexisting | tr -d '\n' | base64 -w0)"
 end_gr_command
 read_response
 
 echo "No action:"
 start_gr_command
-echo -n "t=f,i=206,r=1,c=1;"
+echo -n "t=f,i=250,r=1,c=1;"
 echo -n "$(echo __dummy__nonexisting | tr -d '\n' | base64 -w0)"
 end_gr_command
 read_response
 
 echo "Unknown key:"
 start_gr_command
-echo -n "key=1,a=t,t=f,i=207,r=1,c=1;"
+echo -n "key=1,a=t,t=f,i=250,r=1,c=1;"
 echo -n "$(echo __dummy__nonexisting | tr -d '\n' | base64 -w0)"
 end_gr_command
 read_response
