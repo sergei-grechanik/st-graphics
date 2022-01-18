@@ -379,16 +379,12 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 	CellImage *img = gfindimage(rect->image_id);
 	Imlib_Image scaled_image;
 	if (!img) {
-		fprintf(stderr, "error: could not find image %d\n",
-			rect->image_id);
 		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "error id=");
 		return;
 	}
 	gloadimage(img, rect->cw, rect->ch);
 
 	if (img->status != STATUS_IN_RAM || !img->scaled_image) {
-		fprintf(stderr, "error: could not load image %d\n",
-			rect->image_id);
 		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "error id=");
 		return;
 	}
