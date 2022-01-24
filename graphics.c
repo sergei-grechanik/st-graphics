@@ -614,9 +614,14 @@ static void gr_reporterror_img(CellImage *img, const char *format, ...) {
 	vsnprintf(errmsg, MAX_GRAPHICS_RESPONSE_LEN, format, args);
 	va_end(args);
 
-	fprintf(stderr, "%s  id=%u\n", errmsg, img->image_id);
-	if (img->quiet < 2)
-		gr_createresponse(img->image_id, 0, errmsg);
+	if (!img) {
+		fprintf(stderr, "%s\n", errmsg);
+		gr_createresponse(0, 0, errmsg);
+	} else {
+		fprintf(stderr, "%s  id=%u\n", errmsg, img->image_id);
+		if (img->quiet < 2)
+			gr_createresponse(img->image_id, 0, errmsg);
+	}
 }
 
 static void gr_loadimage_and_report(CellImage *img) {
@@ -903,6 +908,7 @@ int gparsecommand(char *buf, size_t len) {
 
 	// Eat the 'G'.
 	++buf;
+	--len;
 
 	GraphicsCommand cmd = {.command = buf};
 	char state = 'k';
@@ -911,7 +917,7 @@ int gparsecommand(char *buf, size_t len) {
 	char *val_start = NULL;
 	char *val_end = NULL;
 	char *c = buf;
-	while (1) {
+	while (c - buf < len) {
 		if (state == 'k') {
 			switch (*c) {
 			case ',':
@@ -952,6 +958,9 @@ int gparsecommand(char *buf, size_t len) {
 		}
 		++c;
 	}
+
+	if (!cmd.payload)
+		cmd.payload = buf + len;
 
 	if (!graphics_command_result.error)
 		gruncommand(&cmd);
