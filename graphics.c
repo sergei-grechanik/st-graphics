@@ -917,7 +917,7 @@ int gparsecommand(char *buf, size_t len) {
 	char *val_start = NULL;
 	char *val_end = NULL;
 	char *c = buf;
-	while (c - buf < len) {
+	while (c - buf < len + 1) {
 		if (state == 'k') {
 			switch (*c) {
 			case ',':

@@ -11,7 +11,8 @@ symbol approach. Note that it will use a single line of the output to display
 uploading progress (which may be disabled with '-q').
 
   Usage:
-    $(basename $0) [OPTIONS] IMAGE_FILE
+    $(basename $0) [OPTIONS] <image_file>
+    $(basename $0) --fix [<IDs>]
 
   Options:
     -c N, --columns N
@@ -26,27 +27,27 @@ uploading progress (which may be disabled with '-q').
         Restrict the image id to be within the range [1; 255] and use the 256
         colors mode to specify the image id (~24 bits will be used for image ids
         by default).
+    -o <file>, --output <file>
+        Use <file> to output the characters representing the image, instead of
+        stdout.
     -a, --append
         Do not clear the output file (the one specified with -o).
-    -o FILE, --output FILE
-        Use FILE to output the characters representing the image, instead of
-        stdout.
-    -e FILE, --err FILE
-        Use FILE to output error messages in addition to displaying them as the
-        status.
-    -l FILE, --log FILE
-        Enable logging and write logs to FILE.
-    -f FILE, --file FILE
+    -e <file>, --err <file>
+        Use <file> to output error messages in addition to displaying them as
+        the status.
+    -l <file>, --log <file>
+        Enable logging and write logs to <file>.
+    -f <image_file>, --file <image_file>
         The image file (but you can specify it as a positional argument).
     -q, --quiet
         Do not show status messages or uploading progress. Error messages are
         still shown (but you can redirect them with -e).
+    --fix [IDs], --reupload [IDs]
+        Reupload the given IDs. If no IDs are given, try to guess which images
+        need reuploading automatically.
     --noesc
         Do not issue the escape codes representing row numbers (encoded as
         foreground color).
-    --no-tmux-hijack
-        Do not try to hijack focus by creating a new pane when inside tmux and
-        the current pane is not active (just fail instead).
     --max-cols N
         Do not exceed this value when automatically computing the number of
         columns. By default the width of the terminal is used as the maximum.
@@ -66,6 +67,9 @@ uploading progress (which may be disabled with '-q').
     --override-dpi N
         Override dpi value for the image (both vertical and horizontal). By
         default dpi values will be requested using the 'identify' utility.
+    --no-tmux-hijack
+        Do not try to hijack focus by creating a new pane when inside tmux and
+        the current pane is not active (just fail instead).
     -h, --help
         Show this message
 
@@ -76,45 +80,51 @@ uploading progress (which may be disabled with '-q').
     TERMINAL_IMAGES_CACHE_DIR
         The directory to store images being uploaded (in case if they need to be
         reuploaded) and information about used image ids.
+    TERMINAL_IMAGES_NO_TMUX_HIJACK
+        If set, disable tmux hijacking.
 "
 
 # Exit the script on keyboard interrupt
 trap "exit 1" INT
 
-COLS=""
-ROWS=""
-MAX_COLS=""
-MAX_ROWS=""
-USE_256=""
-IMAGE_D=""
-COLS_PER_INCH="$TERMINAL_IMAGES_COLS_PER_INCH"
-ROWS_PER_INCH="$TERMINAL_IMAGES_ROWS_PER_INCH"
-CACHE_DIR="$TERMINAL_IMAGES_CACHE_DIR"
-OVERRIDE_DPI=""
-FILE=""
-OUT="/dev/stdout"
-ERR="/dev/null"
-LOG=""
-QUIET=""
-NOESC=""
-APPEND=""
-TMUX_HIJACK_ALLOWED="1"
-TMUX_HIJACK_HELPER=""
-STORE_CODE=""
-STORE_PID=""
-DEFAULT_TIMEOUT=3
+cols=""
+rows=""
+max_cols=""
+max_rows=""
+use_256=""
+image_id=""
+cols_per_inch="$TERMINAL_IMAGES_COLS_PER_INCH"
+rows_per_inch="$TERMINAL_IMAGES_ROWS_PER_INCH"
+cache_dir="$TERMINAL_IMAGES_CACHE_DIR"
+override_dpi=""
+file=""
+out="/dev/stdout"
+err=""
+log=""
+quiet=""
+noesc=""
+append=""
+tmux_hijack_allowed="1"
+[[ -z "$TERMINAL_IMAGES_NO_TMUX_HIJACK" ]] || tmux_hijack_allowed=""
+tmux_hijack_helper=""
+store_code=""
+store_pid=""
+default_timeout=3
+
+reupload=""
+reupload_ids=()
 
 # A utility function to print logs
 echolog() {
-    if [[ -n "$LOG" ]]; then
-        (flock 1; echo "$$ $(date +%s.%3N) $1") >> "$LOG"
+    if [[ -n "$log" ]]; then
+        (flock 1; echo "$$ $(date +%s.%3N) $1") >> "$log"
     fi
 }
 
 # A utility function to display what the script is doing.
 echostatus() {
     echolog "$1"
-    if [[ -z "$QUIET" ]]; then
+    if [[ -z "$quiet" ]]; then
         # clear the current line
         echo -en "\033[2K\r"
         # And display the status
@@ -122,41 +132,52 @@ echostatus() {
     fi
 }
 
-# Display an error message, both as the status and to $ERR.
+# Display a message, both as the status and to $err.
+echostderr() {
+    if [[ -z "$err" ]]; then
+        echo "$1" >> /dev/stderr
+        echolog "$1"
+    else
+        echostatus "$1"
+        echo "$1" >> "$err"
+    fi
+}
+
+# Display an error message, both as the status and to $err, prefixed with
+# "error:".
 echoerr() {
-    echostatus "ERROR: $1"
-    echo "$1" >> "$ERR"
+    echostderr "error: $1"
 }
 
 # Parse the command line.
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -c|--columns)
-            COLS="$2"
+            cols="$2"
             shift 2
             ;;
         -r|--rows)
-            ROWS="$2"
+            rows="$2"
             shift 2
             ;;
         -a|--append)
-            APPEND="1"
+            append="1"
             shift
             ;;
         -o|--output)
-            OUT="$2"
+            out="$2"
             shift 2
             ;;
         -e|--err)
-            ERR="$2"
+            err="$2"
             shift 2
             ;;
         -l|--log)
-            LOG="$2"
+            log="$2"
             shift 2
             ;;
         -q|--quiet)
-            QUIET="1"
+            quiet="1"
             shift
             ;;
         -h|--help)
@@ -164,65 +185,75 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         -f|--file)
-            if [[ -n "$FILE" ]]; then
+            if [[ -n "$file" ]]; then
                 echoerr "Multiple image files are not supported"
                 exit 1
             fi
-            FILE="$2"
+            file="$2"
             shift 2
             ;;
         --id)
-            IMAGE_ID="$2"
+            image_id="$2"
             shift 2
             ;;
         --256)
-            USE_256=1
+            use_256=1
             shift
             ;;
         --noesc)
-            NOESC=1
+            noesc=1
             shift
             ;;
         --no-tmux-hijack)
-            TMUX_HIJACK_ALLOWED=""
+            tmux_hijack_allowed=""
             shift
             ;;
         --max-cols)
-            MAX_COLS="$2"
+            max_cols="$2"
             shift 2
             ;;
         --max-rows)
-            MAX_ROWS="$2"
-            if (( MAX_ROWS > 255 )); then
+            max_rows="$2"
+            if (( max_rows > 255 )); then
                 echoerr "--max-rows cannot be larger than 255 ($2 is specified)"
                 exit 1
             fi
             shift 2
             ;;
         --cols-per-inch)
-            COLS_PER_INCH="$2"
+            cols_per_inch="$2"
             shift 2
             ;;
         --rows-per-inch)
-            ROWS_PER_INCH="$2"
+            rows_per_inch="$2"
             shift 2
             ;;
         --override-dpi)
-            OVERRIDE_DPI="$2"
+            override_dpi="$2"
             shift 2
+            ;;
+
+        # Subcommand-like options
+        --fix|--reupload)
+            reupload=1
+            shift
+            while [[ "$1" =~ ^[0-9]+$ ]]; do
+                reupload_ids+=("$1")
+                shift
+            done
             ;;
 
         # Options used internally.
         --store-pid)
-            STORE_PID="$2"
+            store_pid="$2"
             shift 2
             ;;
         --store-code)
-            STORE_CODE="$2"
+            store_code="$2"
             shift 2
             ;;
         --tmux-hijack-helper)
-            TMUX_HIJACK_HELPER=1
+            tmux_hijack_helper=1
             shift
             ;;
 
@@ -231,11 +262,11 @@ while [[ $# -gt 0 ]]; do
             exit 1
             ;;
         *)
-            if [[ -n "$FILE" ]]; then
-                echoerr "Multiple image files are not supported: $FILE and $1"
+            if [[ -n "$file" ]]; then
+                echoerr "Multiple image files are not supported: $file and $1"
                 exit 1
             fi
-            FILE="$1"
+            file="$1"
             shift
             ;;
     esac
@@ -245,9 +276,9 @@ echolog ""
 
 # Store the pid of the current process if requested. This is needed for tmux
 # hijacking so that the original script can wait for the uploading process.
-if [[ -n "$STORE_PID" ]]; then
-    echolog "Storing $$ to $STORE_PID"
-    echo "$$" > "$STORE_PID"
+if [[ -n "$store_pid" ]]; then
+    echolog "Storing $$ to $store_pid"
+    echo "$$" > "$store_pid"
 fi
 
 #####################################################################
@@ -256,50 +287,63 @@ fi
 
 # The name of the terminal, used to adjust to the specific flavor of the
 # protocol (like whether we need to convert to PNG).
-ACTUAL_TERM="$TERM"
+actual_term="$TERM"
 
 # Some id of the terminal. Used to figure out whether some image has already
 # been uploaded to the terminal without querying the terminal itself. Without
 # tmux we just use the window id of the terminal which should somewhat uniquely
 # identify the instance of the terminal.
-TERMINAL_ID="$TERM-$WINDOWID"
+terminal_id="$TERM-$WINDOWID"
 
 # Some id of the session. Each session contains its own "namespace" of image
 # ids, i.e. if two processes belong to the same session and load different
 # images, these images have to be assigned to different image ids. Without tmux
 # we just use the terminal id since we can't (easily) reattach a session to a
 # different terminal. For tmux see below.
-SESSION_ID="$TERMINAL_ID"
+session_id="$terminal_id"
 
 # This variable indicates whether we are inside tmux.
-INSIDE_TMUX=""
+inside_tmux=""
 if [[ -n "$TMUX" ]] && [[ "$TERM" =~ "screen" ]]; then
-    INSIDE_TMUX="1"
+    inside_tmux="1"
     # Get the actual current terminal name from tmux.
-    ACTUAL_TERM="$(tmux display-message -p "#{client_termname}")"
+    actual_term="$(tmux display-message -p "#{client_termname}")"
     # There doesn't seem to be a nice way to reliably get the current WINDOWID
     # of the terminal we are attached to (please correct me if I'm wrong). So we
     # use the last client pid of tmux as terminal id.
-    TERMINAL_ID="tmux-client-$(tmux display-message -p "#{client_pid}")"
+    terminal_id="tmux-client-$(tmux display-message -p "#{client_pid}")"
     # For the session id we use the tmux server pid with tmux session id.
-    SESSION_ID="tmux-$(tmux display-message -p "#{pid}-#{session_id}")"
+    session_id="tmux-$(tmux display-message -p "#{pid}-#{session_id}")"
 fi
 
 # Replace non-alphabetical chars with '-' to make them suitable for dir names.
-TERMINAL_ID="$(sed 's/[^0-9a-zA-Z]/-/g' <<< "$TERMINAL_ID")"
-SESSION_ID="$(sed 's/[^0-9a-zA-Z]/-/g' <<< "$SESSION_ID")"
+terminal_id="$(sed 's/[^0-9a-zA-Z]/-/g' <<< "$terminal_id")"
+session_id="$(sed 's/[^0-9a-zA-Z]/-/g' <<< "$session_id")"
 
-echolog "TERMINAL_ID=$TERMINAL_ID"
-echolog "SESSION_ID=$SESSION_ID"
+# Make sure that the cache dir contains session and terminal subdirs.
+[[ -n "$cache_dir" ]] || cache_dir="$HOME/.cache/terminal-images"
+session_dir_256="$cache_dir/sessions/${session_id}-8bit_ids"
+terminal_dir_256="$cache_dir/terminals/${terminal_id}-8bit_ids"
+session_dir_24bit="$cache_dir/sessions/${session_id}-24bit_ids"
+terminal_dir_24bit="$cache_dir/terminals/${terminal_id}-24bit_ids"
+
+mkdir -p "$cache_dir/cache/" 2> /dev/null
+mkdir -p "$session_dir_256" 2> /dev/null
+mkdir -p "$terminal_dir_256" 2> /dev/null
+mkdir -p "$session_dir_24bit" 2> /dev/null
+mkdir -p "$terminal_dir_24bit" 2> /dev/null
+
+echolog "terminal_id=$terminal_id"
+echolog "session_id=$session_id"
 
 #####################################################################
 # Creating a temp dir and adjusting the terminal state
 #####################################################################
 
 # Create a temporary directory to store the chunked image.
-TMPDIR="$(mktemp -d)"
+tmpdir="$(mktemp -d)"
 
-if [[ ! "$TMPDIR" || ! -d "$TMPDIR" ]]; then
+if [[ ! "$tmpdir" || ! -d "$tmpdir" ]]; then
     echoerr "Can't create a temp dir"
     exit 1
 fi
@@ -316,8 +360,8 @@ stty susp undef
 # Utility to read response from the terminal that we don't need anymore. (If we
 # don't read it it may end up being displayed which is not pretty).
 consume_errors() {
-    while read -r -d '\' -t 0.1 TERM_RESPONSE; do
-        echolog "Consuming unneeded response: $(sed 's/\x1b/^[/g' <<< "$TERM_RESPONSE")"
+    while read -r -d '\' -t 0.1 term_response; do
+        echolog "Consuming unneeded response: $(sed 's/\x1b/^[/g' <<< "$term_response")"
     done
 }
 
@@ -326,9 +370,8 @@ consume_errors() {
 cleanup() {
     consume_errors
     stty $stty_orig
-    rm $TMPDIR/chunk_* 2> /dev/null
-    rm $TMPDIR/image* 2> /dev/null
-    rmdir $TMPDIR || echolog "Could not remove $TMPDIR"
+    [[ -z "$tmpdir" ]] || rm "$tmpdir/"* 2> /dev/null
+    rmdir "$tmpdir" || echolog "Could not remove $tmpdir"
 }
 
 # Register the cleanup function to be called on the EXIT signal.
@@ -339,7 +382,7 @@ trap cleanup EXIT TERM
 #####################################################################
 
 # Functions to emit the start and the end of a graphics command.
-if [[ -n "$INSIDE_TMUX" ]]; then
+if [[ -n "$inside_tmux" ]]; then
     # If we are in tmux we have to wrap the command in Ptmux.
     start_gr_command() {
         echo -en '\ePtmux;\e\e_G'
@@ -361,216 +404,277 @@ gr_command() {
     start_gr_command
     echo -en "$1"
     end_gr_command
-    if [[ -n "$LOG" ]]; then
-        local GR_COMMAND="$(start_gr_command)$(echo -en "$1")$(end_gr_command)"
-        echolog "SENDING COMMAND: $(sed 's/\x1b/^[/g' <<< "$GR_COMMAND")"
+    if [[ -n "$log" ]]; then
+        local gr_command="$(start_gr_command)$(echo -en "$1")$(end_gr_command)"
+        echolog "SENDING COMMAND: $(sed 's/\x1b/^[/g' <<< "$gr_command")"
     fi
 }
 
 # Show the invalid terminal response message.
 invalid_terminal_response() {
-    echoerr "Invalid terminal response: $(sed 's/\x1b/^[/g' <<< "$TERM_RESPONSE")"
+    echoerr "Invalid terminal response: $(sed 's/\x1b/^[/g' <<< "$term_response")"
 }
 
-# Get a response from the terminal and store it in TERM_RESPONSE,
+# Get a response from the terminal and store it in term_response,
 # returns 1 if there is no response.
 get_terminal_response() {
-    TERM_RESPONSE=""
-    TERM_RESPONSE_PRINTABLE=""
+    term_response=""
+    term_response_printable=""
     # -r means backslash is part of the line
     # -d '\' means \ is the line delimiter
     # -t 2 is timeout
-    if ! read -r -d '\' -t 2 TERM_RESPONSE; then
-        if [[ -z "$TERM_RESPONSE" ]]; then
+    if ! read -r -d '\' -t 2 term_response; then
+        if [[ -z "$term_response" ]]; then
             echoerr "No response from terminal"
         else
             invalid_terminal_response
         fi
         return 1
     fi
-    TERM_RESPONSE_PRINTABLE="$(sed 's/\x1b/^[/g' <<< "$TERM_RESPONSE")"
-    echolog "TERM_RESPONSE: $TERM_RESPONSE_PRINTABLE"
+    term_response_printable="$(sed 's/\x1b/^[/g' <<< "$term_response")"
+    echolog "term_response: $term_response_printable"
 }
 
 # Uploads an image to the terminal.
-# Usage: upload_image $IMAGE_ID $FILE $COLS $ROWS
+# Usage: upload_image $image_id $file $cols $rows
 upload_image() {
-    local IMAGE_ID="$1"
-    local FILE="$2"
-    local COLS="$3"
-    local ROWS="$4"
+    local image_id="$1"
+    local file="$2"
+    local cols="$3"
+    local rows="$4"
 
-    if [[ "$ACTUAL_TERM" == *kitty* ]]; then
+    rm "$tmpdir/"* 2> /dev/null
+
+    if [[ "$actual_term" == *kitty* ]]; then
         # Check if the image is a png, and if it's not, try to convert it.
-        if ! (file "$FILE" | grep -q "PNG image"); then
-            echostatus "Converting $FILE to png"
-            if ! convert "$FILE" "$TMPDIR/image.png" || \
-                    ! [[ -f "$TMPDIR/image.png" ]]; then
+        if ! (file "$file" | grep -q "PNG image"); then
+            echostatus "Converting $file to png"
+            if ! convert "$file" "$tmpdir/image.png" || \
+                    ! [[ -f "$tmpdir/image.png" ]]; then
                 echoerr "Cannot convert image to png"
                 return 1
             fi
-            FILE="$TMPDIR/image.png"
+            file="$tmpdir/image.png"
         fi
     fi
 
     # base64-encode the file and split it into chunks. The size of each graphics
     # command shouldn't be more than 4096, so we set the size of an encoded
     # chunk to be 3968, slightly less than that.
-    echolog "base64-encoding and chunking the image"
-    cat "$FILE" | base64 -w0 | split -b 3968 - "$TMPDIR/chunk_"
+    echostatus "base64-encoding and chunking the image"
+    cat "$file" | base64 -w0 | split -b 3968 - "$tmpdir/chunk_"
 
-    upload_chunked_image "$IMAGE_ID" "$TMPDIR" "$COLS" "$ROWS"
+    # Write the size of the image in bytes to the "size" file.
+    wc -c < "$file" > "$tmpdir/size"
+
+    upload_chunked_image "$image_id" "$tmpdir" "$cols" "$rows"
     return $?
 }
 
 # Uploads an already chunked image to the terminal.
-# Usage: upload_chunked_image $IMAGE_ID $CHUNKS_DIR $COLS $ROWS
+# Usage: upload_chunked_image $image_id $chunks_dir $cols $rows
 upload_chunked_image() {
-    local IMAGE_ID="$1"
-    local CHUNKS_DIR="$2"
-    local COLS="$3"
-    local ROWS="$4"
+    local image_id="$1"
+    local chunks_dir="$2"
+    local cols="$3"
+    local rows="$4"
 
     # Check if we are in the active tmux pane. Uploading images from inactive
     # panes is impossible, so we either need to fail or to hijack focus by
     # creating a new pane.
-    if [[ -n "$INSIDE_TMUX" ]]; then
-        local TMUX_ACTIVE="$(tmux display-message -t $TMUX_PANE \
+    if [[ -n "$inside_tmux" ]]; then
+        local tmux_active="$(tmux display-message -t $TMUX_PANE \
                                 -p "#{window_active}#{pane_active}")"
-        if [[ "$TMUX_ACTIVE" != "11" ]]; then
-            hijack_tmux "$IMAGE_ID" "$CHUNKS_DIR" "$COLS" "$ROWS"
+        if [[ "$tmux_active" != "11" ]]; then
+            hijack_tmux "$image_id" "$chunks_dir" "$cols" "$rows"
             return $?
         fi
+    fi
+
+    # Read the original file size from the "size" file
+    local size_info=""
+    if [[ -e "$chunks_dir/size" ]]; then
+        size_info=",S=$(cat "$chunks_dir/size")"
     fi
 
     # Issue a command indicating that we want to start data transmission for a
     # new image.
     # a=t    the action is to transmit data
-    # i=$IMAGE_ID
+    # i=$image_id
     # f=100  PNG. st will ignore this field, for kitty we support only PNG.
     # t=d    transmit data directly
     # c=,r=  width and height in cells
     # s=,v=  width and height in pixels (not used here)
     # o=z    use compression (not used here)
     # m=1    multi-chunked data
-    gr_command "a=t,i=$IMAGE_ID,f=100,t=d,c=${COLS},r=${ROWS},m=1"
+    # S=     original file size
+    gr_command "a=t,i=$image_id,f=100,t=d,c=${cols},r=${rows},m=1${size_info}"
 
-    CHUNKS_COUNT="$(ls -1 $CHUNKS_DIR/chunk_* | wc -l)"
-    CHUNK_I=0
-    STARTTIME="$(date +%s%3N)"
-    SPEED=""
+    chunks_count="$(ls -1 "$chunks_dir/chunk_"* | wc -l)"
+    chunk_i=0
+    start_time="$(date +%s%3N)"
+    speed=""
 
     # Transmit chunks and display progress.
-    for CHUNK in "$CHUNKS_DIR/chunk_"*; do
-        echolog "Uploading chunk $CHUNK"
-        CHUNK_I=$((CHUNK_I+1))
-        if [[ $((CHUNK_I % 10)) -eq 1 ]]; then
+    for chunk in "$chunks_dir/chunk_"*; do
+        echolog "Uploading chunk $chunk"
+        chunk_i=$((chunk_i+1))
+        if [[ $((chunk_i % 10)) -eq 1 ]]; then
             # Do not compute the speed too often
-            if [[ $((CHUNK_I % 100)) -eq 1 ]]; then
+            if [[ $((chunk_i % 100)) -eq 1 ]]; then
                 # We use +%s%3N tow show time in nanoseconds
                 CURTIME="$(date +%s%3N)"
-                TIMEDIFF="$((CURTIME - STARTTIME))"
+                TIMEDIFF="$((CURTIME - start_time))"
                 if [[ "$TIMEDIFF" -ne 0 ]]; then
-                    SPEED="$(((CHUNK_I*4 - 4)*1000/TIMEDIFF)) K/s"
+                    speed="$(((chunk_i*4 - 4)*1000/TIMEDIFF)) K/s"
                 fi
             fi
-            echostatus "$((CHUNK_I*4))/$((CHUNKS_COUNT*4))K [$SPEED]"
+            echostatus "$((chunk_i*4))/$((chunks_count*4))K [$speed]"
         fi
         # The uploading of the chunk goes here.
         start_gr_command
-        echo -en "i=$IMAGE_ID,m=1;"
-        cat $CHUNK
+        echo -en "i=$image_id,m=1;"
+        cat $chunk
         end_gr_command
     done
 
     # Tell the terminal that we are done.
-    gr_command "i=$IMAGE_ID,m=0"
+    gr_command "i=$image_id,m=0"
 
     echostatus "Awaiting terminal response"
     get_terminal_response
     if [[ "$?" != 0 ]]; then
         return 1
     fi
-    REGEX='.*_G.*;OK.*'
-    if ! [[ "$TERM_RESPONSE" =~ $REGEX ]]; then
-        echoerr "Uploading error: $TERM_RESPONSE_PRINTABLE"
+    regex='.*_G.*;OK.*'
+    if ! [[ "$term_response" =~ $regex ]]; then
+        echoerr "Uploading error: $term_response_printable"
         return 1
     fi
     return 0
 }
 
 # Creates a tmux pane and uploads an already chunked image to the terminal.
-# Usage: hijack_tmux $IMAGE_ID $CHUNKS_DIR $COLS $ROWS
+# Usage: hijack_tmux $image_id $chunks_dir $cols $rows
 hijack_tmux() {
-    local IMAGE_ID="$1"
-    local CHUNKS_DIR="$2"
-    local COLS="$3"
-    local ROWS="$4"
+    local image_id="$1"
+    local chunks_dir="$2"
+    local cols="$3"
+    local rows="$4"
 
-    if [[ -z "$TMUX_HIJACK_ALLOWED" ]]; then
+    if [[ -z "$tmux_hijack_allowed" ]]; then
         echoerr "Not in active pane and tmux hijacking is not allowed"
         return 1
     fi
 
     echostatus "Not in active pane, hijacking tmux"
-    TMP_PID="$(mktemp)"
-    TMP_RET="$(mktemp)"
-    echolog "TMP_PID=$TMP_PID"
+    local tmp_pid="$(mktemp)"
+    local tmp_ret="$(mktemp)"
+    echolog "tmp_pid=$tmp_pid"
     # Run a helper in a new pane
     tmux split-window -l 1 "$0" \
-        -c "$COLS" \
-        -r "$ROWS" \
-        -e "$ERR" \
-        -l "$LOG" \
-        -f "$CHUNKS_DIR" \
-        --id "$IMAGE_ID" \
-        --store-pid "$TMP_PID" \
-        --store-code "$TMP_RET" \
+        -c "$cols" \
+        -r "$rows" \
+        -e "$err" \
+        -l "$log" \
+        -f "$chunks_dir" \
+        --id "$image_id" \
+        --store-pid "$tmp_pid" \
+        --store-code "$tmp_ret" \
         --tmux-hijack-helper
     if [[ $? -ne 0 ]]; then
         return 1
     fi
     # The process we've created should write its pid to the specified file. It's
     # not always quick.
-    for ITER in $(seq 10); do
+    for iter in $(seq 10); do
         sleep 0.1
-        PID_TO_WAIT="$(cat $TMP_PID)"
-        if [[ -n "$PID_TO_WAIT" ]]; then
+        local pid_to_wait="$(cat $tmp_pid)"
+        if [[ -n "$pid_to_wait" ]]; then
             break
         fi
     done
-    if [[ -z "$PID_TO_WAIT" ]]; then
+    if [[ -z "$pid_to_wait" ]]; then
         echoerr "Can't create a tmux hijacking process"
         return 1
     fi
-    echolog "Waiting for the process $PID_TO_WAIT"
+    echolog "Waiting for the process $pid_to_wait"
     # Wait for the process to finish.
-    # tail --pid=$PID_TO_WAIT -f /dev/null
+    # tail --pid=$pid_to_wait -f /dev/null
     while true; do
         sleep 0.1
-        if ! kill -0 "$PID_TO_WAIT" 2> /dev/null; then
+        if ! kill -0 "$pid_to_wait" 2> /dev/null; then
             break
         fi
     done
-    RET_CODE="$(cat $TMP_RET)"
-    echolog "Process $PID_TO_WAIT finished with code $RET_CODE"
-    rm "$TMP_RET" 2> /dev/null || echolog "Could not rm $TMP_RET"
-    rm "$TMP_PID" 2> /dev/null || echolog "Could not rm $TMP_PID"
-    [[ -n "$RET_CODE" ]] || RET_CODE="1"
-    return "$RET_CODE"
+    ret_code="$(cat $tmp_ret)"
+    echolog "Process $pid_to_wait finished with code $ret_code"
+    rm "$tmp_ret" 2> /dev/null || echolog "Could not rm $tmp_ret"
+    rm "$tmp_pid" 2> /dev/null || echolog "Could not rm $tmp_pid"
+    [[ -n "$ret_code" ]] || ret_code="1"
+    return "$ret_code"
 }
 
 #####################################################################
 # Running the tmux hijack helper if requested.
 #####################################################################
 
-if [[ -n "$TMUX_HIJACK_HELPER" ]]; then
+if [[ -n "$tmux_hijack_helper" ]]; then
     # Do not allow any more hijack attempts.
-    TMUX_HIJACK_ALLOWED=""
-    upload_chunked_image "$IMAGE_ID" "$FILE" "$COLS" "$ROWS"
-    RET_CODE="$?"
-    echo "$RET_CODE" > "$STORE_CODE"
-    exit "$RET_CODE"
+    tmux_hijack_allowed=""
+    upload_chunked_image "$image_id" "$file" "$cols" "$rows"
+    ret_code="$?"
+    echo "$ret_code" > "$store_code"
+    exit "$ret_code"
+fi
+
+#####################################################################
+# Handling the reupload command
+#####################################################################
+
+if [[ -n "$reupload" ]]; then
+    # If no IDs were specified, collect all ids that are not known to be
+    # uploaded into this terminal.
+    if [[ ${#reupload_ids[@]} == 0 ]]; then
+        for inst_file in "$session_dir_256"/*; do
+            id="$(head -1 "$inst_file")"
+            if [[ ! -e "$terminal_dir_256/$id" ]]; then
+                reupload_ids+="$id"
+            fi
+        done
+        for inst_file in "$session_dir_24bit"/*; do
+            id="$(head -1 "$inst_file")"
+            if [[ ! -e "$terminal_dir_24bit/$id" ]]; then
+                reupload_ids+="$id"
+            fi
+        done
+    fi
+
+    if [[ ${#reupload_ids[@]} == 0 ]]; then
+        echostderr "No images need fixing in $session_dir_256 and $session_dir_24bit"
+        exit 0
+    fi
+
+    for session_dir in "$session_dir_256" "$session_dir_24bit"; do
+        for inst in $(ls -t "$session_dir"); do
+            inst_file="$session_dir/$inst"
+            [[ -e "$inst_file" ]] || continue
+            id="$(head -1 "$inst_file")"
+            for idx in "${!reupload_ids[@]}"; do
+                if [[ "${reupload_ids[idx]}" == "$id" ]]; then
+                    unset reupload_ids[idx]
+                    break
+                fi
+            done
+        done
+    done
+
+    if [[ ${#reupload_ids[@]} != 0 ]]; then
+        echoerr "Could not find IDs: ${reupload_ids[*]}"
+        exit 1
+    fi
+
+    exit 0
 fi
 
 #####################################################################
@@ -578,81 +682,81 @@ fi
 #####################################################################
 
 # Check if the file exists.
-if ! [[ -f "$FILE" ]]; then
-    echoerr "File not found: $FILE (pwd: $(pwd))"
+if ! [[ -f "$file" ]]; then
+    echoerr "File not found: $file (pwd: $(pwd))"
     exit 1
 fi
 
-echolog "Image file: $FILE (pwd: $(pwd))"
+echolog "Image file: $file (pwd: $(pwd))"
 
 # Compute the formula with bc and round to the nearest integer.
 bc_round() {
     echo "$(LC_NUMERIC=C printf %.0f "$(echo "scale=2;($1) + 0.5" | bc)")"
 }
 
-if [[ -z "$COLS" || -z "$ROWS" ]]; then
+if [[ -z "$cols" || -z "$rows" ]]; then
     # Compute the maximum number of rows and columns if these values were not
     # specified.
-    if [[ -z "$MAX_COLS" ]]; then
-        MAX_COLS="$(tput cols)"
+    if [[ -z "$max_cols" ]]; then
+        max_cols="$(tput cols)"
     fi
-    if [[ -z "$MAX_ROWS" ]]; then
-        MAX_ROWS="$(tput lines)"
-        if (( MAX_ROWS > 255 )); then
-            MAX_ROWS=255
+    if [[ -z "$max_rows" ]]; then
+        max_rows="$(tput lines)"
+        if (( max_rows > 255 )); then
+            max_rows=255
         fi
     fi
     # Default values of rows per inch and columns per inch.
-    [[ -n "$COLS_PER_INCH" ]] || COLS_PER_INCH=12.0
-    [[ -n "$ROWS_PER_INCH" ]] || ROWS_PER_INCH=6.0
+    [[ -n "$cols_per_inch" ]] || cols_per_inch=12.0
+    [[ -n "$rows_per_inch" ]] || rows_per_inch=6.0
     # Get the size of the image and its resolution
-    PROPS=($(identify -format '%w %h %x %y' -units PixelsPerInch "$FILE"))
-    if [[ "${#PROPS[@]}" -ne 4 ]]; then
+    props=($(identify -format '%w %h %x %y' -units PixelsPerInch "$file"))
+    if [[ "${#props[@]}" -ne 4 ]]; then
         echoerr "Couldn't get result from identify"
         exit 1
     fi
-    if [[ -n "$OVERRIDE_DPI" ]]; then
-        PROPS[2]="$OVERRIDE_DPI"
-        PROPS[3]="$OVERRIDE_DPI"
+    if [[ -n "$override_dpi" ]]; then
+        props[2]="$override_dpi"
+        props[3]="$override_dpi"
     fi
-    echolog "Image pixel width: ${PROPS[0]} pixel height: ${PROPS[1]}"
-    echolog "Image x dpi: ${PROPS[2]} y dpi: ${PROPS[3]}"
-    echolog "Columns per inch: ${COLS_PER_INCH} Rows per inch: ${ROWS_PER_INCH}"
-    OPT_COLS_EXPR="(${PROPS[0]}*${COLS_PER_INCH}/${PROPS[2]})"
-    OPT_ROWS_EXPR="(${PROPS[1]}*${ROWS_PER_INCH}/${PROPS[3]})"
-    if [[ -z "$COLS" && -z "$ROWS" ]]; then
+    echolog "Image pixel width: ${props[0]} pixel height: ${props[1]}"
+    echolog "Image x dpi: ${props[2]} y dpi: ${props[3]}"
+    echolog "Columns per inch: ${cols_per_inch} Rows per inch: ${rows_per_inch}"
+    opt_cols_expr="(${props[0]}*${cols_per_inch}/${props[2]})"
+    opt_rows_expr="(${props[1]}*${rows_per_inch}/${props[3]})"
+    if [[ -z "$cols" && -z "$rows" ]]; then
         # If columns and rows are not specified, compute the optimal values
         # using the information about rows and columns per inch.
-        COLS="$(bc_round "$OPT_COLS_EXPR")"
-        ROWS="$(bc_round "$OPT_ROWS_EXPR")"
-    elif [[ -z "$COLS" ]]; then
+        cols="$(bc_round "$opt_cols_expr")"
+        rows="$(bc_round "$opt_rows_expr")"
+    elif [[ -z "$cols" ]]; then
         # If only one dimension is specified, compute the other one to match the
         # aspect ratio as close as possible.
-        COLS="$(bc_round "${OPT_COLS_EXPR}*${ROWS}/${OPT_ROWS_EXPR}")"
-    elif [[ -z "$ROWS" ]]; then
-        ROWS="$(bc_round "${OPT_ROWS_EXPR}*${COLS}/${OPT_COLS_EXPR}")"
+        cols="$(bc_round "${opt_cols_expr}*${rows}/${opt_rows_expr}")"
+    elif [[ -z "$rows" ]]; then
+        rows="$(bc_round "${opt_rows_expr}*${cols}/${opt_cols_expr}")"
     fi
 
-    echolog "Image size before applying min/max columns: $COLS, rows: $ROWS"
+    echolog "Image size before applying min/max columns: $cols, rows: $rows"
     # Make sure that automatically computed rows and columns are within some
     # sane limits
-    if (( COLS > MAX_COLS )); then
-        ROWS="$(bc_round "$ROWS * $MAX_COLS / $COLS")"
-        COLS="$MAX_COLS"
+    if (( cols > max_cols )); then
+        rows="$(bc_round "$rows * $max_cols / $cols")"
+        cols="$max_cols"
     fi
-    if (( ROWS > MAX_ROWS )); then
-        COLS="$(bc_round "$COLS * $MAX_ROWS / $ROWS")"
-        ROWS="$MAX_ROWS"
+    if (( rows > max_rows )); then
+        cols="$(bc_round "$cols * $max_rows / $rows")"
+        rows="$max_rows"
     fi
-    if (( COLS < 1 )); then
-        COLS=1
+    if (( cols < 1 )); then
+        cols=1
     fi
-    if (( ROWS < 1 )); then
-        ROWS=1
+    if (( rows < 1 )); then
+        rows=1
     fi
 fi
 
-echolog "Image size columns: $COLS, rows: $ROWS"
+echolog "Image size columns: $cols, rows: $rows"
 
 #####################################################################
 # Helper functions for finding image ids
@@ -661,7 +765,7 @@ echolog "Image size columns: $COLS, rows: $ROWS"
 # Checks if the given string is an integer within the correct id range.
 is_image_id_correct() {
     if [[ "$1" =~ ^[0-9]+$ ]]; then
-        if [[ -n "$USE_256" ]]; then
+        if [[ -n "$use_256" ]]; then
             if (( "$1" < 256 )) && (( "$1" > 0 )); then
                 return 0
             fi
@@ -675,78 +779,78 @@ is_image_id_correct() {
     return 1
 }
 
-# Finds an image id for the instance $IMG_INSTANCE.
+# Finds an image id for the instance $img_instance.
 find_image_id() {
-    local INST_FILE
+    local inst_file
     # Make sure that some_dir/* returns an empty list if some_dir is empty.
     shopt -s nullglob
     # Try to find an existing session image id corresponding to the instance.
-    INST_FILE="$SESSION_DIR/$IMG_INSTANCE"
-    if [[ -e "$INST_FILE" ]]; then
-        IMAGE_ID="$(head -1 "$INST_FILE")"
-        if ! is_image_id_correct "$IMAGE_ID"; then
-            echoerr "Found invalid image_id $IMAGE_ID, deleting $INST_FILE"
-            rm "$INST_FILE"
+    inst_file="$session_dir/$img_instance"
+    if [[ -e "$inst_file" ]]; then
+        image_id="$(head -1 "$inst_file")"
+        if ! is_image_id_correct "$image_id"; then
+            echoerr "Found invalid image_id $image_id, deleting $inst_file"
+            rm "$inst_file"
         else
-            touch "$INST_FILE"
-            echolog "Found an existing image id $IMAGE_ID"
+            touch "$inst_file"
+            echolog "Found an existing image id $image_id"
             return 0
         fi
     fi
     # If there is no image id corresponding to the instance, try to find a free
     # image id.
-    if [[ -n "$USE_256" ]]; then
-        local ID
-        local IDS_ARRAY=($(seq 0 255))
+    if [[ -n "$use_256" ]]; then
+        local id
+        local ids_array=($(seq 0 255))
         # Load ids and mark occupied ids with "0" (0 is an invalid id anyway).
-        for INST_FILE in "$SESSION_DIR"/*; do
-            ID="$(head -1 "$INST_FILE")"
-            if ! is_image_id_correct "$ID"; then
-                echoerr "Found invalid image_id $ID, deleting $INST_FILE"
-                rm "$INST_FILE"
+        for inst_file in "$session_dir"/*; do
+            id="$(head -1 "$inst_file")"
+            if ! is_image_id_correct "$id"; then
+                echoerr "Found invalid image_id $id, deleting $inst_file"
+                rm "$inst_file"
             else
-                IDS_ARRAY[$ID]="0"
+                ids_array[$id]="0"
             fi
         done
         # Try to find an array element that is not "0".
-        for ID in "${IDS_ARRAY[@]}"; do
-            if [[ "$ID" != "0" ]]; then
-                IMAGE_ID="$ID"
-                echolog "Found a free image id $IMAGE_ID"
+        for id in "${ids_array[@]}"; do
+            if [[ "$id" != "0" ]]; then
+                image_id="$id"
+                echolog "Found a free image id $image_id"
                 return 0
             fi
         done
         # On failure we need to reassign the id of the oldest image.
-        local OLDEST_FILE=""
-        for INST_FILE in "$SESSION_DIR"/*; do
-            if [[ -z $OLDEST_FILE || $INST_FILE -ot $OLDEST_FILE ]]; then
-                OLDEST_FILE="$INST_FILE"
+        local oldest_file=""
+        for inst_file in "$session_dir"/*; do
+            if [[ -z $oldest_file || $inst_file -ot $oldest_file ]]; then
+                oldest_file="$inst_file"
             fi
         done
-        IMAGE_ID="$(head -1 "$INST_FILE")"
-        echolog "Recuperating the id $IMAGE_ID from $OLDEST_FILE"
-        rm "$OLDEST_FILE"
+        image_id="$(head -1 "$inst_file")"
+        echolog "Recuperating the id $image_id from $oldest_file"
+        rm "$oldest_file"
         return 0
     else
-        local IDS_ARRAY=()
+        local ids_array=()
         # Load ids into the array.
-        for INST_FILE in "$SESSION_DIR"/*; do
-            ID="$(head -1 "$INST_FILE")"
-            if ! is_image_id_correct "$ID"; then
-                echoerr "Found invalid image_id $ID, deleting $INST_FILE"
-                rm "$INST_FILE"
+        for inst_file in "$session_dir"/*; do
+            id="$(head -1 "$inst_file")"
+            if ! is_image_id_correct "$id"; then
+                echoerr "Found invalid image_id $id, deleting $inst_file"
+                rm "$inst_file"
             else
-                IDS_ARRAY+="$ID"
+                ids_array+="$id"
             fi
         done
-        IMAGE_ID=""
+        image_id=""
         # Generate a random id until we find one that is not in use.
-        while [[ -z "$IMAGE_ID" ]]; do
-            IMAGE_ID="$(shuf -i 256-16777215 -n 1)"
+        while [[ -z "$image_id" ]]; do
+            image_id="$(shuf -i 256-16777215 -n 1)"
             # Check that the id is not in use
-            for ID in "${IDS_ARRAY[@]}"; do
-                if [[ "$IMAGE_ID" == "$ID" ]]; then
-                    IMAGE_ID=""
+            for id in "${ids_array[@]}"; do
+                if [[ "$image_id" == "$id" ]]; then
+                    image_id=""
                     break
                 fi
             done
@@ -756,80 +860,74 @@ find_image_id() {
 }
 
 #####################################################################
-# Managing the cache dir and assigning the image id
+# Assigning the image id
 #####################################################################
 
-[[ -n "$CACHE_DIR" ]] || CACHE_DIR="$HOME/.cache/terminal-images"
-
-# If the id is explicitly specified, set the $USE_256 variable accordingly and
+# If the id is explicitly specified, set the $use_256 variable accordingly and
 # then check that the id is correct.
-if [[ -n "$IMAGE_ID" ]]; then
-    if (( "$IMAGE_ID" < 256 )); then
-        USE_256="1"
+if [[ -n "$image_id" ]]; then
+    if (( "$image_id" < 256 )); then
+        use_256="1"
     else
-        USE_256=""
+        use_256=""
     fi
-    if ! is_image_id_correct "$IMAGE_ID"; then
-        echoerr "The specified image id $IMAGE_ID is not correct"
+    if ! is_image_id_correct "$image_id"; then
+        echoerr "The specified image id $image_id is not correct"
         exit 1
     fi
 fi
 
 # 8-bit and 24-bit image ids live in different namespaces. We use different
 # session and terminal directories to store information about them.
-ID_SUBSPACE="24bit_ids"
-if [[ -n "$USE_256" ]]; then
-    ID_SUBSPACE="8bit_ids"
+if [[ -n "$use_256" ]]; then
+    session_dir="$cache_dir/sessions/${session_id}-8bit_ids"
+    terminal_dir="$cache_dir/terminals/${terminal_id}-8bit_ids"
+else
+    session_dir="$cache_dir/sessions/${session_id}-24bit_ids"
+    terminal_dir="$cache_dir/terminals/${terminal_id}-24bit_ids"
 fi
 
-SESSION_DIR="$CACHE_DIR/sessions/${SESSION_ID}-${ID_SUBSPACE}"
-TERMINAL_DIR="$CACHE_DIR/terminals/${TERMINAL_ID}-${ID_SUBSPACE}"
-
-mkdir -p "$CACHE_DIR/cache/" 2> /dev/null
-mkdir -p "$SESSION_DIR" 2> /dev/null
-mkdir -p "$TERMINAL_DIR" 2> /dev/null
-
 # Compute md5sum and copy the file to the cache dir.
-IMG_MD5="$(md5sum "$FILE" | cut -f 1 -d " ")"
-echolog "Image md5sum: $IMG_MD5"
+img_md5="$(md5sum "$file" | cut -f 1 -d " ")"
+echolog "Image md5sum: $img_md5"
 
-CACHED_FILE="$CACHE_DIR/cache/$IMG_MD5"
-if [[ ! -e "$CACHED_FILE" ]]; then
-    cp "$FILE" "$CACHED_FILE"
+cached_file="$cache_dir/cache/$img_md5"
+if [[ ! -e "$cached_file" ]]; then
+    cp "$file" "$cached_file"
 else
-    touch "$CACHED_FILE"
+    touch "$cached_file"
 fi
 
 # Image instance is an image with its positioning attributes: columns, rows and
 # any other attributes we may add in the future (alignment, scale mode, etc).
 # Each image id corresponds to a single image instance.
-IMG_INSTANCE="${IMG_MD5}_${COLS}_${ROWS}"
+img_instance="${img_md5}_${cols}_${rows}"
 
-if [[ -n "$IMAGE_ID" ]]; then
-    echostatus "Using the specified image id $IMAGE_ID"
+if [[ -n "$image_id" ]]; then
+    echolog "Using the specified image id $image_id"
 else
     # Find an id for the image. We want to avoid reuploading, and at the same
     # time we want to minimize image id collisions.
-    echostatus "Searching for a free image id"
+    echolog "Searching for a free image id"
     (
-        flock --timeout "$DEFAULT_TIMEOUT" 9 || \
-            { echoerr "Could not acquire a lock on $SESSION_DIR.lock"; exit 1; }
+        flock --timeout "$default_timeout" 9 || \
+            { echoerr "Could not acquire a lock on $session_dir.lock"; exit 1; }
         # Find the image id (see the function definition below).
-        IMAGE_ID=""
+        image_id=""
         find_image_id
-        if [[ -z "$IMAGE_ID" ]]; then
+        if [[ -z "$image_id" ]]; then
             echoerr "Failed to find an image id"
             exit 1
         fi
         # If it hasn't been loaded, create the instance file.
-        if [[ ! -e "$SESSION_DIR/$IMG_INSTANCE" ]]; then
-            echo "$IMAGE_ID" > "$SESSION_DIR/$IMG_INSTANCE"
+        if [[ ! -e "$session_dir/$img_instance" ]]; then
+            echo "$image_id" > "$session_dir/$img_instance"
         fi
-    ) 9>"$SESSION_DIR.lock" || exit 1
+    ) 9>"$session_dir.lock" || exit 1
 
-    IMAGE_ID="$(head -1 "$SESSION_DIR/$IMG_INSTANCE")"
+    image_id="$(head -1 "$session_dir/$img_instance")"
 
-    echostatus "Found an image id $IMAGE_ID"
+    echolog "Found an image id $image_id"
 fi
 
 #####################################################################
@@ -839,26 +937,26 @@ fi
 # Check if this instance has already been uploaded to this terminal with the
 # found image id.
 # TODO: Also check date and reupload if too old.
-if [[ -e "$TERMINAL_DIR/$IMAGE_ID" ]] &&
-   [[ "$(head -1 "$TERMINAL_DIR/$IMAGE_ID")" == "$IMG_INSTANCE" ]]; then
-    echostatus "Image already uploaded"
+if [[ -e "$terminal_dir/$image_id" ]] &&
+   [[ "$(head -1 "$terminal_dir/$image_id")" == "$img_instance" ]]; then
+    echolog "Image already uploaded"
 else
     (
-        flock --timeout "$DEFAULT_TIMEOUT" 9 || \
-            { echoerr "Could not acquire a lock on $TERMINAL_DIR.lock"; exit 1; }
-        rm "$TERMINAL_DIR/$IMAGE_ID" 2> /dev/null
-        upload_image "$IMAGE_ID" "$FILE" "$COLS" "$ROWS"
+        flock --timeout "$default_timeout" 9 || \
+            { echoerr "Could not acquire a lock on $terminal_dir.lock"; exit 1; }
+        rm "$terminal_dir/$image_id" 2> /dev/null
+        upload_image "$image_id" "$file" "$cols" "$rows"
         if [[ "$?" == "0" ]]; then
-            echo "$IMG_INSTANCE" > "$TERMINAL_DIR/$IMAGE_ID"
+            echo "$img_instance" > "$terminal_dir/$image_id"
         fi
-    ) 9>"$TERMINAL_DIR.lock" || exit 1
+    ) 9>"$terminal_dir.lock" || exit 1
 fi
 
 #####################################################################
 # Printing the image placeholder
 #####################################################################
 
-ROWCOLUMN_DIACRITICS=("\U305" "\U30d" "\U30e" "\U310" "\U312" "\U33d" "\U33e"
+rowcolumn_diacritics=("\U305" "\U30d" "\U30e" "\U310" "\U312" "\U33d" "\U33e"
     "\U33f" "\U346" "\U34a" "\U34b" "\U34c" "\U350" "\U351" "\U352" "\U357"
     "\U35b" "\U363" "\U364" "\U365" "\U366" "\U367" "\U368" "\U369" "\U36a"
     "\U36b" "\U36c" "\U36d" "\U36e" "\U36f" "\U483" "\U484" "\U485" "\U486"
@@ -897,30 +995,37 @@ ROWCOLUMN_DIACRITICS=("\U305" "\U30d" "\U30e" "\U310" "\U312" "\U33d" "\U33e"
 
 # Each line starts with the escape sequence to set the foreground color to the
 # image id, unless --noesc is specified.
-LINE_START=""
-LINE_END=""
-if [[ -z "$NOESC" ]]; then
-    # TODO: 24 bit ids
-    LINE_START="$(echo -en "\e[38;5;${IMAGE_ID}m")"
-    LINE_END="$(echo -en "\e[39;m")"
+line_start=""
+line_end=""
+if [[ -z "$noesc" ]]; then
+    if [[ -n "$use_256" ]]; then
+        line_start="$(echo -en "\e[38;5;${image_id}m")"
+        line_end="$(echo -en "\e[39;m")"
+    else
+        blue="$(( "$image_id" % 256 ))"
+        green="$(( ("$image_id" / 256) % 256 ))"
+        red="$(( ("$image_id" / 65536) % 256 ))"
+        line_start="$(echo -en "\e[38;2;${red};${green};${blue}m")"
+        line_end="$(echo -en "\e[39;m")"
+    fi
 fi
 
 # Clear the status line.
 echostatus
 
 # Clear the output file
-if [[ -z "$APPEND" ]]; then
-    > "$OUT"
+if [[ -z "$append" ]]; then
+    > "$out"
 fi
 
 # Fill the output with characters representing the image
-for Y in `seq 0 $(expr $ROWS - 1)`; do
-    echo -n "$LINE_START" >> "$OUT"
-    for X in `seq 0 $(expr $COLS - 1)`; do
-        printf "\UEEEE${ROWCOLUMN_DIACRITICS[$Y]}${ROWCOLUMN_DIACRITICS[$X]}"
+for y in `seq 0 $(expr $rows - 1)`; do
+    echo -n "$line_start" >> "$out"
+    for x in `seq 0 $(expr $cols - 1)`; do
+        printf "\UEEEE${rowcolumn_diacritics[$y]}${rowcolumn_diacritics[$x]}"
     done
-    echo -n "$LINE_END" >> "$OUT"
-    printf "\n" >> "$OUT"
+    echo -n "$line_end" >> "$out"
+    printf "\n" >> "$out"
 done
 
 echolog "Finished displaying the image"
