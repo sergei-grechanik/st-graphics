@@ -45,6 +45,8 @@ uploading progress (which may be disabled with '-q').
     --fix [IDs], --reupload [IDs]
         Reupload the given IDs. If no IDs are given, try to guess which images
         need reuploading automatically.
+    --clear-term
+        Delete all pictures loaded to the terminal.
     --noesc
         Do not issue the escape codes representing row numbers (encoded as
         foreground color).
@@ -87,6 +89,12 @@ uploading progress (which may be disabled with '-q').
 # Exit the script on keyboard interrupt
 trap "exit 1" INT
 
+# Make sure that some_dir/* returns an empty list if some_dir is empty.
+shopt -s nullglob
+
+default_timeout=3
+chunk_size=3968
+
 cols=""
 rows=""
 max_cols=""
@@ -109,10 +117,11 @@ tmux_hijack_allowed="1"
 tmux_hijack_helper=""
 store_code=""
 store_pid=""
-default_timeout=3
 
 reupload=""
 reupload_ids=()
+
+clear_term=""
 
 # A utility function to print logs
 echolog() {
@@ -133,8 +142,9 @@ echostatus() {
 }
 
 # Display a message, both as the status and to $err.
-echostderr() {
+echomessage() {
     if [[ -z "$err" ]]; then
+        echostatus ""
         echo "$1" >> /dev/stderr
         echolog "$1"
     else
@@ -146,7 +156,7 @@ echostderr() {
 # Display an error message, both as the status and to $err, prefixed with
 # "error:".
 echoerr() {
-    echostderr "error: $1"
+    echomessage "error: $1"
 }
 
 # Parse the command line.
@@ -241,6 +251,10 @@ while [[ $# -gt 0 ]]; do
                 reupload_ids+=("$1")
                 shift
             done
+            ;;
+        --clear-term)
+            clear_term=1
+            shift
             ;;
 
         # Options used internally.
@@ -422,8 +436,8 @@ get_terminal_response() {
     term_response_printable=""
     # -r means backslash is part of the line
     # -d '\' means \ is the line delimiter
-    # -t 2 is timeout
-    if ! read -r -d '\' -t 2 term_response; then
+    # -t ... is timeout in seconds
+    if ! read -r -d '\' -t "$default_timeout" term_response; then
         if [[ -z "$term_response" ]]; then
             echoerr "No response from terminal"
         else
@@ -435,13 +449,31 @@ get_terminal_response() {
     echolog "term_response: $term_response_printable"
 }
 
-# Uploads an image to the terminal.
-# Usage: upload_image $image_id $file $cols $rows
+# Uploads an image to the terminal. If $terminal_dir is specified, acquires the
+# lock and adds the image to the list of images known to be uploaded to the
+# terminal.
+# Usage: upload_image $image_id $file $cols $rows [$terminal_dir]
 upload_image() {
     local image_id="$1"
     local file="$2"
     local cols="$3"
     local rows="$4"
+    local terminal_dir="$5"
+
+    if [[ -n $terminal_dir ]]; then
+        (
+            flock --timeout "$default_timeout" 9 || \
+                { echoerr "Could not acquire a lock on $terminal_dir.lock"; \
+                  exit 1; }
+            rm "$terminal_dir/$image_id" 2> /dev/null
+            if upload_image "$image_id" "$file" "$cols" "$rows"; then
+                echo "$img_instance" > "$terminal_dir/$image_id"
+            else
+                exit 1
+            fi
+        ) 9>"$terminal_dir.lock" || return 1
+        return 0
+    fi
 
     rm "$tmpdir/"* 2> /dev/null
 
@@ -462,13 +494,24 @@ upload_image() {
     # command shouldn't be more than 4096, so we set the size of an encoded
     # chunk to be 3968, slightly less than that.
     echostatus "base64-encoding and chunking the image"
-    cat "$file" | base64 -w0 | split -b 3968 - "$tmpdir/chunk_"
+    cat "$file" | base64 -w0 | split -b "$chunk_size" - "$tmpdir/chunk_"
 
     # Write the size of the image in bytes to the "size" file.
     wc -c < "$file" > "$tmpdir/size"
 
     upload_chunked_image "$image_id" "$tmpdir" "$cols" "$rows"
     return $?
+}
+
+# Checks if inside the active tmux pane.
+tmux_is_active_pane() {
+    local tmux_active="$(tmux display-message -t $TMUX_PANE \
+                            -p "#{window_active}#{pane_active}")"
+    if [[ "$tmux_active" == "11" ]]; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 # Uploads an already chunked image to the terminal.
@@ -483,9 +526,7 @@ upload_chunked_image() {
     # panes is impossible, so we either need to fail or to hijack focus by
     # creating a new pane.
     if [[ -n "$inside_tmux" ]]; then
-        local tmux_active="$(tmux display-message -t $TMUX_PANE \
-                                -p "#{window_active}#{pane_active}")"
-        if [[ "$tmux_active" != "11" ]]; then
+        if ! tmux_is_active_pane; then
             hijack_tmux "$image_id" "$chunks_dir" "$cols" "$rows"
             return $?
         fi
@@ -493,8 +534,10 @@ upload_chunked_image() {
 
     # Read the original file size from the "size" file
     local size_info=""
+    local total_size=""
     if [[ -e "$chunks_dir/size" ]]; then
-        size_info=",S=$(cat "$chunks_dir/size")"
+        total_size="$(cat "$chunks_dir/size")"
+        size_info=",S=$total_size"
     fi
 
     # Issue a command indicating that we want to start data transmission for a
@@ -520,16 +563,28 @@ upload_chunked_image() {
         echolog "Uploading chunk $chunk"
         chunk_i=$((chunk_i+1))
         if [[ $((chunk_i % 10)) -eq 1 ]]; then
-            # Do not compute the speed too often
-            if [[ $((chunk_i % 100)) -eq 1 ]]; then
-                # We use +%s%3N tow show time in nanoseconds
-                CURTIME="$(date +%s%3N)"
-                TIMEDIFF="$((CURTIME - start_time))"
-                if [[ "$TIMEDIFF" -ne 0 ]]; then
-                    speed="$(((chunk_i*4 - 4)*1000/TIMEDIFF)) K/s"
+            # Check if we are still in the active pane
+            if [[ -n "$inside_tmux" ]]; then
+                if ! tmux_is_active_pane; then
+                    echoerr "Tmux pane became inactive, aborting the upload"
+                    return 1
                 fi
             fi
-            echostatus "$((chunk_i*4))/$((chunks_count*4))K [$speed]"
+            # Do not compute the speed too often
+            if [[ $((chunk_i % 100)) -eq 1 ]]; then
+                # We use +%s%3N to show time in milliseconds
+                curtime="$(date +%s%3N)"
+                timediff="$((curtime - start_time))"
+                if [[ "$timediff" -ne 0 ]]; then
+                    # We multiply by 3 and divide by 4 because chunks are
+                    # base64-encoded and we want to show speed in terms of the
+                    # original image size.
+                    # We multiply by 1000 to convert from ms to s.
+                    # We divide by 1024 to convert from bytes to Kbytes.
+                    speed="$(((chunk_i - 1)*chunk_size*1000*3/4/1024 / timediff)) K/s"
+                fi
+            fi
+            echostatus "$((chunk_i*chunk_size*3/4/1024))/$((total_size / 1024))K [$speed]"
         fi
         # The uploading of the chunk goes here.
         start_gr_command
@@ -570,12 +625,14 @@ hijack_tmux() {
     echostatus "Not in active pane, hijacking tmux"
     local tmp_pid="$(mktemp)"
     local tmp_ret="$(mktemp)"
+    local tmp_err="$(mktemp)"
     echolog "tmp_pid=$tmp_pid"
+    touch "$tmp_err"
     # Run a helper in a new pane
     tmux split-window -l 1 "$0" \
         -c "$cols" \
         -r "$rows" \
-        -e "$err" \
+        -e "$tmp_err" \
         -l "$log" \
         -f "$chunks_dir" \
         --id "$image_id" \
@@ -609,8 +666,15 @@ hijack_tmux() {
     done
     ret_code="$(cat $tmp_ret)"
     echolog "Process $pid_to_wait finished with code $ret_code"
-    rm "$tmp_ret" 2> /dev/null || echolog "Could not rm $tmp_ret"
+    # Display errors from the helper
+    if [[ "$ret_code" != 0 ]]; then
+        echomessage "$(cat "$tmp_err")"
+    fi
+
     rm "$tmp_pid" 2> /dev/null || echolog "Could not rm $tmp_pid"
+    rm "$tmp_ret" 2> /dev/null || echolog "Could not rm $tmp_ret"
+    rm "$tmp_err" 2> /dev/null || echolog "Could not rm $tmp_err"
+
     [[ -n "$ret_code" ]] || ret_code="1"
     return "$ret_code"
 }
@@ -629,32 +693,90 @@ if [[ -n "$tmux_hijack_helper" ]]; then
 fi
 
 #####################################################################
+# Handling the clear-term command
+#####################################################################
+
+if [[ -n "$clear_term" ]]; then
+    # TODO: Send the command to remove all images from the terminal.
+    for terminal_dir in "$terminal_dir_256" "$terminal_dir_24bit"; do
+        echomessage "Clearing $terminal_dir"
+        (
+            flock --timeout "$default_timeout" 9 || \
+                { echoerr "Could not acquire a lock on $terminal_dir.lock"; \
+                  exit 1; }
+            rm "$terminal_dir"/* 2> /dev/null
+            exit 0
+        ) 9>"$terminal_dir.lock" || exit 1
+    done
+    exit 0
+fi
+
+#####################################################################
 # Handling the reupload command
 #####################################################################
+
+reupload_instance() {
+    local inst="$1"
+    local id="$2"
+    local inst_parts=($(echo "$inst" | tr "_" "\n"))
+    local md5="${inst_parts[0]}"
+    local cols="${inst_parts[1]}"
+    local rows="${inst_parts[2]}"
+    local cached_file="$cache_dir/cache/$md5"
+
+    echomessage "Trying to reupload id $id  md5 $md5  cols $cols rows $rows"
+
+    if [[ ! -e "$cached_file" ]]; then
+        echoerr "Could not find the image in cache"
+        return 1
+    fi
+
+    if (( "$id" < 256 )); then
+        local session_dir="$session_dir_256"
+        local terminal_dir="$terminal_dir_256"
+    else
+        local session_dir="$session_dir_24bit"
+        local terminal_dir="$terminal_dir_24bit"
+    fi
+
+    if upload_image "$id" "$cached_file" "$cols" "$rows" "$terminal_dir"; then
+        echomessage "Successfully reuploaded id $id"
+    else
+        return 1
+    fi
+}
 
 if [[ -n "$reupload" ]]; then
     # If no IDs were specified, collect all ids that are not known to be
     # uploaded into this terminal.
     if [[ ${#reupload_ids[@]} == 0 ]]; then
+        echomessage "Session dir 256: $session_dir_256"
+        echomessage "Terminal dir 256: $terminal_dir_256"
         for inst_file in "$session_dir_256"/*; do
             id="$(head -1 "$inst_file")"
             if [[ ! -e "$terminal_dir_256/$id" ]]; then
-                reupload_ids+="$id"
+                reupload_ids+=("$id")
             fi
         done
+        echomessage "Session dir 24bit: $session_dir_24bit"
+        echomessage "Terminal dir 24bit: $terminal_dir_24bit"
         for inst_file in "$session_dir_24bit"/*; do
             id="$(head -1 "$inst_file")"
             if [[ ! -e "$terminal_dir_24bit/$id" ]]; then
-                reupload_ids+="$id"
+                reupload_ids+=("$id")
             fi
         done
     fi
 
     if [[ ${#reupload_ids[@]} == 0 ]]; then
-        echostderr "No images need fixing in $session_dir_256 and $session_dir_24bit"
+        echomessage "No images need fixing in session dirs"
         exit 0
     fi
 
+    reupload_ids_failed=()
+
+    # Iterate over all image instances starting from the newest one and reupload
+    # them if they are in `reupload_ids`.
     for session_dir in "$session_dir_256" "$session_dir_24bit"; do
         for inst in $(ls -t "$session_dir"); do
             inst_file="$session_dir/$inst"
@@ -662,17 +784,26 @@ if [[ -n "$reupload" ]]; then
             id="$(head -1 "$inst_file")"
             for idx in "${!reupload_ids[@]}"; do
                 if [[ "${reupload_ids[idx]}" == "$id" ]]; then
-                    unset reupload_ids[idx]
+                    reupload_instance "$inst" "$id" || \
+                        reupload_ids_failed+=("$id")
+                    unset 'reupload_ids[idx]'
                     break
                 fi
             done
         done
     done
 
+    if [[ ${#reupload_ids_failed[@]} != 0 ]]; then
+        echoerr "Reuploading failed for IDs: ${reupload_ids_failed[*]}"
+        exit 1
+    fi
+
     if [[ ${#reupload_ids[@]} != 0 ]]; then
         echoerr "Could not find IDs: ${reupload_ids[*]}"
         exit 1
     fi
+
+    echomessage "Successfully reuploaded all images"
 
     exit 0
 fi
@@ -782,8 +913,6 @@ is_image_id_correct() {
 # Finds an image id for the instance $img_instance.
 find_image_id() {
     local inst_file
-    # Make sure that some_dir/* returns an empty list if some_dir is empty.
-    shopt -s nullglob
     # Try to find an existing session image id corresponding to the instance.
     inst_file="$session_dir/$img_instance"
     if [[ -e "$inst_file" ]]; then
@@ -840,7 +969,7 @@ find_image_id() {
                 echoerr "Found invalid image_id $id, deleting $inst_file"
                 rm "$inst_file"
             else
-                ids_array+="$id"
+                ids_array+=("$id")
             fi
         done
         image_id=""
@@ -880,11 +1009,11 @@ fi
 # 8-bit and 24-bit image ids live in different namespaces. We use different
 # session and terminal directories to store information about them.
 if [[ -n "$use_256" ]]; then
-    session_dir="$cache_dir/sessions/${session_id}-8bit_ids"
-    terminal_dir="$cache_dir/terminals/${terminal_id}-8bit_ids"
+    local session_dir="$session_dir_256"
+    local terminal_dir="$terminal_dir_256"
 else
-    session_dir="$cache_dir/sessions/${session_id}-24bit_ids"
-    terminal_dir="$cache_dir/terminals/${terminal_id}-24bit_ids"
+    local session_dir="$session_dir_24bit"
+    local terminal_dir="$terminal_dir_24bit"
 fi
 
 # Compute md5sum and copy the file to the cache dir.
@@ -941,15 +1070,7 @@ if [[ -e "$terminal_dir/$image_id" ]] &&
    [[ "$(head -1 "$terminal_dir/$image_id")" == "$img_instance" ]]; then
     echolog "Image already uploaded"
 else
-    (
-        flock --timeout "$default_timeout" 9 || \
-            { echoerr "Could not acquire a lock on $terminal_dir.lock"; exit 1; }
-        rm "$terminal_dir/$image_id" 2> /dev/null
-        upload_image "$image_id" "$file" "$cols" "$rows"
-        if [[ "$?" == "0" ]]; then
-            echo "$img_instance" > "$terminal_dir/$image_id"
-        fi
-    ) 9>"$terminal_dir.lock" || exit 1
+    upload_image "$image_id" "$file" "$cols" "$rows" "$terminal_dir"
 fi
 
 #####################################################################
