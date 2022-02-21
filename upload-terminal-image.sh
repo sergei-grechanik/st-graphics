@@ -5,14 +5,25 @@
 # TODO: This script uses bash-specific features. Would be nice to make it more
 #       portable.
 
-HELP="This script send the given image to the terminal and outputs characters
+# TODO list:
+# - Cache clean-up
+# - Status
+# - Saving IDs
+# - Support filesystem-based uploading
+# - ID deletion
+# - Tests
+
+script_fullname="$0"
+script_name="$(basename $0)"
+
+help="This script sends the given image to the terminal and outputs characters
 that can be used to display this image using the unicode image placeholder
 symbol approach. Note that it will use a single line of the output to display
 uploading progress (which may be disabled with '-q').
 
   Usage:
-    $(basename $0) [OPTIONS] <image_file>
-    $(basename $0) --fix [<IDs>]
+    $script_name [OPTIONS] <image_file>
+    $script_name --fix [<IDs>]
 
   Options:
     -c N, --columns N
@@ -47,6 +58,10 @@ uploading progress (which may be disabled with '-q').
         need reuploading automatically.
     --clear-term
         Delete all pictures loaded to the terminal.
+    --clean-cache
+        Remove some old files and IDs from the cache dir.
+    --status
+        Show various information.
     --noesc
         Do not issue the escape codes representing row numbers (encoded as
         foreground color).
@@ -92,8 +107,24 @@ trap "exit 1" INT
 # Make sure that some_dir/* returns an empty list if some_dir is empty.
 shopt -s nullglob
 
+# The timeout for terminal response and file locks, in seconds.
 default_timeout=3
+# The size of a chunk (after base64-encoding), in bytes.
 chunk_size=3968
+
+# The maximum number of days since last action after which a terminal or session
+# dir will be deleted.
+max_days_of_inactivity=30
+# The maximum number of ids in a session or a terminal.
+max_ids=512
+# The number of ids deleted from a session or a terminal if there are too many.
+num_ids_to_delete=64
+# The maximum number of images stored in the cache dir.
+max_cached_images=512
+# The maximum total size of images stored in the cache dir, in Kbytes.
+max_cached_images_size=300000
+# The number of images to delete if there are too many.
+num_images_to_delete=64
 
 cols=""
 rows=""
@@ -122,6 +153,10 @@ reupload=""
 reupload_ids=()
 
 clear_term=""
+clean_cache=""
+show_status=""
+
+command_count=0
 
 # A utility function to print logs
 echolog() {
@@ -191,7 +226,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            echo "$HELP"
+            echo "$help"
             exit 0
             ;;
         -f|--file)
@@ -246,6 +281,7 @@ while [[ $# -gt 0 ]]; do
         # Subcommand-like options
         --fix|--reupload)
             reupload=1
+            ((command_count++))
             shift
             while [[ "$1" =~ ^[0-9]+$ ]]; do
                 reupload_ids+=("$1")
@@ -254,6 +290,17 @@ while [[ $# -gt 0 ]]; do
             ;;
         --clear-term)
             clear_term=1
+            ((command_count++))
+            shift
+            ;;
+        --clean-cache)
+            clean_cache=1
+            ((command_count++))
+            shift
+            ;;
+        --status)
+            show_status=1
+            ((command_count++))
             shift
             ;;
 
@@ -285,6 +332,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if (( $command_count > 1 )); then
+    echoerr "Only one command-like option may be specified"
+    exit 1
+fi
 
 echolog ""
 
@@ -347,8 +399,70 @@ mkdir -p "$terminal_dir_256" 2> /dev/null
 mkdir -p "$session_dir_24bit" 2> /dev/null
 mkdir -p "$terminal_dir_24bit" 2> /dev/null
 
+touch "$session_dir_256" "$terminal_dir_256" \
+    "$session_dir_24bit" "$terminal_dir_24bit"
+
 echolog "terminal_id=$terminal_id"
 echolog "session_id=$session_id"
+
+#####################################################################
+# Helper functions for cache dir clean-up
+#####################################################################
+
+# Deletes session and terminal dirs and lock files that are too old.
+delete_stale_dirs() {
+    for directory in "$cache_dir/sessions"/* "$cache_dir/terminals"/*; do
+        local age="$((($(date +%s) - $(date +%s -r "$directory")) / 86400))"
+        if (( "$age" > "$max_days_of_inactivity" )); then
+            echomessage "Deleting $age days old $directory"
+            rm -r "$directory"
+        fi
+    done
+}
+
+# Deletes $2 oldest files from $1.
+delete_oldest_files() {
+    local directory="$1"
+    local num_delete="$2"
+    echomessage "Deleting $num_delete files from $directory"
+    for file in $(ls -1t "$directory" | tail -$num_delete); do
+        rm "$directory/$file"
+    done
+}
+
+# If there are more than $2 files in $1, deletes $3 oldest files.
+delete_files_if_too_many() {
+    local directory="$1"
+    local max_files="$2"
+    local num_delete="$3"
+    if (( "$(ls -1 "$directory" | wc -l)" > "$max_files" )); then
+        delete_oldest_files "$directory" "$num_delete"
+    fi
+}
+
+# If there are more than $2 Kbytes in $1, deletes $3 oldest files.
+delete_files_if_too_large() {
+    local directory="$1"
+    local max_kb="$2"
+    local num_delete="$3"
+    while (( "$(du -s "$directory" | cut -f1)" > "$max_kb" )); do
+        delete_oldest_files "$directory" "$num_delete"
+    done
+}
+
+# Performs cache clean-up: removes stale terminal and session dirs, deletes old
+# image files, removes old ids if there are too many of them.
+cleanup_cache() {
+    delete_stale_dirs
+    for directory in "$session_dir_256" "$session_dir_24bit" \
+                     "$terminal_dir_256" "$terminal_dir_24bit"; do
+        delete_files_if_too_many "$directory" "$max_ids" "$num_ids_to_delete"
+    done
+    delete_files_if_too_many "$cache_dir/cache" \
+        "$max_cached_images" "$num_images_to_delete"
+    delete_files_if_too_large "$cache_dir/cache" \
+        "$max_cached_images_size" "$num_images_to_delete"
+}
 
 #####################################################################
 # Creating a temp dir and adjusting the terminal state
@@ -473,6 +587,11 @@ upload_image() {
             fi
         ) 9>"$terminal_dir.lock" || return 1
         return 0
+    fi
+
+    if [[ -z "$tmpdir" ]]; then
+        echoerr "Temporary dir hasn't been created"
+        return 1
     fi
 
     rm "$tmpdir/"* 2> /dev/null
@@ -629,7 +748,7 @@ hijack_tmux() {
     echolog "tmp_pid=$tmp_pid"
     touch "$tmp_err"
     # Run a helper in a new pane
-    tmux split-window -l 1 "$0" \
+    tmux split-window -l 1 "$script_fullname" \
         -c "$cols" \
         -r "$rows" \
         -e "$tmp_err" \
@@ -708,6 +827,47 @@ if [[ -n "$clear_term" ]]; then
             exit 0
         ) 9>"$terminal_dir.lock" || exit 1
     done
+    exit 0
+fi
+
+#####################################################################
+# Handling the clean-cache command
+#####################################################################
+
+if [[ -n "$clean_cache" ]]; then
+    cleanup_cache
+    exit 0
+fi
+
+#####################################################################
+# Handling the status command
+#####################################################################
+
+if [[ -n "$show_status" ]]; then
+    imgs_count="$(ls -1 "$cache_dir/cache" | wc -l)"
+    imgs_size_total="$(du -sh "$cache_dir/cache" | cut -f1)"
+    echomessage "$imgs_count images ($imgs_size_total) in $cache_dir/cache"
+    for directory in "$session_dir_256" "$session_dir_24bit" \
+                     "$terminal_dir_256" "$terminal_dir_24bit"; do
+        echomessage "$(ls -1 "$directory" | wc -l) instances in $directory"
+    done
+    broken_count=0
+    for inst_file in "$session_dir_256"/*; do
+        id="$(head -1 "$inst_file")"
+        if [[ ! -e "$terminal_dir_256/$id" ]]; then
+            ((broken_count++))
+        fi
+    done
+    for inst_file in "$session_dir_24bit"/*; do
+        id="$(head -1 "$inst_file")"
+        if [[ ! -e "$terminal_dir_24bit/$id" ]]; then
+            ((broken_count++))
+        fi
+    done
+    if (( "$broken_count" > 0 )); then
+        echomessage "There are $broken_count images that need fixing, try running:"
+        echomessage "$script_name --fix"
+    fi
     exit 0
 fi
 
@@ -918,8 +1078,8 @@ find_image_id() {
     if [[ -e "$inst_file" ]]; then
         image_id="$(head -1 "$inst_file")"
         if ! is_image_id_correct "$image_id"; then
-            echoerr "Found invalid image_id $image_id, deleting $inst_file"
-            rm "$inst_file"
+            echoerr "Found invalid image_id $image_id in $inst_file, please remove it manually"
+            return 1
         else
             touch "$inst_file"
             echolog "Found an existing image id $image_id"
@@ -935,8 +1095,8 @@ find_image_id() {
         for inst_file in "$session_dir"/*; do
             id="$(head -1 "$inst_file")"
             if ! is_image_id_correct "$id"; then
-                echoerr "Found invalid image_id $id, deleting $inst_file"
-                rm "$inst_file"
+                echoerr "Found invalid image_id $id in $inst_file, please remove it manually"
+                return 1
             else
                 ids_array[$id]="0"
             fi
@@ -966,8 +1126,8 @@ find_image_id() {
         for inst_file in "$session_dir"/*; do
             id="$(head -1 "$inst_file")"
             if ! is_image_id_correct "$id"; then
-                echoerr "Found invalid image_id $id, deleting $inst_file"
-                rm "$inst_file"
+                echoerr "Found invalid image_id $id in $inst_file, please remove it manually"
+                return 1
             else
                 ids_array+=("$id")
             fi
@@ -1009,11 +1169,11 @@ fi
 # 8-bit and 24-bit image ids live in different namespaces. We use different
 # session and terminal directories to store information about them.
 if [[ -n "$use_256" ]]; then
-    local session_dir="$session_dir_256"
-    local terminal_dir="$terminal_dir_256"
+    session_dir="$session_dir_256"
+    terminal_dir="$terminal_dir_256"
 else
-    local session_dir="$session_dir_24bit"
-    local terminal_dir="$terminal_dir_24bit"
+    session_dir="$session_dir_24bit"
+    terminal_dir="$terminal_dir_24bit"
 fi
 
 # Compute md5sum and copy the file to the cache dir.
@@ -1143,6 +1303,8 @@ fi
 for y in `seq 0 $(expr $rows - 1)`; do
     echo -n "$line_start" >> "$out"
     for x in `seq 0 $(expr $cols - 1)`; do
+        # Note that when $x is out of bounds, the column diacritic will be
+        # empty, meaning that the column should be guessed by the terminal.
         printf "\UEEEE${rowcolumn_diacritics[$y]}${rowcolumn_diacritics[$x]}"
     done
     echo -n "$line_end" >> "$out"
