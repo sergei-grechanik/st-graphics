@@ -555,6 +555,7 @@ typedef struct {
 	int quiet;
 	int format;
 	char transmission_medium;
+	char delete_specifier;
 	int pix_width, pix_height;
 	int rows, columns;
 	uint32_t image_id;
@@ -794,6 +795,26 @@ static CellImage *gtransmitdata(GraphicsCommand *cmd) {
 	return img;
 }
 
+static void gr_handle_delete_command(GraphicsCommand *cmd) {
+	if (!cmd->delete_specifier) {
+		for (size_t i = 0; i < MAX_CELL_IMAGES; ++i)
+			gdeleteimage(&cell_images[i]);
+	}
+	else if (cmd->delete_specifier == 'I') {
+		if (cmd->image_id == 0)
+			gr_reporterror_cmd(
+			    cmd, "EINVAL: no image id to delete");
+		CellImage *image = gfindimage(cmd->image_id);
+		if (image)
+			gdeleteimage(image);
+		gr_reportsuccess_cmd(cmd);
+	} else {
+		gr_reporterror_cmd(
+		    cmd, "EINVAL: unsupported values of the d key : '%c'",
+		    cmd->delete_specifier);
+	}
+}
+
 static void gruncommand(GraphicsCommand *cmd) {
 	CellImage *img = NULL;
 	switch (cmd->action) {
@@ -806,6 +827,9 @@ static void gruncommand(GraphicsCommand *cmd) {
 		break;
 	case 't':
 		gtransmitdata(cmd);
+		break;
+	case 'd':
+		gr_handle_delete_command(cmd);
 		break;
 	case 'p':
 		// display (put) the last image
@@ -853,6 +877,9 @@ static void gsetkeyvalue(GraphicsCommand *cmd, char *key_start, char *key_end,
 		break;
 	case 't':
 		cmd->transmission_medium = *value_start;
+		break;
+	case 'd':
+		cmd->delete_specifier = *value_start;
 		break;
 	case 'q':
 		cmd->quiet = num;

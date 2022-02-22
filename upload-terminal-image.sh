@@ -6,12 +6,9 @@
 #       portable.
 
 # TODO list:
-# - Cache clean-up
-# - Status
-# - Saving IDs
-# - Support filesystem-based uploading
-# - ID deletion
 # - Tests
+# - Fix the help description
+# - Fixing only N last images (or last day).
 
 script_fullname="$0"
 script_name="$(basename $0)"
@@ -48,6 +45,8 @@ uploading progress (which may be disabled with '-q').
         the status.
     -l <file>, --log <file>
         Enable logging and write logs to <file>.
+    -V
+        Same as -l /dev/stderr (i.e. be very verbose).
     -f <image_file>, --file <image_file>
         The image file (but you can specify it as a positional argument).
     -q, --quiet
@@ -65,6 +64,8 @@ uploading progress (which may be disabled with '-q').
     --noesc
         Do not issue the escape codes representing row numbers (encoded as
         foreground color).
+    --save-id <file>
+        Save the image id to <file>.
     --max-cols N
         Do not exceed this value when automatically computing the number of
         columns. By default the width of the terminal is used as the maximum.
@@ -87,6 +88,11 @@ uploading progress (which may be disabled with '-q').
     --no-tmux-hijack
         Do not try to hijack focus by creating a new pane when inside tmux and
         the current pane is not active (just fail instead).
+    --uploading-method <method>, -m <method>
+        Set the uploading method, which can be 'direct' for direct data
+        uploading, 'file' for sending the file name to the terminal, 'both' for
+        trying file first and direct on failure, and 'auto' to choose the method
+        automatically.
     -h, --help
         Show this message
 
@@ -99,6 +105,8 @@ uploading progress (which may be disabled with '-q').
         reuploaded) and information about used image ids.
     TERMINAL_IMAGES_NO_TMUX_HIJACK
         If set, disable tmux hijacking.
+    TERMINAL_IMAGES_UPLOADING_METHOD
+        See --uploading-method.
 "
 
 # Exit the script on keyboard interrupt
@@ -112,6 +120,8 @@ default_timeout=3
 # The size of a chunk (after base64-encoding), in bytes.
 chunk_size=3968
 
+# The probability of running a clean-up on image upload (in %).
+cleanup_probability=10
 # The maximum number of days since last action after which a terminal or session
 # dir will be deleted.
 max_days_of_inactivity=30
@@ -142,7 +152,9 @@ err=""
 log=""
 quiet=""
 noesc=""
+save_id=""
 append=""
+uploading_method="$TERMINAL_IMAGES_UPLOADING_METHOD"
 tmux_hijack_allowed="1"
 [[ -z "$TERMINAL_IMAGES_NO_TMUX_HIJACK" ]] || tmux_hijack_allowed=""
 tmux_hijack_helper=""
@@ -221,6 +233,10 @@ while [[ $# -gt 0 ]]; do
             log="$2"
             shift 2
             ;;
+        -V)
+            log="/dev/stderr"
+            shift
+            ;;
         -q|--quiet)
             quiet="1"
             shift
@@ -249,9 +265,17 @@ while [[ $# -gt 0 ]]; do
             noesc=1
             shift
             ;;
+        --save-id)
+            save_id="$2"
+            shift 2
+            ;;
         --no-tmux-hijack)
             tmux_hijack_allowed=""
             shift
+            ;;
+        -m|--uploading-method)
+            uploading_method="$2"
+            shift 2
             ;;
         --max-cols)
             max_cols="$2"
@@ -333,8 +357,19 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if (( $command_count > 1 )); then
-    echoerr "Only one command-like option may be specified"
+if (( $command_count > 0 )); then
+    if (( $command_count > 1 )); then
+        echoerr "Only one command-like option may be specified"
+        exit 1
+    fi
+    if [[ -n "$file" ]]; then
+        echoerr "File cannot be specified together with a command-like option"
+        exit 1
+    fi
+fi
+
+if [[ ! "$uploading_method" =~ ^(direct|file|both|auto|)$ ]]; then
+    echoerr "Unknown uploading method: $uploading_method"
     exit 1
 fi
 
@@ -406,6 +441,19 @@ echolog "terminal_id=$terminal_id"
 echolog "session_id=$session_id"
 
 #####################################################################
+# Choosing the uploading method
+#####################################################################
+
+if [[ "$uploading_method" =~ ^(auto|)$ ]]; then
+    if [[ -n "$SSH_CLIENT" || -n "$SSH_TTY" || -n "$SSH_CONNECTION" ]]; then
+        echolog "Look like we are in ssh, using direct uploading"
+        uploading_method="direct"
+    else
+        uploading_method="both"
+    fi
+fi
+
+#####################################################################
 # Helper functions for cache dir clean-up
 #####################################################################
 
@@ -414,7 +462,7 @@ delete_stale_dirs() {
     for directory in "$cache_dir/sessions"/* "$cache_dir/terminals"/*; do
         local age="$((($(date +%s) - $(date +%s -r "$directory")) / 86400))"
         if (( "$age" > "$max_days_of_inactivity" )); then
-            echomessage "Deleting $age days old $directory"
+            echostatus "Deleting $age days old $directory"
             rm -r "$directory"
         fi
     done
@@ -424,7 +472,7 @@ delete_stale_dirs() {
 delete_oldest_files() {
     local directory="$1"
     local num_delete="$2"
-    echomessage "Deleting $num_delete files from $directory"
+    echostatus "Deleting $num_delete files from $directory"
     for file in $(ls -1t "$directory" | tail -$num_delete); do
         rm "$directory/$file"
     done
@@ -548,19 +596,25 @@ invalid_terminal_response() {
 get_terminal_response() {
     term_response=""
     term_response_printable=""
+    term_response_ok=""
     # -r means backslash is part of the line
     # -d '\' means \ is the line delimiter
     # -t ... is timeout in seconds
     if ! read -r -d '\' -t "$default_timeout" term_response; then
         if [[ -z "$term_response" ]]; then
-            echoerr "No response from terminal"
+            term_response_printable="No response from terminal"
         else
             invalid_terminal_response
+            term_response_printable="Invalid response from terminal"
         fi
         return 1
     fi
     term_response_printable="$(sed 's/\x1b/^[/g' <<< "$term_response")"
     echolog "term_response: $term_response_printable"
+    regex='.*_G.*;OK.*'
+    if [[ "$term_response" =~ $regex ]]; then
+        term_response_ok=1
+    fi
 }
 
 # Uploads an image to the terminal. If $terminal_dir is specified, acquires the
@@ -574,7 +628,7 @@ upload_image() {
     local rows="$4"
     local terminal_dir="$5"
 
-    if [[ -n $terminal_dir ]]; then
+    if [[ -n "$terminal_dir" ]]; then
         (
             flock --timeout "$default_timeout" 9 || \
                 { echoerr "Could not acquire a lock on $terminal_dir.lock"; \
@@ -609,16 +663,23 @@ upload_image() {
         fi
     fi
 
-    # base64-encode the file and split it into chunks. The size of each graphics
-    # command shouldn't be more than 4096, so we set the size of an encoded
-    # chunk to be 3968, slightly less than that.
-    echostatus "base64-encoding and chunking the image"
-    cat "$file" | base64 -w0 | split -b "$chunk_size" - "$tmpdir/chunk_"
+    if [[ "$uploading_method" == "file" || "$uploading_method" == "both" ]]; then
+        # base64-encode the filename
+        echo -n "$file" | base64 -w0 > "$tmpdir/filename"
+    fi
+
+    if [[ "$uploading_method" == "direct" || "$uploading_method" == "both" ]]; then
+        # base64-encode the file and split it into chunks. The size of each
+        # graphics command shouldn't be more than 4096, so we set the size of an
+        # encoded chunk to be 3968, slightly less than that.
+        echostatus "base64-encoding and chunking the image"
+        cat "$file" | base64 -w0 | split -b "$chunk_size" - "$tmpdir/chunk_"
+    fi
 
     # Write the size of the image in bytes to the "size" file.
     wc -c < "$file" > "$tmpdir/size"
 
-    upload_chunked_image "$image_id" "$tmpdir" "$cols" "$rows"
+    upload_image_impl "$image_id" "$tmpdir" "$cols" "$rows"
     return $?
 }
 
@@ -633,11 +694,11 @@ tmux_is_active_pane() {
     fi
 }
 
-# Uploads an already chunked image to the terminal.
-# Usage: upload_chunked_image $image_id $chunks_dir $cols $rows
-upload_chunked_image() {
+# Uploads a (possibly already chunked) image to the terminal.
+# Usage: upload_image_impl $image_id $tmpdir $cols $rows
+upload_image_impl() {
     local image_id="$1"
-    local chunks_dir="$2"
+    local tmpdir="$2"
     local cols="$3"
     local rows="$4"
 
@@ -646,7 +707,7 @@ upload_chunked_image() {
     # creating a new pane.
     if [[ -n "$inside_tmux" ]]; then
         if ! tmux_is_active_pane; then
-            hijack_tmux "$image_id" "$chunks_dir" "$cols" "$rows"
+            hijack_tmux "$image_id" "$tmpdir" "$cols" "$rows"
             return $?
         fi
     fi
@@ -654,10 +715,36 @@ upload_chunked_image() {
     # Read the original file size from the "size" file
     local size_info=""
     local total_size=""
-    if [[ -e "$chunks_dir/size" ]]; then
-        total_size="$(cat "$chunks_dir/size")"
+    if [[ -e "$tmpdir/size" ]]; then
+        total_size="$(cat "$tmpdir/size")"
         size_info=",S=$total_size"
     fi
+
+    # Try sending the filename if there is the encoded filename
+    if [[ -e "$tmpdir/filename" ]]; then
+        echostatus "Trying file-based uploading"
+        start_gr_command
+        echo -en "a=t,i=$image_id,f=100,t=f,c=${cols},r=${rows}${size_info};"
+        cat "$tmpdir/filename"
+        end_gr_command
+
+        echostatus "Awaiting terminal response"
+        get_terminal_response
+        if [[ -n "$term_response_ok" ]]; then
+            return 0
+        fi
+
+        echoerr "File-based uploading error: $term_response_printable"
+    fi
+
+    # Now try chunked uploading if there are chunks
+    chunks_count="$(ls -1 "$tmpdir/chunk_"* | wc -l)"
+    if (( "$chunks_count" == 0 )); then
+        return 1
+    fi
+    chunk_i=0
+    start_time="$(date +%s%3N)"
+    speed=""
 
     # Issue a command indicating that we want to start data transmission for a
     # new image.
@@ -672,13 +759,8 @@ upload_chunked_image() {
     # S=     original file size
     gr_command "a=t,i=$image_id,f=100,t=d,c=${cols},r=${rows},m=1${size_info}"
 
-    chunks_count="$(ls -1 "$chunks_dir/chunk_"* | wc -l)"
-    chunk_i=0
-    start_time="$(date +%s%3N)"
-    speed=""
-
     # Transmit chunks and display progress.
-    for chunk in "$chunks_dir/chunk_"*; do
+    for chunk in "$tmpdir/chunk_"*; do
         echolog "Uploading chunk $chunk"
         chunk_i=$((chunk_i+1))
         if [[ $((chunk_i % 10)) -eq 1 ]]; then
@@ -717,11 +799,7 @@ upload_chunked_image() {
 
     echostatus "Awaiting terminal response"
     get_terminal_response
-    if [[ "$?" != 0 ]]; then
-        return 1
-    fi
-    regex='.*_G.*;OK.*'
-    if ! [[ "$term_response" =~ $regex ]]; then
+    if [[ -z "$term_response_ok" ]]; then
         echoerr "Uploading error: $term_response_printable"
         return 1
     fi
@@ -729,10 +807,10 @@ upload_chunked_image() {
 }
 
 # Creates a tmux pane and uploads an already chunked image to the terminal.
-# Usage: hijack_tmux $image_id $chunks_dir $cols $rows
+# Usage: hijack_tmux $image_id $tmpdir $cols $rows
 hijack_tmux() {
     local image_id="$1"
-    local chunks_dir="$2"
+    local tmpdir="$2"
     local cols="$3"
     local rows="$4"
 
@@ -753,7 +831,7 @@ hijack_tmux() {
         -r "$rows" \
         -e "$tmp_err" \
         -l "$log" \
-        -f "$chunks_dir" \
+        -f "$tmpdir" \
         --id "$image_id" \
         --store-pid "$tmp_pid" \
         --store-code "$tmp_ret" \
@@ -805,7 +883,7 @@ hijack_tmux() {
 if [[ -n "$tmux_hijack_helper" ]]; then
     # Do not allow any more hijack attempts.
     tmux_hijack_allowed=""
-    upload_chunked_image "$image_id" "$file" "$cols" "$rows"
+    upload_image_impl "$image_id" "$file" "$cols" "$rows"
     ret_code="$?"
     echo "$ret_code" > "$store_code"
     exit "$ret_code"
@@ -816,7 +894,6 @@ fi
 #####################################################################
 
 if [[ -n "$clear_term" ]]; then
-    # TODO: Send the command to remove all images from the terminal.
     for terminal_dir in "$terminal_dir_256" "$terminal_dir_24bit"; do
         echomessage "Clearing $terminal_dir"
         (
@@ -824,6 +901,9 @@ if [[ -n "$clear_term" ]]; then
                 { echoerr "Could not acquire a lock on $terminal_dir.lock"; \
                   exit 1; }
             rm "$terminal_dir"/* 2> /dev/null
+            # Delete all images (if this command fails, e.g. because of tmux, we
+            # don't care).
+            gr_command "a=d"
             exit 0
         ) 9>"$terminal_dir.lock" || exit 1
     done
@@ -1187,6 +1267,9 @@ else
     touch "$cached_file"
 fi
 
+# Use the cached file instead of file now
+file="$cached_file"
+
 # Image instance is an image with its positioning attributes: columns, rows and
 # any other attributes we may add in the future (alignment, scale mode, etc).
 # Each image id corresponds to a single image instance.
@@ -1219,6 +1302,9 @@ else
     echolog "Found an image id $image_id"
 fi
 
+# Save the image id.
+[[ -z "$save_id" ]] || echo "$image_id" > "$save_id"
+
 #####################################################################
 # Image uploading
 #####################################################################
@@ -1231,6 +1317,15 @@ if [[ -e "$terminal_dir/$image_id" ]] &&
     echolog "Image already uploaded"
 else
     upload_image "$image_id" "$file" "$cols" "$rows" "$terminal_dir"
+fi
+
+#####################################################################
+# Maybe clean the cache from time to time
+#####################################################################
+
+if (( "$(shuf -i 0-99 -n 1)" < "$cleanup_probability" )); then
+    echostatus "Cleaning up the cache dir"
+    cleanup_cache
 fi
 
 #####################################################################
