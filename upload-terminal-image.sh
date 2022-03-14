@@ -9,6 +9,8 @@
 # - Tests
 # - Fix the help description
 # - Fixing only N last images (or last day).
+# - Deleting images from session.
+# - Listing images from session and terminal dirs.
 
 script_fullname="$0"
 script_name="$(basename $0)"
@@ -66,6 +68,8 @@ uploading progress (which may be disabled with '-q').
         foreground color).
     --save-id <file>
         Save the image id to <file>.
+    --show-id N
+        Display the image with the given id.
     --max-cols N
         Do not exceed this value when automatically computing the number of
         columns. By default the width of the terminal is used as the maximum.
@@ -121,7 +125,7 @@ default_timeout=3
 chunk_size=3968
 
 # The probability of running a clean-up on image upload (in %).
-cleanup_probability=10
+cleanup_probability=5
 # The maximum number of days since last action after which a terminal or session
 # dir will be deleted.
 max_days_of_inactivity=30
@@ -167,6 +171,7 @@ reupload_ids=()
 clear_term=""
 clean_cache=""
 show_status=""
+show_id=""
 
 command_count=0
 
@@ -327,6 +332,15 @@ while [[ $# -gt 0 ]]; do
             ((command_count++))
             shift
             ;;
+        --show-id)
+            show_id="$2"
+            if [[ -z "$show_id" ]]; then
+                echoerr "No id specified"
+                exit 1
+            fi
+            ((command_count++))
+            shift 2
+            ;;
 
         # Options used internally.
         --store-pid)
@@ -452,6 +466,89 @@ if [[ "$uploading_method" =~ ^(auto|)$ ]]; then
         uploading_method="both"
     fi
 fi
+
+#####################################################################
+# Helper function for displaying the image placeholder
+#####################################################################
+
+display_image() {
+    local image_id="$1"
+    local cols="$2"
+    local rows="$3"
+    rowcolumn_diacritics=("\U305" "\U30d" "\U30e" "\U310" "\U312" "\U33d" "\U33e"
+        "\U33f" "\U346" "\U34a" "\U34b" "\U34c" "\U350" "\U351" "\U352" "\U357"
+        "\U35b" "\U363" "\U364" "\U365" "\U366" "\U367" "\U368" "\U369" "\U36a"
+        "\U36b" "\U36c" "\U36d" "\U36e" "\U36f" "\U483" "\U484" "\U485" "\U486"
+        "\U487" "\U592" "\U593" "\U594" "\U595" "\U597" "\U598" "\U599" "\U59c"
+        "\U59d" "\U59e" "\U59f" "\U5a0" "\U5a1" "\U5a8" "\U5a9" "\U5ab" "\U5ac"
+        "\U5af" "\U5c4" "\U610" "\U611" "\U612" "\U613" "\U614" "\U615" "\U616"
+        "\U617" "\U657" "\U658" "\U659" "\U65a" "\U65b" "\U65d" "\U65e" "\U6d6"
+        "\U6d7" "\U6d8" "\U6d9" "\U6da" "\U6db" "\U6dc" "\U6df" "\U6e0" "\U6e1"
+        "\U6e2" "\U6e4" "\U6e7" "\U6e8" "\U6eb" "\U6ec" "\U730" "\U732" "\U733"
+        "\U735" "\U736" "\U73a" "\U73d" "\U73f" "\U740" "\U741" "\U743" "\U745"
+        "\U747" "\U749" "\U74a" "\U7eb" "\U7ec" "\U7ed" "\U7ee" "\U7ef" "\U7f0"
+        "\U7f1" "\U7f3" "\U816" "\U817" "\U818" "\U819" "\U81b" "\U81c" "\U81d"
+        "\U81e" "\U81f" "\U820" "\U821" "\U822" "\U823" "\U825" "\U826" "\U827"
+        "\U829" "\U82a" "\U82b" "\U82c" "\U82d" "\U951" "\U953" "\U954" "\Uf82"
+        "\Uf83" "\Uf86" "\Uf87" "\U135d" "\U135e" "\U135f" "\U17dd" "\U193a"
+        "\U1a17" "\U1a75" "\U1a76" "\U1a77" "\U1a78" "\U1a79" "\U1a7a" "\U1a7b"
+        "\U1a7c" "\U1b6b" "\U1b6d" "\U1b6e" "\U1b6f" "\U1b70" "\U1b71" "\U1b72"
+        "\U1b73" "\U1cd0" "\U1cd1" "\U1cd2" "\U1cda" "\U1cdb" "\U1ce0" "\U1dc0"
+        "\U1dc1" "\U1dc3" "\U1dc4" "\U1dc5" "\U1dc6" "\U1dc7" "\U1dc8" "\U1dc9"
+        "\U1dcb" "\U1dcc" "\U1dd1" "\U1dd2" "\U1dd3" "\U1dd4" "\U1dd5" "\U1dd6"
+        "\U1dd7" "\U1dd8" "\U1dd9" "\U1dda" "\U1ddb" "\U1ddc" "\U1ddd" "\U1dde"
+        "\U1ddf" "\U1de0" "\U1de1" "\U1de2" "\U1de3" "\U1de4" "\U1de5" "\U1de6"
+        "\U1dfe" "\U20d0" "\U20d1" "\U20d4" "\U20d5" "\U20d6" "\U20d7" "\U20db"
+        "\U20dc" "\U20e1" "\U20e7" "\U20e9" "\U20f0" "\U2cef" "\U2cf0" "\U2cf1"
+        "\U2de0" "\U2de1" "\U2de2" "\U2de3" "\U2de4" "\U2de5" "\U2de6" "\U2de7"
+        "\U2de8" "\U2de9" "\U2dea" "\U2deb" "\U2dec" "\U2ded" "\U2dee" "\U2def"
+        "\U2df0" "\U2df1" "\U2df2" "\U2df3" "\U2df4" "\U2df5" "\U2df6" "\U2df7"
+        "\U2df8" "\U2df9" "\U2dfa" "\U2dfb" "\U2dfc" "\U2dfd" "\U2dfe" "\U2dff"
+        "\Ua66f" "\Ua67c" "\Ua67d" "\Ua6f0" "\Ua6f1" "\Ua8e0" "\Ua8e1" "\Ua8e2"
+        "\Ua8e3" "\Ua8e4" "\Ua8e5" "\Ua8e6" "\Ua8e7" "\Ua8e8" "\Ua8e9" "\Ua8ea"
+        "\Ua8eb" "\Ua8ec" "\Ua8ed" "\Ua8ee" "\Ua8ef" "\Ua8f0" "\Ua8f1" "\Uaab0"
+        "\Uaab2" "\Uaab3" "\Uaab7" "\Uaab8" "\Uaabe" "\Uaabf" "\Uaac1" "\Ufe20"
+        "\Ufe21" "\Ufe22" "\Ufe23" "\Ufe24" "\Ufe25" "\Ufe26" "\U10a0f" "\U10a38"
+        "\U1d185" "\U1d186" "\U1d187" "\U1d188" "\U1d189" "\U1d1aa" "\U1d1ab"
+        "\U1d1ac" "\U1d1ad" "\U1d242" "\U1d243" "\U1d244")
+
+    # Each line starts with the escape sequence to set the foreground color to
+    # the image id, unless --noesc is specified.
+    line_start=""
+    line_end=""
+    if [[ -z "$noesc" ]]; then
+        if [[ -n "$use_256" ]]; then
+            line_start="$(echo -en "\e[38;5;${image_id}m")"
+            line_end="$(echo -en "\e[39;m")"
+        else
+            blue="$(( "$image_id" % 256 ))"
+            green="$(( ("$image_id" / 256) % 256 ))"
+            red="$(( ("$image_id" / 65536) % 256 ))"
+            line_start="$(echo -en "\e[38;2;${red};${green};${blue}m")"
+            line_end="$(echo -en "\e[39;m")"
+        fi
+    fi
+
+    # Clear the status line.
+    echostatus
+
+    # Clear the output file
+    if [[ -z "$append" ]]; then
+        > "$out"
+    fi
+
+    # Fill the output with characters representing the image
+    for y in `seq 0 $(expr $rows - 1)`; do
+        echo -n "$line_start"
+        for x in `seq 0 $(expr $cols - 1)`; do
+            # Note that when $x is out of bounds, the column diacritic will be
+            # empty, meaning that the column should be guessed by the terminal.
+            printf "\UEEEE${rowcolumn_diacritics[$y]}${rowcolumn_diacritics[$x]}"
+        done
+        echo -n "$line_end"
+        printf "\n"
+    done >> "$out"
+}
 
 #####################################################################
 # Helper functions for cache dir clean-up
@@ -581,8 +678,8 @@ gr_command() {
     echo -en "$1"
     end_gr_command
     if [[ -n "$log" ]]; then
-        local gr_command="$(start_gr_command)$(echo -en "$1")$(end_gr_command)"
-        echolog "SENDING COMMAND: $(sed 's/\x1b/^[/g' <<< "$gr_command")"
+        local command="$(start_gr_command)$(echo -en "$1")$(end_gr_command)"
+        echolog "SENDING COMMAND: $(sed 's/\x1b/^[/g' <<< "$command")"
     fi
 }
 
@@ -903,7 +1000,7 @@ if [[ -n "$clear_term" ]]; then
             rm "$terminal_dir"/* 2> /dev/null
             # Delete all images (if this command fails, e.g. because of tmux, we
             # don't care).
-            gr_command "a=d"
+            gr_command "a=d,q=2"
             exit 0
         ) 9>"$terminal_dir.lock" || exit 1
     done
@@ -964,8 +1061,6 @@ reupload_instance() {
     local rows="${inst_parts[2]}"
     local cached_file="$cache_dir/cache/$md5"
 
-    echomessage "Trying to reupload id $id  md5 $md5  cols $cols rows $rows"
-
     if [[ ! -e "$cached_file" ]]; then
         echoerr "Could not find the image in cache"
         return 1
@@ -979,11 +1074,8 @@ reupload_instance() {
         local terminal_dir="$terminal_dir_24bit"
     fi
 
-    if upload_image "$id" "$cached_file" "$cols" "$rows" "$terminal_dir"; then
-        echomessage "Successfully reuploaded id $id"
-    else
-        return 1
-    fi
+    upload_image "$id" "$cached_file" "$cols" "$rows" "$terminal_dir"
+    return $?
 }
 
 if [[ -n "$reupload" ]]; then
@@ -1024,8 +1116,13 @@ if [[ -n "$reupload" ]]; then
             id="$(head -1 "$inst_file")"
             for idx in "${!reupload_ids[@]}"; do
                 if [[ "${reupload_ids[idx]}" == "$id" ]]; then
-                    reupload_instance "$inst" "$id" || \
+                    echomessage "Trying to reupload $inst with id $id"
+                    reupload_instance "$inst" "$id"
+                    if [[ $? -ne 0 ]]; then
                         reupload_ids_failed+=("$id")
+                    else
+                        echomessage "Successfully reuploaded id $id"
+                    fi
                     unset 'reupload_ids[idx]'
                     break
                 fi
@@ -1049,6 +1146,50 @@ if [[ -n "$reupload" ]]; then
 fi
 
 #####################################################################
+# Handling the show id command
+#####################################################################
+
+if [[ -n "$show_id" ]]; then
+    if (( "$show_id" < 256 )); then
+        use_256="1"
+    else
+        use_256=""
+    fi
+
+    if [[ -n "$use_256" ]]; then
+        session_dir="$session_dir_256"
+        terminal_dir="$terminal_dir_256"
+    else
+        session_dir="$session_dir_24bit"
+        terminal_dir="$terminal_dir_24bit"
+    fi
+
+    if [[ -e "$terminal_dir/$show_id" ]]; then
+        instance="$(head -1 "$terminal_dir/$show_id")"
+    else
+        for inst in "$session_dir"/*; do
+            inst_file="$session_dir/$inst"
+            [[ -e "$inst_file" ]] || continue
+            instance="$inst"
+            reupload_instance "$instance" "$show_id"
+            break
+        done
+    fi
+
+    if [[ -z "$instance" ]]; then
+        echoerr "Could not find image with id $show_id"
+        exit 1
+    fi
+
+    inst_parts=($(echo "$instance" | tr "_" "\n"))
+    md5="${inst_parts[0]}"
+    cols="${inst_parts[1]}"
+    rows="${inst_parts[2]}"
+    display_image "$show_id" "$cols" "$rows"
+    exit 0
+fi
+
+#####################################################################
 # Compute the number of rows and columns
 #####################################################################
 
@@ -1060,7 +1201,7 @@ fi
 
 echolog "Image file: $file (pwd: $(pwd))"
 
-# Compute the formula with bc and round to the nearest integer.
+# Compute a formula with bc and round to the nearest integer.
 bc_round() {
     echo "$(LC_NUMERIC=C printf %.0f "$(echo "scale=2;($1) + 0.5" | bc)")"
 }
@@ -1095,27 +1236,33 @@ if [[ -z "$cols" || -z "$rows" ]]; then
     echolog "Columns per inch: ${cols_per_inch} Rows per inch: ${rows_per_inch}"
     opt_cols_expr="(${props[0]}*${cols_per_inch}/${props[2]})"
     opt_rows_expr="(${props[1]}*${rows_per_inch}/${props[3]})"
+    cols_auto_computed=""
+    rows_auto_computed=""
     if [[ -z "$cols" && -z "$rows" ]]; then
         # If columns and rows are not specified, compute the optimal values
         # using the information about rows and columns per inch.
         cols="$(bc_round "$opt_cols_expr")"
         rows="$(bc_round "$opt_rows_expr")"
+        cols_auto_computed=1
+        rows_auto_computed=1
     elif [[ -z "$cols" ]]; then
         # If only one dimension is specified, compute the other one to match the
         # aspect ratio as close as possible.
         cols="$(bc_round "${opt_cols_expr}*${rows}/${opt_rows_expr}")"
+        cols_auto_computed=1
     elif [[ -z "$rows" ]]; then
         rows="$(bc_round "${opt_rows_expr}*${cols}/${opt_cols_expr}")"
+        rows_auto_computed=1
     fi
 
     echolog "Image size before applying min/max columns: $cols, rows: $rows"
     # Make sure that automatically computed rows and columns are within some
     # sane limits
-    if (( cols > max_cols )); then
+    if [[ -n "$cols_auto_computed" ]] && (( cols > max_cols )); then
         rows="$(bc_round "$rows * $max_cols / $cols")"
         cols="$max_cols"
     fi
-    if (( rows > max_rows )); then
+    if [[ -n "$rows_auto_computed" ]] && (( rows > max_rows )); then
         cols="$(bc_round "$cols * $max_rows / $rows")"
         rows="$max_rows"
     fi
@@ -1126,6 +1273,9 @@ if [[ -z "$cols" || -z "$rows" ]]; then
         rows=1
     fi
 fi
+
+rows="$((10#$rows))"
+cols="$((10#$cols))"
 
 echolog "Image size columns: $cols, rows: $rows"
 
@@ -1323,7 +1473,7 @@ fi
 # Maybe clean the cache from time to time
 #####################################################################
 
-if (( "$(shuf -i 0-99 -n 1)" < "$cleanup_probability" )); then
+if (( $RANDOM % 100 < "$cleanup_probability" )); then
     echostatus "Cleaning up the cache dir"
     cleanup_cache
 fi
@@ -1332,79 +1482,6 @@ fi
 # Printing the image placeholder
 #####################################################################
 
-rowcolumn_diacritics=("\U305" "\U30d" "\U30e" "\U310" "\U312" "\U33d" "\U33e"
-    "\U33f" "\U346" "\U34a" "\U34b" "\U34c" "\U350" "\U351" "\U352" "\U357"
-    "\U35b" "\U363" "\U364" "\U365" "\U366" "\U367" "\U368" "\U369" "\U36a"
-    "\U36b" "\U36c" "\U36d" "\U36e" "\U36f" "\U483" "\U484" "\U485" "\U486"
-    "\U487" "\U592" "\U593" "\U594" "\U595" "\U597" "\U598" "\U599" "\U59c"
-    "\U59d" "\U59e" "\U59f" "\U5a0" "\U5a1" "\U5a8" "\U5a9" "\U5ab" "\U5ac"
-    "\U5af" "\U5c4" "\U610" "\U611" "\U612" "\U613" "\U614" "\U615" "\U616"
-    "\U617" "\U657" "\U658" "\U659" "\U65a" "\U65b" "\U65d" "\U65e" "\U6d6"
-    "\U6d7" "\U6d8" "\U6d9" "\U6da" "\U6db" "\U6dc" "\U6df" "\U6e0" "\U6e1"
-    "\U6e2" "\U6e4" "\U6e7" "\U6e8" "\U6eb" "\U6ec" "\U730" "\U732" "\U733"
-    "\U735" "\U736" "\U73a" "\U73d" "\U73f" "\U740" "\U741" "\U743" "\U745"
-    "\U747" "\U749" "\U74a" "\U7eb" "\U7ec" "\U7ed" "\U7ee" "\U7ef" "\U7f0"
-    "\U7f1" "\U7f3" "\U816" "\U817" "\U818" "\U819" "\U81b" "\U81c" "\U81d"
-    "\U81e" "\U81f" "\U820" "\U821" "\U822" "\U823" "\U825" "\U826" "\U827"
-    "\U829" "\U82a" "\U82b" "\U82c" "\U82d" "\U951" "\U953" "\U954" "\Uf82"
-    "\Uf83" "\Uf86" "\Uf87" "\U135d" "\U135e" "\U135f" "\U17dd" "\U193a"
-    "\U1a17" "\U1a75" "\U1a76" "\U1a77" "\U1a78" "\U1a79" "\U1a7a" "\U1a7b"
-    "\U1a7c" "\U1b6b" "\U1b6d" "\U1b6e" "\U1b6f" "\U1b70" "\U1b71" "\U1b72"
-    "\U1b73" "\U1cd0" "\U1cd1" "\U1cd2" "\U1cda" "\U1cdb" "\U1ce0" "\U1dc0"
-    "\U1dc1" "\U1dc3" "\U1dc4" "\U1dc5" "\U1dc6" "\U1dc7" "\U1dc8" "\U1dc9"
-    "\U1dcb" "\U1dcc" "\U1dd1" "\U1dd2" "\U1dd3" "\U1dd4" "\U1dd5" "\U1dd6"
-    "\U1dd7" "\U1dd8" "\U1dd9" "\U1dda" "\U1ddb" "\U1ddc" "\U1ddd" "\U1dde"
-    "\U1ddf" "\U1de0" "\U1de1" "\U1de2" "\U1de3" "\U1de4" "\U1de5" "\U1de6"
-    "\U1dfe" "\U20d0" "\U20d1" "\U20d4" "\U20d5" "\U20d6" "\U20d7" "\U20db"
-    "\U20dc" "\U20e1" "\U20e7" "\U20e9" "\U20f0" "\U2cef" "\U2cf0" "\U2cf1"
-    "\U2de0" "\U2de1" "\U2de2" "\U2de3" "\U2de4" "\U2de5" "\U2de6" "\U2de7"
-    "\U2de8" "\U2de9" "\U2dea" "\U2deb" "\U2dec" "\U2ded" "\U2dee" "\U2def"
-    "\U2df0" "\U2df1" "\U2df2" "\U2df3" "\U2df4" "\U2df5" "\U2df6" "\U2df7"
-    "\U2df8" "\U2df9" "\U2dfa" "\U2dfb" "\U2dfc" "\U2dfd" "\U2dfe" "\U2dff"
-    "\Ua66f" "\Ua67c" "\Ua67d" "\Ua6f0" "\Ua6f1" "\Ua8e0" "\Ua8e1" "\Ua8e2"
-    "\Ua8e3" "\Ua8e4" "\Ua8e5" "\Ua8e6" "\Ua8e7" "\Ua8e8" "\Ua8e9" "\Ua8ea"
-    "\Ua8eb" "\Ua8ec" "\Ua8ed" "\Ua8ee" "\Ua8ef" "\Ua8f0" "\Ua8f1" "\Uaab0"
-    "\Uaab2" "\Uaab3" "\Uaab7" "\Uaab8" "\Uaabe" "\Uaabf" "\Uaac1" "\Ufe20"
-    "\Ufe21" "\Ufe22" "\Ufe23" "\Ufe24" "\Ufe25" "\Ufe26" "\U10a0f" "\U10a38"
-    "\U1d185" "\U1d186" "\U1d187" "\U1d188" "\U1d189" "\U1d1aa" "\U1d1ab"
-    "\U1d1ac" "\U1d1ad" "\U1d242" "\U1d243" "\U1d244")
-
-# Each line starts with the escape sequence to set the foreground color to the
-# image id, unless --noesc is specified.
-line_start=""
-line_end=""
-if [[ -z "$noesc" ]]; then
-    if [[ -n "$use_256" ]]; then
-        line_start="$(echo -en "\e[38;5;${image_id}m")"
-        line_end="$(echo -en "\e[39;m")"
-    else
-        blue="$(( "$image_id" % 256 ))"
-        green="$(( ("$image_id" / 256) % 256 ))"
-        red="$(( ("$image_id" / 65536) % 256 ))"
-        line_start="$(echo -en "\e[38;2;${red};${green};${blue}m")"
-        line_end="$(echo -en "\e[39;m")"
-    fi
-fi
-
-# Clear the status line.
-echostatus
-
-# Clear the output file
-if [[ -z "$append" ]]; then
-    > "$out"
-fi
-
-# Fill the output with characters representing the image
-for y in `seq 0 $(expr $rows - 1)`; do
-    echo -n "$line_start" >> "$out"
-    for x in `seq 0 $(expr $cols - 1)`; do
-        # Note that when $x is out of bounds, the column diacritic will be
-        # empty, meaning that the column should be guessed by the terminal.
-        printf "\UEEEE${rowcolumn_diacritics[$y]}${rowcolumn_diacritics[$x]}"
-    done
-    echo -n "$line_end" >> "$out"
-    printf "\n" >> "$out"
-done
-
+display_image "$image_id" "$cols" "$rows"
 echolog "Finished displaying the image"
 exit 0
