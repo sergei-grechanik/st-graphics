@@ -25,7 +25,7 @@ uploading progress (which may be disabled with '-q').
     $script_name --fix [<IDs>]
 
   Options:
-    -c N, --columns N
+    -c N, --columns N, --cols N
         The number of columns for the image. By default the script will try to
         compute the optimal value by itself.
     -r N, --rows N
@@ -97,6 +97,8 @@ uploading progress (which may be disabled with '-q').
         uploading, 'file' for sending the file name to the terminal, 'both' for
         trying file first and direct on failure, and 'auto' to choose the method
         automatically.
+    --no-upload
+        Do not upload the image (it can be done later using --fix).
     -h, --help
         Show this message
 
@@ -157,6 +159,7 @@ log=""
 quiet=""
 noesc=""
 save_id=""
+no_upload=""
 append=""
 uploading_method="$TERMINAL_IMAGES_UPLOADING_METHOD"
 tmux_hijack_allowed="1"
@@ -214,7 +217,7 @@ echoerr() {
 # Parse the command line.
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -c|--columns)
+        -c|--columns|--cols)
             cols="$2"
             shift 2
             ;;
@@ -281,6 +284,10 @@ while [[ $# -gt 0 ]]; do
         -m|--uploading-method)
             uploading_method="$2"
             shift 2
+            ;;
+        --no-upload)
+            no_upload=1
+            shift
             ;;
         --max-cols)
             max_cols="$2"
@@ -1150,6 +1157,13 @@ fi
 #####################################################################
 
 if [[ -n "$show_id" ]]; then
+    # If rows, columns and --no-upload are specified, just display the
+    # placeholder.
+    if [[ -n "$rows" && -n "$cols" && -n "$no_upload" ]]; then
+        display_image "$show_id" "$cols" "$rows"
+        exit 0
+    fi
+
     if (( "$show_id" < 256 )); then
         use_256="1"
     else
@@ -1171,7 +1185,9 @@ if [[ -n "$show_id" ]]; then
             inst_file="$session_dir/$inst"
             [[ -e "$inst_file" ]] || continue
             instance="$inst"
-            reupload_instance "$instance" "$show_id"
+            if [[ -z "$no_upload" ]]; then
+                reupload_instance "$instance" "$show_id"
+            fi
             break
         done
     fi
@@ -1183,8 +1199,8 @@ if [[ -n "$show_id" ]]; then
 
     inst_parts=($(echo "$instance" | tr "_" "\n"))
     md5="${inst_parts[0]}"
-    cols="${inst_parts[1]}"
-    rows="${inst_parts[2]}"
+    [[ -n "$cols" ]] || cols="${inst_parts[1]}"
+    [[ -n "$rows" ]] || rows="${inst_parts[2]}"
     display_image "$show_id" "$cols" "$rows"
     exit 0
 fi
@@ -1427,6 +1443,7 @@ img_instance="${img_md5}_${cols}_${rows}"
 
 if [[ -n "$image_id" ]]; then
     echolog "Using the specified image id $image_id"
+    echo "$image_id" > "$session_dir/$img_instance"
 else
     # Find an id for the image. We want to avoid reuploading, and at the same
     # time we want to minimize image id collisions.
@@ -1459,14 +1476,16 @@ fi
 # Image uploading
 #####################################################################
 
-# Check if this instance has already been uploaded to this terminal with the
-# found image id.
-# TODO: Also check date and reupload if too old.
-if [[ -e "$terminal_dir/$image_id" ]] &&
-   [[ "$(head -1 "$terminal_dir/$image_id")" == "$img_instance" ]]; then
-    echolog "Image already uploaded"
-else
-    upload_image "$image_id" "$file" "$cols" "$rows" "$terminal_dir"
+if [[ -z "$no_upload" ]]; then
+    # Check if this instance has already been uploaded to this terminal with the
+    # found image id.
+    # TODO: Also check date and reupload if too old.
+    if [[ -e "$terminal_dir/$image_id" ]] &&
+       [[ "$(head -1 "$terminal_dir/$image_id")" == "$img_instance" ]]; then
+        echolog "Image already uploaded"
+    else
+        upload_image "$image_id" "$file" "$cols" "$rows" "$terminal_dir"
+    fi
 fi
 
 #####################################################################

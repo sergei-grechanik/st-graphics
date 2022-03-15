@@ -14,6 +14,14 @@ mkdir _data 2> /dev/null || true
     curl -o _data/tux.png https://upload.wikimedia.org/wikipedia/commons/a/af/Tux.png
 [[ -f _data/earth.jpg ]] || \
     curl -o _data/earth.jpg "https://upload.wikimedia.org/wikipedia/commons/thumb/c/cb/The_Blue_Marble_%28remastered%29.jpg/240px-The_Blue_Marble_%28remastered%29.jpg"
+[[ -f _data/mars.jpg ]] || \
+    curl -o _data/mars.jpg "https://upload.wikimedia.org/wikipedia/commons/0/02/OSIRIS_Mars_true_color.jpg"
+[[ -f _data/jupiter.jpg ]] || \
+    curl -o _data/jupiter.jpg "https://upload.wikimedia.org/wikipedia/commons/2/2b/Jupiter_and_its_shrunken_Great_Red_Spot.jpg"
+[[ -f _data/saturn.jpg ]] || \
+    curl -o _data/saturn.jpg "https://upload.wikimedia.org/wikipedia/commons/c/c7/Saturn_during_Equinox.jpg"
+[[ -f _data/sun.jpg ]] || \
+    curl -o _data/sun.jpg "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b4/The_Sun_by_the_Atmospheric_Imaging_Assembly_of_NASA%27s_Solar_Dynamics_Observatory_-_20100819.jpg/628px-The_Sun_by_the_Atmospheric_Imaging_Assembly_of_NASA%27s_Solar_Dynamics_Observatory_-_20100819.jpg"
 
 tmpdir="$(mktemp -d)"
 if [[ -z "$tmpdir" ]]; then
@@ -78,5 +86,18 @@ $upload_image _data/tux.png --rows 4 -V -q
 echo "Test overriding an existing id (the 9999 image above will change)"
 $upload_image _data/tux.png --id 9999 -r 4
 
+echo "Test showing part of the image with --show-id"
+$upload_image --show-id 9999 --no-upload --rows 2
+$upload_image --show-id 9999 --cols 4
+
 echo "A jpeg image"
-$upload_image _data/earth.jpg
+$upload_image _data/earth.jpg -r 10
+
+echo "Uploading an image using direct method"
+$upload_image _data/mars.jpg -r 10 -m direct
+
+echo "Showing an image without uploading"
+$upload_image _data/jupiter.jpg --id 9998 -r 10 --no-upload
+
+echo "Now reuploading the last image"
+$upload_image --fix  9998 -m direct
