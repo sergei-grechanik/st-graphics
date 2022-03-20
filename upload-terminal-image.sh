@@ -58,7 +58,9 @@ uploading progress (which may be disabled with '-q').
         Reupload the given IDs. If no IDs are given, try to guess which images
         need reuploading automatically.
     --clear-term
-        Delete all pictures loaded to the terminal.
+        Delete all known image data from the terminal.
+    --clear-id <ID>
+        Delete the image data corresponding to the given ID from the terminal.
     --clean-cache
         Remove some old files and IDs from the cache dir.
     --status
@@ -66,8 +68,8 @@ uploading progress (which may be disabled with '-q').
     --noesc
         Do not issue the escape codes representing row numbers (encoded as
         foreground color).
-    --save-id <file>
-        Save the image id to <file>.
+    --save-info <file>
+        Save some information to <file> (like image id, rows, columns, etc).
     --show-id N
         Display the image with the given id.
     --max-cols N
@@ -93,10 +95,11 @@ uploading progress (which may be disabled with '-q').
         Do not try to hijack focus by creating a new pane when inside tmux and
         the current pane is not active (just fail instead).
     --uploading-method <method>, -m <method>
-        Set the uploading method, which can be 'direct' for direct data
-        uploading, 'file' for sending the file name to the terminal, 'both' for
-        trying file first and direct on failure, and 'auto' to choose the method
-        automatically.
+        Set the uploading method which can be one of:
+          'direct' for direct data uploading,
+          'file'   for sending the file name to the terminal,
+          'both'   for trying 'file' first and 'direct' on failure
+          'auto'   to choose the method automatically (default).
     --no-upload
         Do not upload the image (it can be done later using --fix).
     -h, --help
@@ -158,7 +161,7 @@ err=""
 log=""
 quiet=""
 noesc=""
-save_id=""
+save_info=""
 no_upload=""
 append=""
 uploading_method="$TERMINAL_IMAGES_UPLOADING_METHOD"
@@ -172,6 +175,7 @@ reupload=""
 reupload_ids=()
 
 clear_term=""
+clear_id=""
 clean_cache=""
 show_status=""
 show_id=""
@@ -273,8 +277,8 @@ while [[ $# -gt 0 ]]; do
             noesc=1
             shift
             ;;
-        --save-id)
-            save_id="$2"
+        --save-info)
+            save_info="$2"
             shift 2
             ;;
         --no-tmux-hijack)
@@ -328,6 +332,11 @@ while [[ $# -gt 0 ]]; do
             clear_term=1
             ((command_count++))
             shift
+            ;;
+        --clear-id)
+            clear_id="$2"
+            ((command_count++))
+            shift 2
             ;;
         --clean-cache)
             clean_cache=1
@@ -395,6 +404,8 @@ if [[ ! "$uploading_method" =~ ^(direct|file|both|auto|)$ ]]; then
 fi
 
 echolog ""
+
+[[ -z "$save_info" ]] || > "$save_info"
 
 # Store the pid of the current process if requested. This is needed for tmux
 # hijacking so that the original script can wait for the uploading process.
@@ -783,8 +794,18 @@ upload_image() {
     # Write the size of the image in bytes to the "size" file.
     wc -c < "$file" > "$tmpdir/size"
 
-    upload_image_impl "$image_id" "$tmpdir" "$cols" "$rows"
-    return $?
+    # Tmux may cause some instability, try two times as a workaround.
+    local attempts=1
+    if [[ -n "$inside_tmux" ]]; then
+        attempts=2
+    fi
+
+    for attempt in $(seq 1 $attempts); do
+        if upload_image_impl "$image_id" "$tmpdir" "$cols" "$rows"; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 # Checks if inside the active tmux pane.
@@ -824,13 +845,17 @@ upload_image_impl() {
         size_info=",S=$total_size"
     fi
 
+    # Some versions of tmux may drop packets if the terminal is too slow to
+    # process them. Use a delay as a workaround. The issue should be fixed in
+    # newer versions of tmux, see https://github.com/tmux/tmux/issues/3001
+    if [[ -n "$inside_tmux" ]]; then
+        sleep 0.1
+    fi
+
     # Try sending the filename if there is the encoded filename
     if [[ -e "$tmpdir/filename" ]]; then
         echostatus "Trying file-based uploading"
-        start_gr_command
-        echo -en "a=t,i=$image_id,f=100,t=f,c=${cols},r=${rows}${size_info};"
-        cat "$tmpdir/filename"
-        end_gr_command
+        gr_command "a=t,i=$image_id,f=100,t=f,c=${cols},r=${rows}${size_info};$(cat "$tmpdir/filename")"
 
         echostatus "Awaiting terminal response"
         get_terminal_response
@@ -842,8 +867,7 @@ upload_image_impl() {
     fi
 
     # Now try chunked uploading if there are chunks
-    chunks_count="$(ls -1 "$tmpdir/chunk_"* | wc -l)"
-    if (( "$chunks_count" == 0 )); then
+    if [[ -z "$(echo "$tmpdir/chunk_"*)" ]]; then
         return 1
     fi
     chunk_i=0
@@ -1012,6 +1036,29 @@ if [[ -n "$clear_term" ]]; then
         ) 9>"$terminal_dir.lock" || exit 1
     done
     exit 0
+fi
+
+#####################################################################
+# Handling the clear-id command
+#####################################################################
+
+if [[ -n "$clear_id" ]]; then
+    for terminal_dir in "$terminal_dir_256" "$terminal_dir_24bit"; do
+        if [[ -e "$terminal_dir/$clear_id" ]]; then
+            (
+                flock --timeout "$default_timeout" 9 || \
+                    { echoerr "Could not acquire a lock on $terminal_dir.lock"; \
+                      exit 1; }
+                rm "$terminal_dir/$clear_id" 2> /dev/null
+                # Delete the image (if this command fails, e.g. because of tmux,
+                # we don't care).
+                gr_command "a=d,d=I,i=${clear_id},q=2"
+                exit 0
+            ) 9>"$terminal_dir.lock" || exit 1
+            exit 0
+        fi
+    done
+    exit 1
 fi
 
 #####################################################################
@@ -1295,6 +1342,9 @@ cols="$((10#$cols))"
 
 echolog "Image size columns: $cols, rows: $rows"
 
+# Save the number of rows and columns.
+[[ -z "$save_info" ]] || echo -e "columns\t$cols\nrows\t$rows" >> "$save_info"
+
 #####################################################################
 # Helper functions for finding image ids
 #####################################################################
@@ -1470,7 +1520,7 @@ else
 fi
 
 # Save the image id.
-[[ -z "$save_id" ]] || echo "$image_id" > "$save_id"
+[[ -z "$save_info" ]] || echo -e "id\t$image_id" >> "$save_info"
 
 #####################################################################
 # Image uploading

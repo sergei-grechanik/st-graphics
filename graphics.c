@@ -365,6 +365,19 @@ static void gr_displayinfo(Drawable buf, ImageRect *rect, int col1, int col2,
 		    info, strlen(info));
 }
 
+static void gr_showrect(Drawable buf, ImageRect *rect) {
+	int w_pix = (rect->end_col - rect->start_col) * rect->cw;
+	int h_pix = (rect->end_row - rect->start_row) * rect->ch;
+	Display *disp = imlib_context_get_display();
+	GC gc = XCreateGC(disp, buf, 0, NULL);
+	XSetForeground(disp, gc, 0x00FF00);
+	XDrawRectangle(disp, buf, gc, rect->x_pix, rect->y_pix,
+		       w_pix - 1, h_pix - 1);
+	XSetForeground(disp, gc, 0xFF0000);
+	XDrawRectangle(disp, buf, gc, rect->x_pix + 1, rect->y_pix + 1,
+		       w_pix - 3, h_pix - 3);
+}
+
 static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 	// If we are uploading data then we shouldn't do heavy computation (like
 	// displaying graphics), mostly because some versions of tmux may drop
@@ -373,18 +386,21 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 		return;
 
 	if (rect->image_id == 0) {
+		gr_showrect(buf, rect);
 		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "id=");
 		return;
 	}
 	CellImage *img = gfindimage(rect->image_id);
 	Imlib_Image scaled_image;
 	if (!img) {
+		gr_showrect(buf, rect);
 		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "error id=");
 		return;
 	}
 	gloadimage(img, rect->cw, rect->ch);
 
 	if (img->status != STATUS_IN_RAM || !img->scaled_image) {
+		gr_showrect(buf, rect);
 		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "error id=");
 		return;
 	}
@@ -412,14 +428,7 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 
 	// In debug mode draw bounding boxes and print info.
 	if (graphics_debug_mode) {
-		Display *disp = imlib_context_get_display();
-		GC gc = XCreateGC(disp, buf, 0, NULL);
-		XSetForeground(disp, gc, 0x00FF00);
-		XDrawRectangle(disp, buf, gc, rect->x_pix, rect->y_pix,
-			       w_pix - 1, h_pix - 1);
-		XSetForeground(disp, gc, 0xFF0000);
-		XDrawRectangle(disp, buf, gc, rect->x_pix + 1, rect->y_pix + 1,
-			       w_pix - 3, h_pix - 3);
+		gr_showrect(buf, rect);
 		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "# ");
 	}
 }
@@ -852,11 +861,11 @@ static void gsetkeyvalue(GraphicsCommand *cmd, char *key_start, char *key_end,
 		return;
 	}
 	long num = 0;
-	if (*key_start == 'a' || *key_start == 't') {
+	if (*key_start == 'a' || *key_start == 't' || *key_start == 'd') {
 		if (value_end - value_start != 1) {
 			gr_reporterror_cmd(
 				cmd,
-				"EINVAL: value of 'a' or 't' must be a "
+				"EINVAL: value of 'a', 't' or 'd' must be a "
 				"single char: %s",
 				key_start);
 			return;
@@ -991,6 +1000,11 @@ int gparsecommand(char *buf, size_t len) {
 
 	if (!graphics_command_result.error)
 		gruncommand(&cmd);
+
+	if (graphics_debug_mode) {
+		fprintf(stderr, "Response: %s\n",
+			graphics_command_result.response);
+	}
 
 	if (cmd.quiet) {
 		if (!graphics_command_result.error || cmd.quiet >= 2)

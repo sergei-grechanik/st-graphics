@@ -22,6 +22,16 @@ mkdir _data 2> /dev/null || true
     curl -o _data/saturn.jpg "https://upload.wikimedia.org/wikipedia/commons/c/c7/Saturn_during_Equinox.jpg"
 [[ -f _data/sun.jpg ]] || \
     curl -o _data/sun.jpg "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b4/The_Sun_by_the_Atmospheric_Imaging_Assembly_of_NASA%27s_Solar_Dynamics_Observatory_-_20100819.jpg/628px-The_Sun_by_the_Atmospheric_Imaging_Assembly_of_NASA%27s_Solar_Dynamics_Observatory_-_20100819.jpg"
+[[ -f _data/butterfly.jpg ]] || \
+    curl -o _data/butterfly.jpg "https://upload.wikimedia.org/wikipedia/commons/a/a6/Peacock_butterfly_%28Aglais_io%29_2.jpg"
+[[ -f _data/david.jpg ]] || \
+    curl -o _data/david.jpg "https://upload.wikimedia.org/wikipedia/commons/8/84/Michelangelo%27s_David_2015.jpg"
+[[ -f _data/fern.jpg ]] || \
+    curl -o _data/fern.jpg "https://upload.wikimedia.org/wikipedia/commons/3/3d/Giant_fern_forest_7.jpg"
+[[ -f _data/nebula.jpg ]] || \
+    curl -o _data/nebula.jpg "https://upload.wikimedia.org/wikipedia/commons/b/b1/NGC7293_%282004%29.jpg"
+[[ -f _data/flake.jpg ]] || \
+    curl -o _data/flake.jpg "https://upload.wikimedia.org/wikipedia/commons/d/d7/Snowflake_macro_photography_1.jpg"
 
 tmpdir="$(mktemp -d)"
 if [[ -z "$tmpdir" ]]; then
@@ -33,8 +43,12 @@ cleanup() {
 }
 trap cleanup EXIT TERM
 
+
 echo "Just wikipedia logo"
 $upload_image _data/wikipedia.png
+
+echo "Wikipedia logo with enforced dpi=96"
+$upload_image _data/wikipedia.png --override-dpi 96
 
 echo "Testing -r (5 images)"
 for i in $(seq 1 5); do
@@ -61,24 +75,32 @@ done
 cat "$tmpdir/img"
 
 echo "Test saving id and showing id"
-$upload_image _data/tux.png -r 2 --save-id "$tmpdir/id" -o /dev/null
-cat "$tmpdir/id"
-$upload_image --show-id "$(cat "$tmpdir/id")"
+$upload_image _data/tux.png -r 2 --save-info "$tmpdir/info" -o /dev/null
+cat "$tmpdir/info"
+image_id="$(grep id "$tmpdir/info" | cut -f 2)"
+echo $image_id
+$upload_image --show-id "$image_id"
+
 echo "Test saving id and showing id for 256 bit IDs"
-$upload_image _data/tux.png --256 -r 2 --save-id "$tmpdir/id" -o /dev/null
-cat "$tmpdir/id"
-(( $(cat "$tmpdir/id") < 256 )) || exit 1
-$upload_image --show-id "$(cat "$tmpdir/id")"
+$upload_image _data/tux.png --256 -r 2 --save-info "$tmpdir/info" -o /dev/null
+image_id="$(grep id "$tmpdir/info" | cut -f 2)"
+echo $image_id
+(( $image_id < 256 )) || exit 1
+$upload_image --show-id "$image_id"
+
 echo "Test saving id and showing id, the id is manually specified"
-$upload_image _data/tux.png --id 9999 -r 2 --save-id "$tmpdir/id" -o /dev/null
-cat "$tmpdir/id"
-(( $(cat "$tmpdir/id") == 9999 )) || exit 1
-$upload_image --show-id "$(cat "$tmpdir/id")"
+$upload_image _data/tux.png --id 9999 -r 2 --save-info "$tmpdir/info" -o /dev/null
+image_id="$(grep id "$tmpdir/info" | cut -f 2)"
+echo $image_id
+(( $image_id == 9999 )) || exit 1
+$upload_image --show-id "$image_id"
+
 echo "Test saving id and showing id, the id is manually specified < 256"
-$upload_image _data/tux.png --id 42 -r 2 --save-id "$tmpdir/id" -o /dev/null
-cat "$tmpdir/id"
-(( $(cat "$tmpdir/id") == 42 )) || exit 1
-$upload_image --show-id "$(cat "$tmpdir/id")"
+$upload_image _data/tux.png --id 42 -r 2 --save-info "$tmpdir/info" -o /dev/null
+image_id="$(grep id "$tmpdir/info" | cut -f 2)"
+echo $image_id
+(( $image_id == 42 )) || exit 1
+$upload_image --show-id "$image_id"
 
 echo "Testing being verbose (-V) but without status messages (-q)"
 $upload_image _data/tux.png --rows 4 -V -q
@@ -86,7 +108,7 @@ $upload_image _data/tux.png --rows 4 -V -q
 echo "Test overriding an existing id (the 9999 image above will change)"
 $upload_image _data/tux.png --id 9999 -r 4
 
-echo "Test showing part of the image with --show-id"
+echo "Test showing part of an image with --show-id"
 $upload_image --show-id 9999 --no-upload --rows 2
 $upload_image --show-id 9999 --cols 4
 
@@ -97,7 +119,46 @@ echo "Uploading an image using direct method"
 $upload_image _data/mars.jpg -r 10 -m direct
 
 echo "Showing an image without uploading"
-$upload_image _data/jupiter.jpg --id 9998 -r 10 --no-upload
+$upload_image --clear-id 9998 || true
+$upload_image _data/saturn.jpg --id 9998 -r 10 --no-upload
 
-echo "Now reuploading the last image"
+echo "Now reuploading the last image using direct method"
 $upload_image --fix  9998 -m direct
+
+echo "Deleting and reuploading it again"
+$upload_image --clear-id 9998
+$upload_image --fix  9998 -m direct
+
+echo "The rest of the test will use a temporary cache dir"
+export TERMINAL_IMAGES_CACHE_DIR="$tmpdir/cache_dir"
+
+draw_strips() {
+    local i=0
+    local total_cols=0
+    local max_cols="$(tput cols)"
+    local opts="$1"
+    shift
+    for file in "$@"; do
+        (( i++ )) || true
+        $upload_image "$file" $opts --save-info "$tmpdir/info" -o "$tmpdir/tmp"
+        cols="$(grep columns "$tmpdir/info" | cut -f 2)"
+        if (( $total_cols + $cols > $max_cols )); then
+            paste -d "" "$tmpdir/out_"*
+            rm "$tmpdir/out_"*
+            total_cols=0
+        fi
+        (( total_cols += cols )) || true
+        mv "$tmpdir/tmp" "$tmpdir/out_$(printf "%02d" $i)"
+    done
+    paste -d "" "$tmpdir/out_"*
+    rm "$tmpdir/out_"*
+}
+
+echo "Displaying all images in _data in horizontal strips"
+
+echo "Images are uploaded immediately"
+draw_strips "-r 9 -q" _data/*.jpg _data/*.png
+
+echo "Images are uploaded after creating placeholders using --fix"
+draw_strips "-r 10 --no-upload" _data/*.jpg _data/*.png
+$upload_image --fix
