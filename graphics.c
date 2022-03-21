@@ -25,9 +25,9 @@ enum ImageStatus {
 	STATUS_UNINITIALIZED = 0,
 	STATUS_UPLOADING = 1,
 	STATUS_UPLOADING_ERROR = 2,
-	STATUS_ON_DISK = 3,
+	STATUS_UPLOADING_SUCCESS = 3,
 	STATUS_RAM_LOADING_ERROR = 4,
-	STATUS_IN_RAM = 5,
+	STATUS_RAM_LOADING_SUCCESS = 5,
 };
 
 enum ImageUploadingFailure {
@@ -47,10 +47,8 @@ typedef struct {
 	char uploading_failure;
 	char quiet;
 	uint16_t scaled_cw, scaled_ch;
-	union {
-		Imlib_Image scaled_image;
-		FILE *open_file;
-	};
+	Imlib_Image scaled_image;
+	FILE *open_file;
 } CellImage;
 
 typedef struct {
@@ -133,14 +131,14 @@ static unsigned gimageramsize(CellImage *img) {
 }
 
 static void gunloadimage(CellImage *img) {
-	if (img->status != STATUS_IN_RAM || !img->scaled_image)
+	if (!img->scaled_image)
 		return;
 	imlib_context_set_image(img->scaled_image);
 	imlib_free_image();
 	cell_images_ram_size -= gimageramsize(img);
 	img->scaled_image = NULL;
 	img->scaled_ch = img->scaled_cw = 0;
-	img->status = STATUS_ON_DISK;
+	img->status = STATUS_UPLOADING_SUCCESS;
 
 	if (graphics_debug_mode) {
 		fprintf(stderr, "After unloading image %u ram: %d KiB\n",
@@ -149,16 +147,20 @@ static void gunloadimage(CellImage *img) {
 }
 
 static void gr_deleteimagefile(CellImage *img) {
-	if (img->status == STATUS_UPLOADING && img->open_file) {
+	if (img->open_file) {
 		fclose(img->open_file);
 		img->open_file = NULL;
 	}
+
+	if (img->disk_size == 0)
+		return;
+
 	char filename[MAX_FILENAME_SIZE];
 	gimagefilename(img, filename, MAX_FILENAME_SIZE);
 	remove(filename);
 	cell_images_disk_size -= img->disk_size;
 	img->disk_size = 0;
-	if (img->status < STATUS_IN_RAM)
+	if (img->status < STATUS_RAM_LOADING_SUCCESS)
 		img->status = STATUS_UPLOADING_ERROR;
 
 	if (graphics_debug_mode) {
@@ -170,8 +172,9 @@ static void gr_deleteimagefile(CellImage *img) {
 static void gdeleteimage(CellImage *img) {
 	gunloadimage(img);
 	gr_deleteimagefile(img);
+	if (img->image_id)
+		images_count--;
 	memset(img, 0, sizeof(CellImage));
-	images_count--;
 }
 
 static CellImage *getoldestimagetodelete(int ram) {
@@ -180,7 +183,7 @@ static CellImage *getoldestimagetodelete(int ram) {
 		CellImage *img = &cell_images[i];
 		if (img->image_id == 0)
 			continue;
-		if (ram && img->status < STATUS_IN_RAM)
+		if (ram && !img->scaled_image)
 			continue;
 		if (!ram && img->disk_size == 0)
 			continue;
@@ -217,7 +220,6 @@ static void gchecklimits() {
 }
 
 static CellImage *gnewimage() {
-	images_count++;
 	CellImage *oldest_image = NULL;
 	for (size_t i = 0; i < MAX_CELL_IMAGES; ++i) {
 		CellImage *img = &cell_images[i];
@@ -237,6 +239,7 @@ static CellImage *gnewimagewithid(uint32_t id, int cols, int rows) {
 		gdeleteimage(image);
 	else
 		image = gnewimage();
+	images_count++;
 	image->image_id = id;
 	image->cols = cols;
 	image->rows = rows;
@@ -246,10 +249,10 @@ static CellImage *gnewimagewithid(uint32_t id, int cols, int rows) {
 static void gtouchimage(CellImage *img) { time(&img->atime); }
 
 static void gloadimage(CellImage *img, int cw, int ch) {
-	if (img->status == STATUS_IN_RAM && img->scaled_image &&
+	if (img->scaled_image &&
 	    img->scaled_ch == ch && img->scaled_cw == cw)
 		return;
-	if (img->status < STATUS_ON_DISK || img->disk_size == 0)
+	if (img->disk_size == 0)
 		return;
 	gunloadimage(img);
 
@@ -328,7 +331,7 @@ static void gloadimage(CellImage *img, int cw, int ch) {
 	img->scaled_ch = ch;
 	img->scaled_cw = cw;
 	cell_images_ram_size += gimageramsize(img);
-	img->status = STATUS_IN_RAM;
+	img->status = STATUS_RAM_LOADING_SUCCESS;
 }
 
 void gpreviewimage(uint32_t image_id, const char *exec) {
@@ -338,7 +341,7 @@ void gpreviewimage(uint32_t image_id, const char *exec) {
 	if (img) {
 		char filename[MAX_FILENAME_SIZE];
 		gimagefilename(img, filename, MAX_FILENAME_SIZE);
-		if (img->status < STATUS_ON_DISK || img->disk_size == 0) {
+		if (img->disk_size == 0) {
 			len = snprintf(command, 255,
 				       "xmessage 'Image with id=%u is not "
 				       "fully copied to %s'",
@@ -427,7 +430,7 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 	}
 	gloadimage(img, rect->cw, rect->ch);
 
-	if (img->status != STATUS_IN_RAM || !img->scaled_image) {
+	if (!img->scaled_image) {
 		gr_showrect(buf, rect);
 		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "error id=");
 		return;
@@ -663,7 +666,7 @@ static void gr_reporterror_img(CellImage *img, const char *format, ...) {
 
 static void gr_loadimage_and_report(CellImage *img) {
 	gloadimage(img, last_cw, last_ch);
-	if (img->status != STATUS_IN_RAM) {
+	if (!img->scaled_image) {
 		gr_reporterror_img(img, "EBADF: could not load image");
 	} else {
 		gr_reportsuccess_img(img);
@@ -764,7 +767,7 @@ static void gappenddata(CellImage *img, const char *payload, int more) {
 			fclose(img->open_file);
 			img->open_file = NULL;
 		}
-		img->status = STATUS_ON_DISK;
+		img->status = STATUS_UPLOADING_SUCCESS;
 		if (img->expected_size &&
 		    img->expected_size != img->disk_size) {
 			img->status = STATUS_UPLOADING_ERROR;
@@ -828,7 +831,7 @@ static CellImage *gtransmitdata(GraphicsCommand *cmd) {
 			} else {
 				struct stat imgfile_stat;
 				stat(tmp_filename, &imgfile_stat);
-				img->status = STATUS_ON_DISK;
+				img->status = STATUS_UPLOADING_SUCCESS;
 				img->disk_size = imgfile_stat.st_size;
 				cell_images_disk_size += img->disk_size;
 				if (img->disk_size > max_image_disk_size) {
@@ -872,8 +875,10 @@ static CellImage *gtransmitdata(GraphicsCommand *cmd) {
 
 static void gr_handle_delete_command(GraphicsCommand *cmd) {
 	if (!cmd->delete_specifier) {
-		for (size_t i = 0; i < MAX_CELL_IMAGES; ++i)
-			gdeleteimage(&cell_images[i]);
+		for (size_t i = 0; i < MAX_CELL_IMAGES; ++i) {
+			if (cell_images[i].image_id)
+				gdeleteimage(&cell_images[i]);
+		}
 	}
 	else if (cmd->delete_specifier == 'I') {
 		if (cmd->image_id == 0)
