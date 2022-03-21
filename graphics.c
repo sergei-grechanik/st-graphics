@@ -127,7 +127,7 @@ static void gimagefilename(CellImage *img, char *out, size_t max_len) {
 
 static unsigned gimageramsize(CellImage *img) {
 	return (unsigned)img->rows * img->cols * img->scaled_ch *
-	       img->scaled_cw;
+	       img->scaled_cw * 4;
 }
 
 static void gunloadimage(CellImage *img) {
@@ -394,6 +394,7 @@ static void gr_displayinfo(Drawable buf, ImageRect *rect, int col1, int col2,
 	XSetForeground(disp, gc, col2);
 	XDrawString(disp, buf, gc, rect->x_pix + 2, rect->y_pix + h_pix - 5,
 		    info, strlen(info));
+	XFreeGC(disp, gc);
 }
 
 static void gr_showrect(Drawable buf, ImageRect *rect) {
@@ -407,6 +408,7 @@ static void gr_showrect(Drawable buf, ImageRect *rect) {
 	XSetForeground(disp, gc, 0xFF0000);
 	XDrawRectangle(disp, buf, gc, rect->x_pix + 1, rect->y_pix + 1,
 		       w_pix - 3, h_pix - 3);
+	XFreeGC(disp, gc);
 }
 
 static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
@@ -511,6 +513,7 @@ void gr_finish_drawing(Drawable buf) {
 		XFillRectangle(disp, buf, gc, 0, 0, 600, 16);
 		XSetForeground(disp, gc, 0xFFFFFF);
 		XDrawString(disp, buf, gc, 0, 14, info, strlen(info));
+		XFreeGC(disp, gc);
 	}
 }
 
