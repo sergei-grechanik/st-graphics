@@ -32,6 +32,12 @@ mkdir _data 2> /dev/null || true
     curl -o _data/nebula.jpg "https://upload.wikimedia.org/wikipedia/commons/b/b1/NGC7293_%282004%29.jpg"
 [[ -f _data/flake.jpg ]] || \
     curl -o _data/flake.jpg "https://upload.wikimedia.org/wikipedia/commons/d/d7/Snowflake_macro_photography_1.jpg"
+[[ -f _data/flower.jpg ]] || \
+    curl -o _data/flower.jpg "https://upload.wikimedia.org/wikipedia/commons/4/40/Sunflower_sky_backdrop.jpg"
+[[ -f _data/a_panorama.jpg ]] || \
+    curl -o _data/a_panorama.jpg "https://upload.wikimedia.org/wikipedia/commons/thumb/a/ac/Kazbeg_Panorama.jpg/2560px-Kazbeg_Panorama.jpg"
+[[ -f _data/column.png ]] || \
+    curl -o _data/column.png "https://upload.wikimedia.org/wikipedia/commons/9/95/Column6.png"
 
 tmpdir="$(mktemp -d)"
 if [[ -z "$tmpdir" ]]; then
@@ -129,6 +135,20 @@ echo "Deleting and reuploading it again"
 $upload_image --clear-id 9998
 $upload_image --fix  9998 -m direct
 
+echo "A long image, should be fit to the terminal width"
+$upload_image _data/a_panorama.jpg --save-info "$tmpdir/info" -r 20
+cat "$tmpdir/info"
+
+echo "A long image, without fitting to terminal width (will look bad)"
+$upload_image _data/a_panorama.jpg --save-info "$tmpdir/info" -r 20 --max-cols 1000 -o "$tmpdir/tmp"
+cat "$tmpdir/tmp" | head -4
+
+echo "Testing max cols (should be fit to 50 columns)"
+$upload_image _data/a_panorama.jpg --save-info "$tmpdir/info" --max-cols 50 -r 20
+
+echo "Testing max rows (only one row)"
+$upload_image _data/a_panorama.jpg --save-info "$tmpdir/info" --max-rows 1
+
 echo "The rest of the test will use a temporary cache dir"
 export TERMINAL_IMAGES_CACHE_DIR="$tmpdir/cache_dir"
 
@@ -157,7 +177,7 @@ draw_strips() {
 echo "Displaying all images in _data in horizontal strips"
 
 echo "Images are uploaded immediately"
-draw_strips "-r 9 -q" _data/*.jpg _data/*.png
+draw_strips "-r 9" _data/*.jpg _data/*.png
 
 echo "Images are uploaded after creating placeholders using --fix"
 draw_strips "-r 10 --no-upload" _data/*.jpg _data/*.png

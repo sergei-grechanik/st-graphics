@@ -1519,8 +1519,8 @@ else
     echolog "Found an image id $image_id"
 fi
 
-# Save the image id.
-[[ -z "$save_info" ]] || echo -e "id\t$image_id" >> "$save_info"
+# Save the image id and md5sum.
+[[ -z "$save_info" ]] || echo -e "id\t$image_id\nmd5sum\t$img_md5" >> "$save_info"
 
 #####################################################################
 # Image uploading
