@@ -26,11 +26,9 @@ uploading progress (which may be disabled with '-q').
 
   Options:
     -c N, --columns N, --cols N
-        The number of columns for the image. By default the script will try to
-        compute the optimal value by itself.
     -r N, --rows N
-        The number of rows for the image. By default the script will try to
-        compute the optimal value by itself.
+        The number of columns and rows for the image. By default the script will
+        try to compute the optimal values by itself.
     --id N
         Use the specified image id instead of finding a free one.
     --256
@@ -109,6 +107,8 @@ uploading progress (which may be disabled with '-q').
     TERMINAL_IMAGES_COLS_PER_INCH
     TERMINAL_IMAGES_ROWS_PER_INCH
         See  --cols-per-inch and --rows-per-inch.
+    TERMINAL_IMAGES_OVERRIDE_DPI
+        See --override-dpi.
     TERMINAL_IMAGES_CACHE_DIR
         The directory to store images being uploaded (in case if they need to be
         reuploaded) and information about used image ids.
@@ -116,6 +116,14 @@ uploading progress (which may be disabled with '-q').
         If set, disable tmux hijacking.
     TERMINAL_IMAGES_UPLOADING_METHOD
         See --uploading-method.
+    TERMINAL_IMAGES_CLEANUP_PROBABILITY
+        The probability of running a clean-up on image upload (in %).
+    TERMINAL_IMAGES_CACHE_COUNT_LIMIT
+        The maximum number of images stored in the cache dir.
+    TERMINAL_IMAGES_CACHE_SIZE_LIMIT
+        The maximum total size of images stored in the cache dir, in Kbytes.
+    TERMINAL_IMAGES_IDS_LIMIT
+        The maximum number of ids in a session or a terminal.
 "
 
 # Exit the script on keyboard interrupt
@@ -130,20 +138,24 @@ default_timeout=3
 chunk_size=3968
 
 # The probability of running a clean-up on image upload (in %).
-cleanup_probability=5
+cleanup_probability="$TERMINAL_IMAGES_CLEANUP_PROBABILITY"
+[[ -n "$cleanup_probability" ]] || cleanup_probability=5
 # The maximum number of days since last action after which a terminal or session
 # dir will be deleted.
 max_days_of_inactivity=30
 # The maximum number of ids in a session or a terminal.
-max_ids=512
+max_ids="$TERMINAL_IMAGES_IDS_LIMIT"
+[[ -n "$max_ids" ]] || max_ids=512
 # The number of ids deleted from a session or a terminal if there are too many.
-num_ids_to_delete=64
+num_ids_to_delete=4
 # The maximum number of images stored in the cache dir.
-max_cached_images=512
+max_cached_images="$TERMINAL_IMAGES_CACHE_COUNT_LIMIT"
+[[ -n "$max_cached_images" ]] || max_cached_images=512
 # The maximum total size of images stored in the cache dir, in Kbytes.
-max_cached_images_size=300000
+max_cached_images_size="$TERMINAL_IMAGES_CACHE_SIZE_LIMIT"
+[[ -n "$max_cached_images_size" ]] || max_cached_images_size=300000
 # The number of images to delete if there are too many.
-num_images_to_delete=64
+num_images_to_delete=4
 
 cols=""
 rows=""
@@ -154,7 +166,7 @@ image_id=""
 cols_per_inch="$TERMINAL_IMAGES_COLS_PER_INCH"
 rows_per_inch="$TERMINAL_IMAGES_ROWS_PER_INCH"
 cache_dir="$TERMINAL_IMAGES_CACHE_DIR"
-override_dpi=""
+override_dpi="$TERMINAL_IMAGES_OVERRIDE_DPI"
 file=""
 out="/dev/stdout"
 err=""

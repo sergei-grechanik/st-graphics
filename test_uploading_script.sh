@@ -182,3 +182,28 @@ draw_strips "-r 9" _data/*.jpg _data/*.png
 echo "Images are uploaded after creating placeholders using --fix"
 draw_strips "-r 10 --no-upload" _data/*.jpg _data/*.png
 $upload_image --fix
+
+
+export TERMINAL_IMAGES_CACHE_DIR="$tmpdir/cache_dir_test_limits"
+export TERMINAL_IMAGES_CLEANUP_PROBABILITY=100
+
+echo "Testing max ids limit"
+export TERMINAL_IMAGES_IDS_LIMIT=2
+draw_strips "-r 9" _data/*.jpg _data/*.png
+$upload_image --status
+ids_count="$(ls -1 $TERMINAL_IMAGES_CACHE_DIR/terminals/*-24bit_ids/ | wc -l)"
+(( ids_count <= 2 )) || exit 1
+
+echo "Testing max ids limit for 8-bit ids (will probably override old images)"
+draw_strips "-r 9 --256" _data/*.jpg _data/*.png
+$upload_image --status
+ids_count="$(ls -1 $TERMINAL_IMAGES_CACHE_DIR/terminals/*-8bit_ids/ | wc -l)"
+(( ids_count <= 2 )) || exit 1
+
+echo "Testing max cache size limit"
+export TERMINAL_IMAGES_IDS_LIMIT=
+export TERMINAL_IMAGES_CACHE_SIZE_LIMIT=1000
+draw_strips "-r 9" _data/*.jpg _data/*.png
+$upload_image --status
+cache_size="$(du -s $TERMINAL_IMAGES_CACHE_DIR/cache | cut -f1)"
+(( $cache_size <= 1000 )) || exit 1
