@@ -55,6 +55,8 @@ uploading progress (which may be disabled with '-q').
     --fix [IDs], --reupload [IDs]
         Reupload the given IDs. If no IDs are given, try to guess which images
         need reuploading automatically.
+    --last N
+        Reupload only last N IDs when performing automatic reuploading.
     --clear-term
         Delete all known image data from the terminal.
     --clear-id <ID>
@@ -142,7 +144,8 @@ cleanup_probability="$TERMINAL_IMAGES_CLEANUP_PROBABILITY"
 [[ -n "$cleanup_probability" ]] || cleanup_probability=5
 # The maximum number of days since last action after which a terminal or session
 # dir will be deleted.
-max_days_of_inactivity=30
+max_days_of_inactivity="$TERMINAL_IMAGES_MAX_DAYS_OF_INACTIVITY"
+[[ -n "$max_days_of_inactivity" ]] || max_days_of_inactivity=30
 # The maximum number of ids in a session or a terminal.
 max_ids="$TERMINAL_IMAGES_IDS_LIMIT"
 [[ -n "$max_ids" ]] || max_ids=512
@@ -182,6 +185,7 @@ tmux_hijack_allowed="1"
 tmux_hijack_helper=""
 store_code=""
 store_pid=""
+last_n=""
 
 reupload=""
 reupload_ids=()
@@ -327,6 +331,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --override-dpi)
             override_dpi="$2"
+            shift 2
+            ;;
+        --last)
+            last_n="$2"
             shift 2
             ;;
 
@@ -1128,7 +1136,7 @@ reupload_instance() {
     local cached_file="$cache_dir/cache/$md5"
 
     if [[ ! -e "$cached_file" ]]; then
-        echoerr "Could not find the image in cache"
+        echoerr "Could not find the image in cache: $cached_file"
         return 1
     fi
 
@@ -1173,26 +1181,32 @@ if [[ -n "$reupload" ]]; then
 
     reupload_ids_failed=()
 
+    reuploads_left="$last_n"
+
     # Iterate over all image instances starting from the newest one and reupload
     # them if they are in `reupload_ids`.
-    for session_dir in "$session_dir_256" "$session_dir_24bit"; do
-        for inst in $(ls -t "$session_dir"); do
-            inst_file="$session_dir/$inst"
-            [[ -e "$inst_file" ]] || continue
-            id="$(head -1 "$inst_file")"
-            for idx in "${!reupload_ids[@]}"; do
-                if [[ "${reupload_ids[idx]}" == "$id" ]]; then
-                    echomessage "Trying to reupload $inst with id $id"
-                    reupload_instance "$inst" "$id"
-                    if [[ $? -ne 0 ]]; then
-                        reupload_ids_failed+=("$id")
-                    else
-                        echomessage "Successfully reuploaded id $id"
-                    fi
-                    unset 'reupload_ids[idx]'
-                    break
+    for inst_file in $(ls -t "$session_dir_256"/* "$session_dir_24bit"/*); do
+        if [[ -n "$last_n" ]] && (( "$reuploads_left" == 0 )); then
+            break
+        fi
+        inst="$(basename "$inst_file")"
+        [[ -e "$inst_file" ]] || continue
+        id="$(head -1 "$inst_file")"
+        for idx in "${!reupload_ids[@]}"; do
+            if [[ "${reupload_ids[idx]}" == "$id" ]]; then
+                if [[ -n "$last_n" ]]; then
+                    ((reuploads_left--))
                 fi
-            done
+                echomessage "Trying to reupload $inst with id $id"
+                reupload_instance "$inst" "$id"
+                if [[ $? -ne 0 ]]; then
+                    reupload_ids_failed+=("$id")
+                else
+                    echomessage "Successfully reuploaded id $id"
+                fi
+                unset 'reupload_ids[idx]'
+                break
+            fi
         done
     done
 
@@ -1201,7 +1215,8 @@ if [[ -n "$reupload" ]]; then
         exit 1
     fi
 
-    if [[ ${#reupload_ids[@]} != 0 ]]; then
+    # If --last was specified, we cann't reliably report non-found IDs.
+    if [[ -z "$last_n" ]] && [[ ${#reupload_ids[@]} != 0 ]]; then
         echoerr "Could not find IDs: ${reupload_ids[*]}"
         exit 1
     fi

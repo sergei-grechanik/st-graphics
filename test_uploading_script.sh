@@ -183,6 +183,9 @@ echo "Images are uploaded after creating placeholders using --fix"
 draw_strips "-r 10 --no-upload" _data/*.jpg _data/*.png
 $upload_image --fix
 
+echo "Only 2 images are uploaded after creating placeholders using --fix --last 2"
+draw_strips "-r 8 --no-upload" _data/*.png
+$upload_image --fix --last 2
 
 export TERMINAL_IMAGES_CACHE_DIR="$tmpdir/cache_dir_test_limits"
 export TERMINAL_IMAGES_CLEANUP_PROBABILITY=100
