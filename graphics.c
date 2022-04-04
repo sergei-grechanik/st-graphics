@@ -909,6 +909,8 @@ static void gruncommand(GraphicsCommand *cmd) {
 		}
 		break;
 	case 't':
+	case 'T':
+		// Transmit data or transmit and display.
 		gtransmitdata(cmd);
 		break;
 	case 'd':
@@ -918,8 +920,6 @@ static void gruncommand(GraphicsCommand *cmd) {
 		// display (put) the last image
 	case 'q':
 		// query
-	case 'T':
-		// transmit and display
 	default:
 		gr_reporterror_cmd(cmd, "EINVAL: unsupported action: %c",
 				   cmd->action);
@@ -984,6 +984,12 @@ static void gsetkeyvalue(GraphicsCommand *cmd, char *key_start, char *key_end,
 		break;
 	case 'p':
 		cmd->placement_id = num;
+		if (num != 0) {
+			gr_reporterror_cmd(cmd,
+					   "EINVAL: non-zero placement id is "
+					   "not supported: %s",
+					   key_start);
+		}
 		break;
 	case 'c':
 		cmd->columns = num;
@@ -997,6 +1003,15 @@ static void gsetkeyvalue(GraphicsCommand *cmd, char *key_start, char *key_end,
 		break;
 	case 'S':
 		cmd->size = num;
+		break;
+	case 'U':
+		// Placement using unicode chars, must be true since we don't
+		// support other forms of placement.
+		if (!num) {
+			gr_reporterror_cmd(cmd,
+					   "EINVAL: 'U' must be non-zero: %s",
+					   key_start);
+		}
 		break;
 	default:
 		gr_reporterror_cmd(cmd, "EINVAL: unsupported key: %s",

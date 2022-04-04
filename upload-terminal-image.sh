@@ -6,11 +6,12 @@
 #       portable.
 
 # TODO list:
-# - Tests
-# - Fix the help description
-# - Fixing only N last images (or last day).
-# - Deleting images from session.
 # - Listing images from session and terminal dirs.
+# - Better indication of cell image uploading
+# - Kitty implementation
+# - Fix names and better comments in graphics.c
+# - Fix the help description
+# - Deleting images from session.
 
 script_fullname="$0"
 script_name="$(basename $0)"
@@ -875,7 +876,7 @@ upload_image_impl() {
     # Try sending the filename if there is the encoded filename
     if [[ -e "$tmpdir/filename" ]]; then
         echostatus "Trying file-based uploading"
-        gr_command "a=t,i=$image_id,f=100,t=f,c=${cols},r=${rows}${size_info};$(cat "$tmpdir/filename")"
+        gr_command "a=T,U=1,i=$image_id,f=100,t=f,c=${cols},r=${rows}${size_info};$(cat "$tmpdir/filename")"
 
         echostatus "Awaiting terminal response"
         get_terminal_response
@@ -896,7 +897,8 @@ upload_image_impl() {
 
     # Issue a command indicating that we want to start data transmission for a
     # new image.
-    # a=t    the action is to transmit data
+    # a=T    the action is to transmit data and create placement
+    # U=1    the placement is defined by Unicode symbols (extension)
     # i=$image_id
     # f=100  PNG. st will ignore this field, for kitty we support only PNG.
     # t=d    transmit data directly
