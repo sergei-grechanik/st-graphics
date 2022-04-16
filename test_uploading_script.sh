@@ -29,7 +29,7 @@ mkdir _data 2> /dev/null || true
 [[ -f _data/fern.jpg ]] || \
     curl -o _data/fern.jpg "https://upload.wikimedia.org/wikipedia/commons/3/3d/Giant_fern_forest_7.jpg"
 [[ -f _data/nebula.jpg ]] || \
-    curl -o _data/nebula.jpg "https://upload.wikimedia.org/wikipedia/commons/b/b1/NGC7293_%282004%29.jpg"
+    curl -o _data/nebula.jpg "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b1/NGC7293_%282004%29.jpg/556px-NGC7293_%282004%29.jpg"
 [[ -f _data/flake.jpg ]] || \
     curl -o _data/flake.jpg "https://upload.wikimedia.org/wikipedia/commons/d/d7/Snowflake_macro_photography_1.jpg"
 [[ -f _data/flower.jpg ]] || \
@@ -186,6 +186,9 @@ $upload_image --fix
 echo "Only 2 images are uploaded after creating placeholders using --fix --last 2"
 draw_strips "-r 8 --no-upload" _data/*.png
 $upload_image --fix --last 2
+
+echo "Testing --ls, 2 rows per image"
+$upload_image --ls --last 10 -r 2
 
 export TERMINAL_IMAGES_CACHE_DIR="$tmpdir/cache_dir_test_limits"
 export TERMINAL_IMAGES_CLEANUP_PROBABILITY=100

@@ -420,21 +420,21 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 
 	if (rect->image_id == 0) {
 		gr_showrect(buf, rect);
-		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "id=");
+		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
 		return;
 	}
 	CellImage *img = gfindimage(rect->image_id);
 	Imlib_Image scaled_image;
 	if (!img) {
 		gr_showrect(buf, rect);
-		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "error id=");
+		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
 		return;
 	}
 	gloadimage(img, rect->cw, rect->ch);
 
 	if (!img->scaled_image) {
 		gr_showrect(buf, rect);
-		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "error id=");
+		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
 		return;
 	}
 

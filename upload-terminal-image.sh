@@ -8,10 +8,10 @@
 # TODO list:
 # - Listing images from session and terminal dirs.
 # - Better indication of cell image uploading
-# - Kitty implementation
 # - Fix names and better comments in graphics.c
 # - Fix the help description
 # - Deleting images from session.
+# - Query the terminal when deciding whether to fix an image.
 
 script_fullname="$0"
 script_name="$(basename $0)"
@@ -58,6 +58,8 @@ uploading progress (which may be disabled with '-q').
         need reuploading automatically.
     --last N
         Reupload only last N IDs when performing automatic reuploading.
+    --list, --ls
+        List all images from the session in reverse chronological order.
     --clear-term
         Delete all known image data from the terminal.
     --clear-id <ID>
@@ -103,6 +105,8 @@ uploading progress (which may be disabled with '-q').
           'auto'   to choose the method automatically (default).
     --no-upload
         Do not upload the image (it can be done later using --fix).
+    --force-upload
+        (Re)upload the image even if it has been uploaded.
     -h, --help
         Show this message
 
@@ -132,7 +136,7 @@ uploading progress (which may be disabled with '-q').
 # Exit the script on keyboard interrupt
 trap "exit 1" INT
 
-# Make sure that some_dir/* returns an empty list if some_dir is empty.
+#Make sure that some_dir/* returns an empty list if some_dir is empty.
 shopt -s nullglob
 
 # The timeout for terminal response and file locks, in seconds.
@@ -179,6 +183,7 @@ quiet=""
 noesc=""
 save_info=""
 no_upload=""
+force_upload=""
 append=""
 uploading_method="$TERMINAL_IMAGES_UPLOADING_METHOD"
 tmux_hijack_allowed="1"
@@ -191,6 +196,7 @@ last_n=""
 reupload=""
 reupload_ids=()
 
+list_images=""
 clear_term=""
 clear_id=""
 clean_cache=""
@@ -310,6 +316,10 @@ while [[ $# -gt 0 ]]; do
             no_upload=1
             shift
             ;;
+        --force-upload)
+            force_upload=1
+            shift
+            ;;
         --max-cols)
             max_cols="$2"
             shift 2
@@ -348,6 +358,11 @@ while [[ $# -gt 0 ]]; do
                 reupload_ids+=("$1")
                 shift
             done
+            ;;
+        --list|--ls)
+            list_images=1
+            ((command_count++))
+            shift
             ;;
         --clear-term)
             clear_term=1
@@ -660,14 +675,21 @@ if [[ ! "$tmpdir" || ! -d "$tmpdir" ]]; then
     exit 1
 fi
 
-# We need to disable echo, otherwise the response from the terminal containing
-# the image id will get echoed. We will restore the terminal settings on exit
-# unless we get brutally killed.
+# We will need to disable echo during image uploading, otherwise the response
+# from the terminal containing the image id will get echoed. We will restore the
+# terminal settings on exit unless we get brutally killed.
 stty_orig=`stty -g`
-stty -echo
-# Disable ctrl-z. Pressing ctrl-z during image uploading may cause some horrible
-# issues otherwise.
-stty susp undef
+
+disable_echo() {
+    stty -echo
+    # Disable ctrl-z. Pressing ctrl-z during image uploading may cause some horrible
+    # issues otherwise.
+    stty susp undef
+}
+
+restore_echo() {
+    stty $stty_orig
+}
 
 # Utility to read response from the terminal that we don't need anymore. (If we
 # don't read it it may end up being displayed which is not pretty).
@@ -681,7 +703,7 @@ consume_errors() {
 # and remove the temporary directory.
 cleanup() {
     consume_errors
-    stty $stty_orig
+    restore_echo
     [[ -z "$tmpdir" ]] || rm "$tmpdir/"* 2> /dev/null
     rmdir "$tmpdir" || echolog "Could not remove $tmpdir"
 }
@@ -789,13 +811,16 @@ upload_image() {
     if [[ "$actual_term" == *kitty* ]]; then
         # Check if the image is a png, and if it's not, try to convert it.
         if ! (file "$file" | grep -q "PNG image"); then
-            echostatus "Converting $file to png"
-            if ! convert "$file" "$tmpdir/image.png" || \
-                    ! [[ -f "$tmpdir/image.png" ]]; then
-                echoerr "Cannot convert image to png"
-                return 1
+            local png_file="${file}.converted.png"
+            if [[ ! -f "$png_file" ]]; then
+                echostatus "Converting the image to png"
+                if ! convert "$file" "$png_file" || \
+                        ! [[ -f "$png_file" ]]; then
+                    echoerr "Cannot convert the image to png"
+                    return 1
+                fi
             fi
-            file="$tmpdir/image.png"
+            file="$png_file"
         fi
     fi
 
@@ -876,10 +901,12 @@ upload_image_impl() {
     # Try sending the filename if there is the encoded filename
     if [[ -e "$tmpdir/filename" ]]; then
         echostatus "Trying file-based uploading"
+        disable_echo
         gr_command "a=T,U=1,i=$image_id,f=100,t=f,c=${cols},r=${rows}${size_info};$(cat "$tmpdir/filename")"
 
         echostatus "Awaiting terminal response"
         get_terminal_response
+        restore_echo
         if [[ -n "$term_response_ok" ]]; then
             return 0
         fi
@@ -907,7 +934,8 @@ upload_image_impl() {
     # o=z    use compression (not used here)
     # m=1    multi-chunked data
     # S=     original file size
-    gr_command "a=t,i=$image_id,f=100,t=d,c=${cols},r=${rows},m=1${size_info}"
+    disable_echo
+    gr_command "a=T,U=1,i=$image_id,f=100,t=d,c=${cols},r=${rows},m=1${size_info}"
 
     # Transmit chunks and display progress.
     for chunk in "$tmpdir/chunk_"*; do
@@ -949,6 +977,7 @@ upload_image_impl() {
 
     echostatus "Awaiting terminal response"
     get_terminal_response
+    restore_echo
     if [[ -z "$term_response_ok" ]]; then
         echoerr "Uploading error: $term_response_printable"
         return 1
@@ -1155,50 +1184,46 @@ reupload_instance() {
 }
 
 if [[ -n "$reupload" ]]; then
-    # If no IDs were specified, collect all ids that are not known to be
-    # uploaded into this terminal.
-    if [[ ${#reupload_ids[@]} == 0 ]]; then
-        echomessage "Session dir 256: $session_dir_256"
-        echomessage "Terminal dir 256: $terminal_dir_256"
-        for inst_file in "$session_dir_256"/*; do
-            id="$(head -1 "$inst_file")"
-            if [[ ! -e "$terminal_dir_256/$id" ]]; then
-                reupload_ids+=("$id")
-            fi
-        done
-        echomessage "Session dir 24bit: $session_dir_24bit"
-        echomessage "Terminal dir 24bit: $terminal_dir_24bit"
-        for inst_file in "$session_dir_24bit"/*; do
-            id="$(head -1 "$inst_file")"
-            if [[ ! -e "$terminal_dir_24bit/$id" ]]; then
-                reupload_ids+=("$id")
-            fi
-        done
-    fi
-
-    if [[ ${#reupload_ids[@]} == 0 ]]; then
-        echomessage "No images need fixing in session dirs"
-        exit 0
-    fi
-
     reupload_ids_failed=()
-
-    reuploads_left="$last_n"
+    ids_left="$last_n"
+    reupload_ids_specified=""
+    [[ ${#reupload_ids[@]} == 0 ]] || reupload_ids_specified=1
 
     # Iterate over all image instances starting from the newest one and reupload
     # them if they are in `reupload_ids`.
     for inst_file in $(ls -t "$session_dir_256"/* "$session_dir_24bit"/*); do
-        if [[ -n "$last_n" ]] && (( "$reuploads_left" == 0 )); then
-            break
+        if [[ -n "$last_n" ]]; then
+            if (( "$ids_left" == 0 )); then
+                break
+            fi
+            ((ids_left--))
         fi
         inst="$(basename "$inst_file")"
         [[ -e "$inst_file" ]] || continue
         id="$(head -1 "$inst_file")"
+        # If no ID list was specified, check if the id is known to be uploaded
+        # to the terminal.
+        if [[ -z "$reupload_ids_specified" ]]; then
+            # TODO: Also query the terminal.
+            if [[ -n "$force_upload" ]] ||
+                ([[ ! -e "$terminal_dir_256/$id" ]] &&
+                 [[ ! -e "$terminal_dir_24bit/$id" ]]); then
+                echomessage "Trying to reupload $inst with id $id"
+                reupload_instance "$inst" "$id"
+                if [[ $? -ne 0 ]]; then
+                    reupload_ids_failed+=("$id")
+                else
+                    echomessage "Successfully reuploaded id $id"
+                fi
+            fi
+            continue
+        fi
+        if [[ ${#reupload_ids[@]} == 0 ]]; then
+            break
+        fi
+        # Otherwise check if the id is in the list of IDs to reupload.
         for idx in "${!reupload_ids[@]}"; do
             if [[ "${reupload_ids[idx]}" == "$id" ]]; then
-                if [[ -n "$last_n" ]]; then
-                    ((reuploads_left--))
-                fi
                 echomessage "Trying to reupload $inst with id $id"
                 reupload_instance "$inst" "$id"
                 if [[ $? -ne 0 ]]; then
@@ -1217,7 +1242,7 @@ if [[ -n "$reupload" ]]; then
         exit 1
     fi
 
-    # If --last was specified, we cann't reliably report non-found IDs.
+    # If --last was specified, we can't reliably report non-found IDs.
     if [[ -z "$last_n" ]] && [[ ${#reupload_ids[@]} != 0 ]]; then
         echoerr "Could not find IDs: ${reupload_ids[*]}"
         exit 1
@@ -1254,7 +1279,7 @@ if [[ -n "$show_id" ]]; then
         terminal_dir="$terminal_dir_24bit"
     fi
 
-    if [[ -e "$terminal_dir/$show_id" ]]; then
+    if [[ -z "$force_upload" ]] && [[ -e "$terminal_dir/$show_id" ]]; then
         instance="$(head -1 "$terminal_dir/$show_id")"
     else
         for inst in "$session_dir"/*; do
@@ -1278,6 +1303,42 @@ if [[ -n "$show_id" ]]; then
     [[ -n "$cols" ]] || cols="${inst_parts[1]}"
     [[ -n "$rows" ]] || rows="${inst_parts[2]}"
     display_image "$show_id" "$cols" "$rows"
+    exit 0
+fi
+
+#####################################################################
+# Handling the ls command
+#####################################################################
+
+if [[ -n "$list_images" ]]; then
+    ids_left="$last_n"
+    # Iterate over all image instances starting from the newest one.
+    for inst_file in $(ls -t "$session_dir_256"/* "$session_dir_24bit"/*); do
+        if [[ -n "$last_n" ]]; then
+            if (( "$ids_left" == 0 )); then
+                break
+            fi
+            ((ids_left--))
+        fi
+        if [[ ! -e "$inst_file" ]]; then
+            echomessage "File doesn't exist: $inst_file"
+            continue
+        fi
+        inst="$(basename "$inst_file")"
+        inst_parts=($(echo "$inst" | tr "_" "\n"))
+        md5="${inst_parts[0]}"
+        im_cols="${inst_parts[1]}"
+        im_rows="${inst_parts[2]}"
+        id="$(head -1 "$inst_file")"
+        echomessage "id: $id  cols: $im_cols  rows: $im_rows  md5sum: $md5"
+        if [[ ! -e "$terminal_dir_256/$id" ]] &&
+                [[ ! -e "$terminal_dir_24bit/$id" ]]; then
+            echomessage "$(tput bold)IMAGE NEEDS REUPLOADING!$(tput sgr0)"
+        fi
+        [[ -n "$cols" ]] && im_cols="$cols"
+        [[ -n "$rows" ]] && im_rows="$rows"
+        display_image "$id" "$im_cols" "$im_rows"
+    done
     exit 0
 fi
 
@@ -1522,7 +1583,19 @@ img_instance="${img_md5}_${cols}_${rows}"
 
 if [[ -n "$image_id" ]]; then
     echolog "Using the specified image id $image_id"
-    echo "$image_id" > "$session_dir/$img_instance"
+    (
+        flock --timeout "$default_timeout" 9 || \
+            { echoerr "Could not acquire a lock on $session_dir.lock"; exit 1; }
+        # If there is already an image with this id, it must be forgotten.
+        for inst_file in "$session_dir"/*; do
+            id="$(head -1 "$inst_file")"
+            if (( "$id" == "$image_id" )); then
+                echolog "Removing $inst_file to avoid id clash"
+                rm "$inst_file"
+            fi
+        done
+        echo "$image_id" > "$session_dir/$img_instance"
+    ) 9>"$session_dir.lock" || exit 1
 else
     # Find an id for the image. We want to avoid reuploading, and at the same
     # time we want to minimize image id collisions.
@@ -1559,11 +1632,12 @@ if [[ -z "$no_upload" ]]; then
     # Check if this instance has already been uploaded to this terminal with the
     # found image id.
     # TODO: Also check date and reupload if too old.
-    if [[ -e "$terminal_dir/$image_id" ]] &&
+    if [[ -z "$force_upload" ]] &&
+       [[ -e "$terminal_dir/$image_id" ]] &&
        [[ "$(head -1 "$terminal_dir/$image_id")" == "$img_instance" ]]; then
         echolog "Image already uploaded"
     else
-        upload_image "$image_id" "$file" "$cols" "$rows" "$terminal_dir"
+        upload_image "$image_id" "$cached_file" "$cols" "$rows" "$terminal_dir"
     fi
 fi
 
