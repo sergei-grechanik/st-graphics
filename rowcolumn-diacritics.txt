@@ -1,3 +1,16 @@
+# This file lists the diacritics used to indicate row/column numbers for
+# Unicode terminal image placeholders. It is derived from UnicodeData.txt for
+# Unicode 6.0.0 (chosen somewhat arbitrarily: it's old enough, but still
+# contains more than 255 suitable combining chars) using the following
+# command:
+#
+#     cat UnicodeData.txt | grep "Mn;230;NSM;;" | grep -v "0300\|0301\|0302\|0303\|0304\|0306\|0307\|0308\|0309\|030A\|030B\|030C\|030F\|0311\|0313\|0314\|0342\|0653\|0654"
+#
+# That is, we use combining chars of the same combining class 230 (above the
+# base character) that do not have decomposition mappings, and we also remove
+# some characters that may be fused with other characters during normalization,
+# like 0041 0300 -> 00C0  which is À (A with grave).
+#
 0305;COMBINING OVERLINE;Mn;230;NSM;;;;;N;NON-SPACING OVERSCORE;;;;
 030D;COMBINING VERTICAL LINE ABOVE;Mn;230;NSM;;;;;N;NON-SPACING VERTICAL LINE ABOVE;;;;
 030E;COMBINING DOUBLE VERTICAL LINE ABOVE;Mn;230;NSM;;;;;N;NON-SPACING DOUBLE VERTICAL LINE ABOVE;;;;

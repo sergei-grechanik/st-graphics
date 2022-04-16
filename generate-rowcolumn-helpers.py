@@ -28,6 +28,8 @@ codes = []
 
 with open("./rowcolumn-diacritics.txt", "r") as file:
     for line in file.readlines():
+        if line.startswith('#'):
+            continue
         code = int(line.split(";")[0], 16)
         char = chr(code)
         assert unicodedata.combining(char) == 230
