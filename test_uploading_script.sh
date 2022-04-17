@@ -150,7 +150,7 @@ echo "Testing max rows (only one row)"
 $upload_image _data/a_panorama.jpg --save-info "$tmpdir/info" --max-rows 1
 
 echo "The rest of the test will use a temporary cache dir"
-export TERMINAL_IMAGES_CACHE_DIR="$tmpdir/cache_dir"
+export TUPIMAGE_CACHE_DIR="$tmpdir/cache_dir"
 
 draw_strips() {
     local i=0
@@ -190,26 +190,26 @@ $upload_image --fix --last 2
 echo "Testing --ls, 2 rows per image"
 $upload_image --ls --last 10 -r 2
 
-export TERMINAL_IMAGES_CACHE_DIR="$tmpdir/cache_dir_test_limits"
-export TERMINAL_IMAGES_CLEANUP_PROBABILITY=100
+export TUPIMAGE_CACHE_DIR="$tmpdir/cache_dir_test_limits"
+export TUPIMAGE_CLEANUP_PROBABILITY=100
 
 echo "Testing max ids limit"
-export TERMINAL_IMAGES_IDS_LIMIT=2
+export TUPIMAGE_IDS_LIMIT=2
 draw_strips "-r 9" _data/*.jpg _data/*.png
 $upload_image --status
-ids_count="$(ls -1 $TERMINAL_IMAGES_CACHE_DIR/terminals/*-24bit_ids/ | wc -l)"
+ids_count="$(ls -1 $TUPIMAGE_CACHE_DIR/terminals/*-24bit_ids/ | wc -l)"
 (( ids_count <= 2 )) || exit 1
 
 echo "Testing max ids limit for 8-bit ids (will probably override old images)"
 draw_strips "-r 9 --256" _data/*.jpg _data/*.png
 $upload_image --status
-ids_count="$(ls -1 $TERMINAL_IMAGES_CACHE_DIR/terminals/*-8bit_ids/ | wc -l)"
+ids_count="$(ls -1 $TUPIMAGE_CACHE_DIR/terminals/*-8bit_ids/ | wc -l)"
 (( ids_count <= 2 )) || exit 1
 
 echo "Testing max cache size limit"
-export TERMINAL_IMAGES_IDS_LIMIT=
-export TERMINAL_IMAGES_CACHE_SIZE_LIMIT=1000
+export TUPIMAGE_IDS_LIMIT=
+export TUPIMAGE_CACHE_SIZE_LIMIT=1000
 draw_strips "-r 9" _data/*.jpg _data/*.png
 $upload_image --status
-cache_size="$(du -s $TERMINAL_IMAGES_CACHE_DIR/cache | cut -f1)"
+cache_size="$(du -s $TUPIMAGE_CACHE_DIR/cache | cut -f1)"
 (( $cache_size <= 1000 )) || exit 1
