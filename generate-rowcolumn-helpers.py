@@ -1,29 +1,21 @@
 #!/usr/bin/env python3
 
-# Generate functions to convert row/column numbers encoded as diacritics to
-# actual numbers.
-# This script reads the file rowcolumn-diacritics.txt from the currend directory
-# and produces the following files:
-# - rowcolumn_diacritics_helpers.c - helper functions to be used by the terminal
-# - cell-image-placeholder.txt - cell image placeholder for the largest possible
-#   image.
+# This script generates functions to convert row/column numbers encoded as
+# diacritics to actual numbers.
+# It reads the file rowcolumn-diacritics.txt from the currend directory and
+# produces the following files:
+# - rowcolumn_diacritics_helpers.c - contains a helper function to convert from
+#   diacritics to row/column numbers.
+# - rowcolumn_diacritics.sh - contains an array of row/column diacritics (can be
+#   used by shell scripts to generate image placeholders).
 #
-# Note: the file rowcolumn-diacritics.txt lists the diacritics that we want to
-# use to indicate row/column numbers. It is derived from UnicodeData.txt for the
-# version 6.0.0 of Unicode (chosen somewhat arbitrarily: it's old enough, but
-# still contains more than 255 suitable combining chars) using the following
-# command:
-#
-#     cat UnicodeData.txt | grep "Mn;230;NSM;;" | grep -v "0300\|0301\|0302\|0303\|0304\|0306\|0307\|0308\|0309\|030A\|030B\|030C\|030F\|0311\|0313\|0314\|0342\|0653\|0654"
-#
-# That is, we use combining chars of the same combining class 230 (above the
-# base character) that do not have decomposition mappings, and we also remove
-# some characters that may be fused with other characters during normalization,
-# like 0041 0300 -> 00C0  which is À (A with grave).
+# The script also checks some desirable properties of row/column diacritics,
+# e.g. that image placeholders are in normal form.
 
 import unicodedata
 import sys
 
+# codes of all row/column diacritics
 codes = []
 
 with open("./rowcolumn-diacritics.txt", "r") as file:
@@ -35,6 +27,7 @@ with open("./rowcolumn-diacritics.txt", "r") as file:
         assert unicodedata.combining(char) == 230
         codes.append(code)
 
+print("Generating ./rowcolumn_diacritics_helpers.c")
 with open("./rowcolumn_diacritics_helpers.c", "w") as file:
     range_start_num = 1
     range_start = 0
@@ -67,28 +60,28 @@ with open("./rowcolumn_diacritics_helpers.c", "w") as file:
     print("\treturn 0;", file=file)
     print("}", file=file)
 
+print("Generating ./rowcolumn_diacritics.sh")
 with open("./rowcolumn_diacritics.sh", "w") as file:
     print("ROWCOLUMN_DIACRITICS=(", file=file, end="")
     for code in codes:
         print('"\\U' + format(code, 'x') + '" ', file=file, end="")
     print(")", file=file)
 
-with open("./cell-image-placeholder.txt", "w") as file:
-    img_char = chr(0xEEEE)
-    for row_code in codes:
-        row_char = chr(row_code)
-        for col_code in codes:
-            col_char = chr(col_code)
-            cell = img_char + row_char + col_char
-            print(cell, file=file, end='')
-            for nf in ["NFC", "NFKC", "NFD", "NFKD"]:
-                if not unicodedata.is_normalized(nf, cell):
-                    print(cell)
-                    print("unnormalized!", nf, [hex(ord(img_char)), hex(row_code), hex(col_code)])
-                    normalized = unicodedata.normalize(nf, cell)
-                    print("normalized:", [hex(ord(c)) for c in normalized])
-                    exit(1)
-        print(file=file)
+print("Checking that image placeholder cannot be normalized further")
+
+img_char = chr(0xEEEE)
+for row_code in codes:
+    row_char = chr(row_code)
+    for col_code in codes:
+        col_char = chr(col_code)
+        cell = img_char + row_char + col_char
+        for nf in ["NFC", "NFKC", "NFD", "NFKD"]:
+            if not unicodedata.is_normalized(nf, cell):
+                print(cell)
+                print("unnormalized!", nf, [hex(ord(img_char)), hex(row_code), hex(col_code)])
+                normalized = unicodedata.normalize(nf, cell)
+                print("normalized:", [hex(ord(c)) for c in normalized])
+                exit(1)
 
 print("Checking that the row/column marks are not fused with anything "
       "letter-like during normalization")
