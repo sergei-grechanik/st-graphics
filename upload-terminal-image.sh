@@ -6,7 +6,7 @@
 #       portable.
 
 # TODO list:
-# - Listing images from session and terminal dirs.
+# - Fail on uploading error.
 # - Better indication of cell image uploading
 # - Fix names and better comments in graphics.c
 # - Fix the help description
@@ -16,31 +16,45 @@
 script_fullname="$0"
 script_name="$(basename $0)"
 
-help="This script sends the given image to the terminal and outputs characters
-that can be used to display this image using the unicode image placeholder
-symbol approach. Note that it will use a single line of the output to display
-uploading progress (which may be disabled with '-q').
+short_help="Usage: $script_name [OPTIONS] <image_file>
+
+A utility to upload and display images in the terminal using the kitty graphics
+protocol with the Unicode placeholder extension.
+
+Options:
+  -h                  Show this brief help.
+  --help              Show full help.
+  -c N, --cols N      Specify the number of columns.
+  -r N, --rows N      Specify the number of rows.
+  -o <file>           Output the characters representing the image to <file>.
+  -e <file>           Output error messages to <file>.
+  --256               Restrict the image ID to be within the range [1; 255].
+  --fix               Try to reupload broken images.
+  --fix --last N      Try to reupload broken images among N last images.
+  --ls                List all images from the current session.
+  --clear-term        Delete all known images from the terminal.
+  -V                  Be very verbose.
+
+Use --help to show the full help.
+"
+
+long_help="$script_name is a utility to upload and display images in the
+terminal using the kitty graphics protocol with the Unicode placeholder
+extension.
 
   Usage:
-    $script_name [OPTIONS] <image_file>
-    $script_name --fix [<IDs>]
+    $script_name [OPTIONS] [IMAGE_FILE]
 
-  Options:
-    -c N, --columns N, --cols N
-    -r N, --rows N
-        The number of columns and rows for the image. By default the script will
-        try to compute the optimal values by itself.
-    --id N
-        Use the specified image id instead of finding a free one.
-    --256
-        Restrict the image id to be within the range [1; 255] and use the 256
-        colors mode to specify the image id (~24 bits will be used for image ids
-        by default).
-    -o <file>, --output <file>
-        Use <file> to output the characters representing the image, instead of
-        stdout.
-    -a, --append
-        Do not clear the output file (the one specified with -o).
+This utility automatically assigns an ID to the image instance, uploads the
+image to the terminal, and outputs a placeholder text for the image instance.
+The correspondence between IDs and image instances is recorded in the current
+session database (think tmux sessions). The utility also keeps track of
+successfully uploaded image instances. If uploading fails, the instance can be
+reuploaded later using the --fix command.
+
+  General options:
+    -f <image_file>, --file <image_file>
+        The image file (but you can specify it as a positional argument).
     -e <file>, --err <file>
         Use <file> to output error messages in addition to displaying them as
         the status.
@@ -48,33 +62,75 @@ uploading progress (which may be disabled with '-q').
         Enable logging and write logs to <file>.
     -V
         Same as -l /dev/stderr (i.e. be very verbose).
-    -f <image_file>, --file <image_file>
-        The image file (but you can specify it as a positional argument).
     -q, --quiet
         Do not show status messages or uploading progress. Error messages are
         still shown (but you can redirect them with -e).
+    --save-info <file>
+        Save some information to <file> (like image id, rows, columns, etc).
+    -h
+        Show brief help.
+    --help
+        Show full help.
+
+  Display options:
+    -c N, --columns N, --cols N
+    -r N, --rows N
+        The number of columns and rows for the image. By default the script will
+        try to compute the optimal values by itself.
+    -o <file>, --output <file>
+        Use <file> to output the characters representing the image, instead of
+        stdout.
+    -a, --append
+        Do not clear the output file (the one specified with -o).
+    --noesc
+        Do not issue the escape codes representing row numbers (encoded as
+        foreground color).
+    --show-id N
+        Display the image with the given id. The image may be reuploaded if
+        needed.
+
+  ID assignment options:
+    --id N
+        Use the specified image id instead of finding a free one.
+    --256
+        Restrict the image id to be within the range [1; 255] and use the 256
+        colors mode to specify the image id (~24 bits will be used for image ids
+        by default).
+
+  Uploading options:
+    --uploading-method <method>, -m <method>
+        Set the uploading method which can be one of:
+          'direct' for direct data uploading,
+          'file'   for sending the file name to the terminal,
+          'both'   for trying 'file' first and 'direct' on failure
+          'auto'   to choose the method automatically (default).
+    --no-upload
+        Do not upload the image (it can be done later using --fix).
+    --force-upload
+        (Re)upload the image even if it has been uploaded.
+    --no-tmux-hijack
+        Do not try to hijack focus by creating a new pane when inside tmux and
+        the current pane is not active (just fail instead).
+
+  Session database management:
     --fix [IDs], --reupload [IDs]
         Reupload the given IDs. If no IDs are given, try to guess which images
         need reuploading automatically.
-    --last N
-        Reupload only last N IDs when performing automatic reuploading.
     --list, --ls
         List all images from the session in reverse chronological order.
+    --last N
+        Can be used together with --fix or --list. Reupload or show only last N
+        IDs.
+    --status
+        Show various information.
     --clear-term
         Delete all known image data from the terminal.
     --clear-id <ID>
         Delete the image data corresponding to the given ID from the terminal.
     --clean-cache
         Remove some old files and IDs from the cache dir.
-    --status
-        Show various information.
-    --noesc
-        Do not issue the escape codes representing row numbers (encoded as
-        foreground color).
-    --save-info <file>
-        Save some information to <file> (like image id, rows, columns, etc).
-    --show-id N
-        Display the image with the given id.
+
+  Automatic row/column computation options:
     --max-cols N
         Do not exceed this value when automatically computing the number of
         columns. By default the width of the terminal is used as the maximum.
@@ -94,21 +150,6 @@ uploading progress (which may be disabled with '-q').
     --override-dpi N
         Override dpi value for the image (both vertical and horizontal). By
         default dpi values will be requested using the 'identify' utility.
-    --no-tmux-hijack
-        Do not try to hijack focus by creating a new pane when inside tmux and
-        the current pane is not active (just fail instead).
-    --uploading-method <method>, -m <method>
-        Set the uploading method which can be one of:
-          'direct' for direct data uploading,
-          'file'   for sending the file name to the terminal,
-          'both'   for trying 'file' first and 'direct' on failure
-          'auto'   to choose the method automatically (default).
-    --no-upload
-        Do not upload the image (it can be done later using --fix).
-    --force-upload
-        (Re)upload the image even if it has been uploaded.
-    -h, --help
-        Show this message
 
   Environment variables:
     TERMINAL_IMAGES_COLS_PER_INCH
@@ -118,19 +159,24 @@ uploading progress (which may be disabled with '-q').
         See --override-dpi.
     TERMINAL_IMAGES_CACHE_DIR
         The directory to store images being uploaded (in case if they need to be
-        reuploaded) and information about used image ids.
+        reuploaded) and session databases.
     TERMINAL_IMAGES_NO_TMUX_HIJACK
         If set, disable tmux hijacking.
     TERMINAL_IMAGES_UPLOADING_METHOD
         See --uploading-method.
     TERMINAL_IMAGES_CLEANUP_PROBABILITY
         The probability of running a clean-up on image upload (in %).
+        Default: 5.
     TERMINAL_IMAGES_CACHE_COUNT_LIMIT
-        The maximum number of images stored in the cache dir.
+        The maximum number of images stored in the cache dir. Default: 512.
     TERMINAL_IMAGES_CACHE_SIZE_LIMIT
         The maximum total size of images stored in the cache dir, in Kbytes.
+        Default: 300000.
     TERMINAL_IMAGES_IDS_LIMIT
-        The maximum number of ids in a session or a terminal.
+        The maximum number of ids in a session or a terminal. Default: 512.
+    TERMINAL_IMAGES_MAX_DAYS_OF_INACTIVITY
+        The number of days of inactivity after which a session or terminal
+        database is deleted. Default: 30.
 "
 
 # Exit the script on keyboard interrupt
@@ -276,8 +322,12 @@ while [[ $# -gt 0 ]]; do
             quiet="1"
             shift
             ;;
-        -h|--help)
-            echo "$help"
+        -h)
+            echo "$short_help"
+            exit 0
+            ;;
+        --help)
+            echo "$long_help" | less -F
             exit 0
             ;;
         -f|--file)
