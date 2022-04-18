@@ -45,6 +45,16 @@ extension.
   Usage:
     $script_name [OPTIONS] [IMAGE_FILE]
 
+  Examples:
+    # Upload and display image.jpg, fitting it to 3 lines.
+    $script_name -r 3 image.jpg
+
+    # Reupload last 10 images if some of them appear broken.
+    $script_name --fix --last 10
+
+    # Reupload last 10 images, even if none of them appear broken.
+    $script_name --fix --last 10 --force-upload
+
 This utility automatically assigns an ID to the image instance, uploads the
 image to the terminal, and outputs a placeholder text for the image instance.
 The correspondence between IDs and image instances is recorded in the current
