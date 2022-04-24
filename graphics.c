@@ -876,6 +876,51 @@ static CellImage *gtransmitdata(GraphicsCommand *cmd) {
 	return img;
 }
 
+/// Handles the 'put' command. Since we support only one placement (which must
+/// be virtual), just update rows/columns and make sure that the image is still
+/// available and can be correctly loaded.
+static void gr_handle_put_command(GraphicsCommand *cmd) {
+	if (cmd->image_number != 0) {
+		gr_reporterror_cmd(
+			cmd, "EINVAL: image numbers (I) are not supported");
+		return;
+	}
+
+	// If image id is not specified, use last image id.
+	uint32_t image_id = cmd->image_id ? cmd->image_id : last_image_id;
+
+	if (image_id == 0) {
+		gr_reporterror_cmd(cmd,
+				   "EINVAL: image id is not specified or zero");
+		return;
+	}
+
+	// Find the image with the id.
+	CellImage *img = gfindimage(image_id);
+	if (!img) {
+		gr_reporterror_cmd(cmd, "ENOENT: image not found");
+		return;
+	}
+
+	// If rows and columns are specified and are different, update them in
+	// the image structure and unload the image to make sure that it will be
+	// reloaded with the new dimensions.
+	int needs_unloading = 0;
+	if (cmd->columns && cmd->columns != img->cols) {
+		img->cols = cmd->columns;
+		needs_unloading = 1;
+	}
+	if (cmd->rows && cmd->rows != img->rows) {
+		img->rows = cmd->rows;
+		needs_unloading = 1;
+	}
+	if (needs_unloading)
+		gunloadimage(img);
+
+	// Try to load the image into RAM.
+	gr_loadimage_and_report(img);
+}
+
 static void gr_handle_delete_command(GraphicsCommand *cmd) {
 	if (!cmd->delete_specifier) {
 		for (size_t i = 0; i < MAX_CELL_IMAGES; ++i) {
@@ -913,11 +958,13 @@ static void gruncommand(GraphicsCommand *cmd) {
 		// Transmit data or transmit and display.
 		gtransmitdata(cmd);
 		break;
+	case 'p':
+		// Display (put) the image.
+		gr_handle_put_command(cmd);
+		break;
 	case 'd':
 		gr_handle_delete_command(cmd);
 		break;
-	case 'p':
-		// display (put) the last image
 	case 'q':
 		// query
 	default:
@@ -984,10 +1031,10 @@ static void gsetkeyvalue(GraphicsCommand *cmd, char *key_start, char *key_end,
 		break;
 	case 'p':
 		cmd->placement_id = num;
-		if (num != 0) {
+		if (num != 0 && num != 1) {
 			gr_reporterror_cmd(cmd,
-					   "EINVAL: non-zero placement id is "
-					   "not supported: %s",
+					   "EINVAL: placement id other than 0 "
+					   "or 1 is not supported: %s",
 					   key_start);
 		}
 		break;

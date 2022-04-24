@@ -3,7 +3,8 @@
 # Usage:
 #   show-multiple-images.sh <row_number> <images>
 
-upload_image="$(dirname $0)/upload-terminal-image.sh"
+upload_image="$(dirname $0)/tupimage"
+[[ -f "$upload_image" ]] || upload_image="tupimage"
 
 tmpdir="$(mktemp -d)"
 if [[ -z "$tmpdir" ]]; then

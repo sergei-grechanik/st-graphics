@@ -62,6 +62,11 @@ session database (think tmux sessions). The utility also keeps track of
 successfully uploaded image instances. If uploading fails, the instance can be
 reuploaded later using the --fix command.
 
+Note that if image uploading fails, the utility doesn't fail by default: it
+still produces the placeholder, and the image can be reuploaded later by calling
+$script_name --fix. This behavior is desirable when images are displayed by
+automatic script running within tmux (tmux makes image uploading unreliable).
+
   General options:
     -f <image_file>, --file <image_file>
         The image file (but you can specify it as a positional argument).
@@ -550,7 +555,7 @@ terminal_id="$(sed 's/[^0-9a-zA-Z]/-/g' <<< "$terminal_id")"
 session_id="$(sed 's/[^0-9a-zA-Z]/-/g' <<< "$session_id")"
 
 # Make sure that the cache dir contains session and terminal subdirs.
-[[ -n "$cache_dir" ]] || cache_dir="$HOME/.cache/terminal-images"
+[[ -n "$cache_dir" ]] || cache_dir="$HOME/.cache/tupimage"
 session_dir_256="$cache_dir/sessions/${session_id}-8bit_ids"
 terminal_dir_256="$cache_dir/terminals/${terminal_id}-8bit_ids"
 session_dir_24bit="$cache_dir/sessions/${session_id}-24bit_ids"
@@ -684,9 +689,18 @@ delete_oldest_files() {
     local directory="$1"
     local num_delete="$2"
     echostatus "Deleting $num_delete files from $directory"
+    # Delete converted png files first
     for file in $(ls -1t "$directory" | tail -$num_delete); do
-        rm "$directory/$file"
+        if [[ "$file" =~ ^.*\.converted\.png$ ]]; then
+            rm "$directory/$file"
+            ((num_delete--))
+        fi
     done
+    if (( "$num_delete" > 0 )); then
+        for file in $(ls -1t "$directory" | tail -$num_delete); do
+            rm "$directory/$file"
+        done
+    fi
 }
 
 # If there are more than $2 files in $1, deletes $3 oldest files.
@@ -812,13 +826,15 @@ invalid_terminal_response() {
 # Get a response from the terminal and store it in term_response,
 # returns 1 if there is no response.
 get_terminal_response() {
+    local response_timeout="$1"
+    [[ -n "$response_timeout" ]] || response_timeout="$default_timeout"
     term_response=""
     term_response_printable=""
     term_response_ok=""
     # -r means backslash is part of the line
     # -d '\' means \ is the line delimiter
     # -t ... is timeout in seconds
-    if ! read -r -d '\' -t "$default_timeout" term_response; then
+    if ! read -r -d '\' -t "$response_timeout" term_response; then
         if [[ -z "$term_response" ]]; then
             term_response_printable="No response from terminal"
         else
@@ -923,6 +939,35 @@ tmux_is_active_pane() {
     else
         return 1
     fi
+}
+
+# Queries whether the given id is known by the terminal. Returns
+# - 0 if reuploading is needed,
+# - 1 if unknown (no response or in inactive tmux pane),
+# - 2 if reuploading is not needed.
+# Usage: image_needs_reuploading "$image_id" "$cols" "$rows"
+image_needs_reuploading() {
+    local image_id="$1"
+    local cols="$2"
+    local rows="$3"
+    if [[ -n "$inside_tmux" ]] && ! tmux_is_active_pane; then
+        # If we are in tmux, but not in an active pain, we can't get the
+        # response quickly, so assume that we don't need reuploading.
+        return 1
+    fi
+    echostatus "Checking if image with id $image_id needs reuploading"
+    # We check if the id is known by recreating the virtual instance. Currently
+    # it's always assumed to be of placement_id=1.
+    gr_command "a=p,U=1,p=1,i=$image_id,c=${cols},r=${rows}"
+    # Use the shorter timeout. If we don't get a response, assume that we don't
+    # need reuploading.
+    get_terminal_response 0.5 || return 1
+    if [[ -n "$term_response_ok" ]]; then
+        echolog "Image is known by the terminal"
+        return 2
+    fi
+    echolog "Image needs reuploading"
+    return 0
 }
 
 # Uploads a (possibly already chunked) image to the terminal.
@@ -1259,16 +1304,19 @@ if [[ -n "$reupload" ]]; then
             ((ids_left--))
         fi
         inst="$(basename "$inst_file")"
+        inst_parts=($(echo "$inst" | tr "_" "\n"))
+        inst_cols="${inst_parts[1]}"
+        inst_rows="${inst_parts[2]}"
         [[ -e "$inst_file" ]] || continue
         id="$(head -1 "$inst_file")"
         # If no ID list was specified, check if the id is known to be uploaded
         # to the terminal.
         if [[ -z "$reupload_ids_specified" ]]; then
-            # TODO: Also query the terminal.
             if [[ -n "$force_upload" ]] ||
-                ([[ ! -e "$terminal_dir_256/$id" ]] &&
-                 [[ ! -e "$terminal_dir_24bit/$id" ]]); then
-                echomessage "Trying to reupload $inst with id $id"
+                    ([[ ! -e "$terminal_dir_256/$id" ]] &&
+                     [[ ! -e "$terminal_dir_24bit/$id" ]]) ||
+                    image_needs_reuploading "$id" "$inst_cols" "$inst_rows"; then
+                echomessage "Trying to reupload $inst with id $id ($(date -r "$inst_file"))"
                 reupload_instance "$inst" "$id"
                 if [[ $? -ne 0 ]]; then
                     reupload_ids_failed+=("$id")
@@ -1694,7 +1742,8 @@ if [[ -z "$no_upload" ]]; then
     # TODO: Also check date and reupload if too old.
     if [[ -z "$force_upload" ]] &&
        [[ -e "$terminal_dir/$image_id" ]] &&
-       [[ "$(head -1 "$terminal_dir/$image_id")" == "$img_instance" ]]; then
+       [[ "$(head -1 "$terminal_dir/$image_id")" == "$img_instance" ]] &&
+       ! image_needs_reuploading "$image_id" "$cols" "$rows"; then
         echolog "Image already uploaded"
     else
         upload_image "$image_id" "$cached_file" "$cols" "$rows" "$terminal_dir"
