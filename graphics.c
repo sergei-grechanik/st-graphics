@@ -19,8 +19,18 @@
 #define MAX_CELL_IMAGES 1024
 #define MAX_IMAGE_RECTS 20
 
-enum ScaleMode { SCALE_MODE_CONTAIN = 0, SCALE_MODE_FILL = 1 };
+enum ScaleMode {
+	/// Preserve aspect ratio and fit to width or to height so that the
+	/// whole image is visible.
+	SCALE_MODE_CONTAIN = 0,
+	/// Preserve aspect ratio and fit to width or to height so that the
+	/// whole rectangle is covered.
+	SCALE_MODE_FILL = 1
+};
 
+/// The status of an image. Each image uploaded to the terminal is cached on
+/// disk. Then it is loaded to ram when needed in the ready to display form
+/// (scaled to the requested box given the current cell width and height).
 enum ImageStatus {
 	STATUS_UNINITIALIZED = 0,
 	STATUS_UPLOADING = 1,
@@ -36,64 +46,109 @@ enum ImageUploadingFailure {
 	ERROR_UNEXPECTED_SIZE = 3,
 };
 
+/// The structure representing an image (and its "placement" at the same time
+/// since we support only one placement per image).
 typedef struct {
+	/// The client id (the one specified with 'i='). Must be nonzero.
 	uint32_t image_id;
+	/// Height and width in cells.
 	uint16_t rows, cols;
+	/// The last time when the image was displayed or otherwise touched.
 	time_t atime;
+	/// The size of the corresponding file cached on disk.
 	unsigned disk_size;
+	/// The expected size of the image file (specified with 'S='), used to
+	/// check if uploading uploading succeeded.
 	unsigned expected_size;
+	/// The scaling mode (see `ScaleMode`).
 	char scale_mode;
+	/// The status (see `ImageStatus`).
 	char status;
+	/// The reason of uploading failure (see `ImageUploadingFailure`).
 	char uploading_failure;
+	/// Whether failures and successes should be reported ('q=').
 	char quiet;
-	uint16_t scaled_cw, scaled_ch;
-	Imlib_Image scaled_image;
+	/// The file corresponding to the on-disk cache, used when uploading.
 	FILE *open_file;
+	/// The image appropriately scaled and loaded into RAM.
+	Imlib_Image scaled_image;
+	/// The dimensions of the cell used to scale the image. If cell
+	/// dimensions are changed (font change), the image will be rescaled.
+	uint16_t scaled_cw, scaled_ch;
 } CellImage;
 
+/// A rectangular piece of an image to be drawn.
 typedef struct {
 	uint32_t image_id;
+	/// The position of the rectangle in pixels.
 	int x_pix, y_pix;
+	/// The part of the whole image to be drawn, in cells. Starts are
+	/// zero-based, ends are exclusive.
 	int start_col, end_col, start_row, end_row;
+	/// The current cell width and height in pixels.
 	int cw, ch;
+	/// Whether colors should be inverted.
 	int reverse;
 } ImageRect;
 
-static CellImage *gfindimage(uint32_t image_id);
-static void gimagefilename(CellImage *img, char *out, size_t max_len);
-static void gdeleteimage(CellImage *img);
-static void gchecklimits();
+static CellImage *gr_find_image(uint32_t image_id);
+static void gr_get_image_filename(CellImage *img, char *out, size_t max_len);
+static void gr_delete_image(CellImage *img);
+static void gr_check_limits();
 static char *gbase64dec(const char *src, size_t *size);
 
+/// The array of image rectangles to draw. It is reset each frame.
+static ImageRect image_rects[MAX_IMAGE_RECTS] = {{0}};
+/// The known images (including the ones being uploaded).
 static CellImage cell_images[MAX_CELL_IMAGES] = {{0}};
+/// The number of known images.
 static int images_count = 0;
+/// The total size of all image files stored in the on-disk cache.
 static int32_t cell_images_disk_size = 0;
+/// The total size of all images loaded into ram.
 static int32_t cell_images_ram_size = 0;
+/// The id of the last loaded image.
 static uint32_t last_image_id = 0;
-static int last_cw = 0, last_ch = 0;
+/// Current cell width and heigh in pixels.
+static int current_cw = 0, current_ch = 0;
+/// The id of the currently uploaded image (when using direct uploading).
 static uint32_t current_upload_image_id = 0;
+/// The time when the latest chunk of data was appended to an image.
 static time_t last_uploading_time = 0;
-static char temp_dir[] = "/tmp/st-images-XXXXXX";
-static unsigned char reverse_table[256];
-static size_t max_image_disk_size = 20 * 1024 * 1024;
-static int max_total_disk_size = 300 * 1024 * 1024;
-static int max_total_ram_size = 300 * 1024 * 1024;
-static size_t imlib_cache_size = 4 * 1024 * 1024;
+/// The time when the current frame drawing started (used for debugging fps).
 static clock_t drawing_start_time;
 
+/// The directory where the on-disk cache files are stored.
+static char temp_dir[] = "/tmp/st-images-XXXXXX";
+
+/// The max size of a single image file, in bytes.
+static size_t max_image_disk_size = 20 * 1024 * 1024;
+/// The max size of the on-disk cache, in bytes.
+static int max_total_disk_size = 300 * 1024 * 1024;
+/// The max total size of all images loaded into RAM.
+static int max_total_ram_size = 300 * 1024 * 1024;
+/// The internal cache size of imlib2.
+static size_t imlib_cache_size = 4 * 1024 * 1024;
+
+/// The table used for color inversion.
+static unsigned char reverse_table[256];
+
+// Declared in the header.
 char graphics_debug_mode = 0;
 char graphics_uploading = 0;
 GraphicsCommandResult graphics_command_result = {0};
 
-static ImageRect image_rects[MAX_IMAGE_RECTS] = {{0}};
-
-void graphicsinit(Display *disp, Visual *vis, Colormap cm) {
+/// Initialize the graphics module.
+void gr_init(Display *disp, Visual *vis, Colormap cm) {
+	// Create the temporary dir.
 	if (!mkdtemp(temp_dir)) {
 		fprintf(stderr,
 			"Could not create temporary dir from template %s\n",
 			temp_dir);
 		abort();
 	}
+
+	// Initialize imlib.
 	imlib_context_set_display(disp);
 	imlib_context_set_visual(vis);
 	imlib_context_set_colormap(cm);
@@ -101,17 +156,22 @@ void graphicsinit(Display *disp, Visual *vis, Colormap cm) {
 	imlib_context_set_blend(1);
 	imlib_set_cache_size(imlib_cache_size);
 
+	// Prepare for color inversion.
 	for (size_t i = 0; i < 256; ++i)
 		reverse_table[i] = 255 - i;
 }
 
-void graphicsdeinit() {
+/// Deinitialize the graphics module.
+void gr_deinit() {
+	// Delete all images.
 	for (size_t i = 0; i < MAX_CELL_IMAGES; ++i)
-		gdeleteimage(&cell_images[i]);
+		gr_delete_image(&cell_images[i]);
+	// Remove the cache dir.
 	remove(temp_dir);
 }
 
-static CellImage *gfindimage(uint32_t image_id) {
+/// Finds the image corresponding to the client id. Returns NULL if cannot find.
+static CellImage *gr_find_image(uint32_t image_id) {
 	if (!image_id)
 		return NULL;
 	for (size_t i = 0; i < MAX_CELL_IMAGES; ++i) {
@@ -121,21 +181,29 @@ static CellImage *gfindimage(uint32_t image_id) {
 	return NULL;
 }
 
-static void gimagefilename(CellImage *img, char *out, size_t max_len) {
+/// Writes the name of the on-disk cache file to `out`. `max_len` should be the
+/// size of `out`.
+static void gr_get_image_filename(CellImage *img, char *out, size_t max_len) {
 	snprintf(out, max_len, "%s/img-%.3d", temp_dir, img->image_id);
 }
 
-static unsigned gimageramsize(CellImage *img) {
+/// Returns the (estimation) of the RAM size used by the image when loaded.
+static unsigned gr_image_ram_size(CellImage *img) {
 	return (unsigned)img->rows * img->cols * img->scaled_ch *
 	       img->scaled_cw * 4;
 }
 
-static void gunloadimage(CellImage *img) {
+/// Unload the image from RAM (i.e. delete the corresponding imlib object). If
+/// the on-disk file is preserved, it can be reloaded later.
+static void gr_unload_image(CellImage *img) {
 	if (!img->scaled_image)
 		return;
+
 	imlib_context_set_image(img->scaled_image);
 	imlib_free_image();
-	cell_images_ram_size -= gimageramsize(img);
+
+	cell_images_ram_size -= gr_image_ram_size(img);
+
 	img->scaled_image = NULL;
 	img->scaled_ch = img->scaled_cw = 0;
 	img->status = STATUS_UPLOADING_SUCCESS;
@@ -146,7 +214,11 @@ static void gunloadimage(CellImage *img) {
 	}
 }
 
-static void gr_deleteimagefile(CellImage *img) {
+/// Delete the on-disk cache file corresponding to the image. The in-ram image
+/// object (if it exists) is not deleted, so the image may still be displayed
+/// with the same cell width/height values.
+static void gr_delete_imagefile(CellImage *img) {
+	// It may still be being loaded. Close the file in this case.
 	if (img->open_file) {
 		fclose(img->open_file);
 		img->open_file = NULL;
@@ -156,8 +228,9 @@ static void gr_deleteimagefile(CellImage *img) {
 		return;
 
 	char filename[MAX_FILENAME_SIZE];
-	gimagefilename(img, filename, MAX_FILENAME_SIZE);
+	gr_get_image_filename(img, filename, MAX_FILENAME_SIZE);
 	remove(filename);
+
 	cell_images_disk_size -= img->disk_size;
 	img->disk_size = 0;
 	if (img->status < STATUS_RAM_LOADING_SUCCESS)
@@ -169,15 +242,19 @@ static void gr_deleteimagefile(CellImage *img) {
 	}
 }
 
-static void gdeleteimage(CellImage *img) {
-	gunloadimage(img);
-	gr_deleteimagefile(img);
+/// Deletes the given image (unloads, deletes the file, removes from images).
+/// The corresponding CellImage structure is zeroed out.
+static void gr_delete_image(CellImage *img) {
+	gr_unload_image(img);
+	gr_delete_imagefile(img);
 	if (img->image_id)
 		images_count--;
 	memset(img, 0, sizeof(CellImage));
 }
 
-static CellImage *getoldestimagetodelete(int ram) {
+/// Returns the oldest image that is profitable to delete to free up disk space
+/// (if ram == 0) or RAM (if ram == 0).
+static CellImage *gr_get_image_to_delete(int ram) {
 	CellImage *oldest_image = NULL;
 	for (size_t i = 0; i < MAX_CELL_IMAGES; ++i) {
 		CellImage *img = &cell_images[i];
@@ -197,29 +274,34 @@ static CellImage *getoldestimagetodelete(int ram) {
 	return oldest_image;
 }
 
-static void gchecklimits() {
+/// Checks RAM and disk cache limits and deletes/unloads some images.
+static void gr_check_limits() {
 	if (graphics_debug_mode) {
-		fprintf(stderr, "Checking limits ram: %d KiB disk: %d KiB count: %d\n",
+		fprintf(stderr,
+			"Checking limits ram: %d KiB disk: %d KiB count: %d\n",
 			cell_images_ram_size / 1024,
 			cell_images_disk_size / 1024, images_count);
 	}
 	char changed = 0;
 	while (cell_images_disk_size > max_total_disk_size) {
-		gr_deleteimagefile(getoldestimagetodelete(0));
+		gr_delete_imagefile(gr_get_image_to_delete(0));
 		changed = 1;
 	}
 	while (cell_images_ram_size > max_total_ram_size) {
-		gunloadimage(getoldestimagetodelete(1));
+		gr_unload_image(gr_get_image_to_delete(1));
 		changed = 1;
 	}
 	if (graphics_debug_mode && changed) {
-		fprintf(stderr, "After cleaning ram: %d KiB disk: %d KiB count: %d\n",
+		fprintf(stderr,
+			"After cleaning ram: %d KiB disk: %d KiB count: %d\n",
 			cell_images_ram_size / 1024,
 			cell_images_disk_size / 1024, images_count);
 	}
 }
 
-static CellImage *gnewimage() {
+/// Finds a free CellImage structure for a new image. If there are too many
+/// images, deletes the oldest image.
+static CellImage *gr_allocate_image() {
 	CellImage *oldest_image = NULL;
 	for (size_t i = 0; i < MAX_CELL_IMAGES; ++i) {
 		CellImage *img = &cell_images[i];
@@ -229,16 +311,20 @@ static CellImage *gnewimage() {
 		    difftime(img->atime, oldest_image->atime) < 0)
 			oldest_image = img;
 	}
-	gdeleteimage(oldest_image);
+	gr_delete_image(oldest_image);
 	return oldest_image;
 }
 
-static CellImage *gnewimagewithid(uint32_t id, int cols, int rows) {
-	CellImage *image = gfindimage(id);
+/// Creates a new image with the given id. If an image with that id already
+/// exists, it is deleted first. The id must not be 0.
+static CellImage *gr_new_image(uint32_t id, int cols, int rows) {
+	if (id == 0)
+		return NULL;
+	CellImage *image = gr_find_image(id);
 	if (image)
-		gdeleteimage(image);
+		gr_delete_image(image);
 	else
-		image = gnewimage();
+		image = gr_allocate_image();
 	images_count++;
 	image->image_id = id;
 	image->cols = cols;
@@ -246,18 +332,30 @@ static CellImage *gnewimagewithid(uint32_t id, int cols, int rows) {
 	return image;
 }
 
-static void gtouchimage(CellImage *img) { time(&img->atime); }
+/// Update the atime of the image.
+static void gr_touch_image(CellImage *img) { time(&img->atime); }
 
-static void gloadimage(CellImage *img, int cw, int ch) {
-	if (img->scaled_image &&
-	    img->scaled_ch == ch && img->scaled_cw == cw)
+/// Loads the image into RAM by creating an imlib object. The in-ram image is
+/// correctly fit to the box defined by the number of rows/columns of the image
+/// and the provided cell dimensions in pixels. If the image is already loaded,
+/// it will be reloaded only if the cell dimensions have changed.
+/// Loading may fail, in which case the status of the image will be set to
+/// STATUS_RAM_LOADING_ERROR.
+static void gr_load_image(CellImage *img, int cw, int ch) {
+	// If it's already loaded with the same cw and ch, do nothing.
+	if (img->scaled_image && img->scaled_ch == ch && img->scaled_cw == cw)
 		return;
-	if (img->disk_size == 0)
-		return;
-	gunloadimage(img);
+	// Unload the image first.
+	gr_unload_image(img);
 
+	// If the image is uninitialized or uploading has failed, we cannot load
+	// the image.
+	if (img->status < STATUS_UPLOADING_SUCCESS)
+		return;
+
+	// Load the original (non-scaled) image.
 	char filename[MAX_FILENAME_SIZE];
-	gimagefilename(img, filename, MAX_FILENAME_SIZE);
+	gr_get_image_filename(img, filename, MAX_FILENAME_SIZE);
 	Imlib_Image image = imlib_load_image(filename);
 	if (!image) {
 		if (img->status != STATUS_RAM_LOADING_ERROR) {
@@ -269,32 +367,37 @@ static void gloadimage(CellImage *img, int cw, int ch) {
 	}
 
 	// Free up some ram before marking this image as loaded.
-	gtouchimage(img);
-	gchecklimits();
+	gr_touch_image(img);
+	gr_check_limits();
 
 	imlib_context_set_image(image);
 	int orig_w = imlib_image_get_width();
 	int orig_h = imlib_image_get_height();
 
+	// Create the scaled image.
 	int scaled_w = (int)img->cols * cw;
 	int scaled_h = (int)img->rows * ch;
 	img->scaled_image = imlib_create_image(scaled_w, scaled_h);
 	if (!img->scaled_image) {
 		if (img->status != STATUS_RAM_LOADING_ERROR) {
 			fprintf(stderr,
-				"error: imlib_create_image(%d, %d) returned null\n", scaled_w, scaled_h);
+				"error: imlib_create_image(%d, %d) returned "
+				"null\n",
+				scaled_w, scaled_h);
 		}
 		img->status = STATUS_RAM_LOADING_ERROR;
 		return;
 	}
 	imlib_context_set_image(img->scaled_image);
 	imlib_image_set_has_alpha(1);
+	// First fill the scaled image with the transparent color.
 	imlib_context_set_blend(0);
 	imlib_context_set_color(0, 0, 0, 0);
 	imlib_image_fill_rectangle(0, 0, (int)img->cols * cw,
 				   (int)img->rows * ch);
 	imlib_context_set_anti_alias(1);
 	imlib_context_set_blend(1);
+	// Then blend the original image onto the transparent background.
 	if (orig_w == 0 || orig_h == 0) {
 		fprintf(stderr, "warning: image of zero size\n");
 	} else if (img->scale_mode == SCALE_MODE_FILL) {
@@ -325,22 +428,26 @@ static void gloadimage(CellImage *img, int cw, int ch) {
 					     dest_x, dest_y, dest_w, dest_h);
 	}
 
+	// Delete the object of the original image.
 	imlib_context_set_image(image);
 	imlib_free_image();
 
+	// Mark the image as loaded.
 	img->scaled_ch = ch;
 	img->scaled_cw = cw;
-	cell_images_ram_size += gimageramsize(img);
+	cell_images_ram_size += gr_image_ram_size(img);
 	img->status = STATUS_RAM_LOADING_SUCCESS;
 }
 
-void gpreviewimage(uint32_t image_id, const char *exec) {
+/// Executes `command` with the name of the file corresponding to `image_id` as
+/// the argument. Executes xmessage with an error message on failure.
+void gr_preview_image(uint32_t image_id, const char *exec) {
 	char command[256];
 	size_t len;
-	CellImage *img = gfindimage(image_id);
+	CellImage *img = gr_find_image(image_id);
 	if (img) {
 		char filename[MAX_FILENAME_SIZE];
-		gimagefilename(img, filename, MAX_FILENAME_SIZE);
+		gr_get_image_filename(img, filename, MAX_FILENAME_SIZE);
 		if (img->disk_size == 0) {
 			len = snprintf(command, 255,
 				       "xmessage 'Image with id=%u is not "
@@ -366,8 +473,8 @@ void gpreviewimage(uint32_t image_id, const char *exec) {
 
 /// Checks if we are still really uploading something. Returns 1 if we may be
 /// and 0 if we aren't. If certain amount of time has passed since the last data
-/// transmission command, we assume that all all uploads have failed.
-int gcheckifstilluploading() {
+/// transmission command, we assume that all uploads have failed.
+int gr_check_if_still_uploading() {
 	if (!graphics_uploading)
 		return 0;
 	time_t cur_time;
@@ -403,8 +510,8 @@ static void gr_showrect(Drawable buf, ImageRect *rect) {
 	Display *disp = imlib_context_get_display();
 	GC gc = XCreateGC(disp, buf, 0, NULL);
 	XSetForeground(disp, gc, 0x00FF00);
-	XDrawRectangle(disp, buf, gc, rect->x_pix, rect->y_pix,
-		       w_pix - 1, h_pix - 1);
+	XDrawRectangle(disp, buf, gc, rect->x_pix, rect->y_pix, w_pix - 1,
+		       h_pix - 1);
 	XSetForeground(disp, gc, 0xFF0000);
 	XDrawRectangle(disp, buf, gc, rect->x_pix + 1, rect->y_pix + 1,
 		       w_pix - 3, h_pix - 3);
@@ -423,14 +530,14 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
 		return;
 	}
-	CellImage *img = gfindimage(rect->image_id);
+	CellImage *img = gr_find_image(rect->image_id);
 	Imlib_Image scaled_image;
 	if (!img) {
 		gr_showrect(buf, rect);
 		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
 		return;
 	}
-	gloadimage(img, rect->cw, rect->ch);
+	gr_load_image(img, rect->cw, rect->ch);
 
 	if (!img->scaled_image) {
 		gr_showrect(buf, rect);
@@ -438,7 +545,7 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 		return;
 	}
 
-	gtouchimage(img);
+	gr_touch_image(img);
 
 	imlib_context_set_anti_alias(0);
 	imlib_context_set_image(img->scaled_image);
@@ -473,8 +580,8 @@ static int gr_getrectbottom(ImageRect *rect) {
 }
 
 void gr_start_drawing(Drawable buf, int cw, int ch) {
-	last_cw = cw;
-	last_ch = ch;
+	current_cw = cw;
+	current_ch = ch;
 	drawing_start_time = clock();
 }
 
@@ -517,11 +624,11 @@ void gr_finish_drawing(Drawable buf) {
 	}
 }
 
-void gr_appendimagerect(Drawable buf, uint32_t image_id, int start_col,
-			int end_col, int start_row, int end_row, int x_pix,
-			int y_pix, int cw, int ch, int reverse) {
-	last_cw = cw;
-	last_ch = ch;
+void gr_append_imagerect(Drawable buf, uint32_t image_id, int start_col,
+			 int end_col, int start_row, int end_row, int x_pix,
+			 int y_pix, int cw, int ch, int reverse) {
+	current_cw = cw;
+	current_ch = ch;
 
 	ImageRect new_rect;
 	new_rect.image_id = image_id;
@@ -668,7 +775,7 @@ static void gr_reporterror_img(CellImage *img, const char *format, ...) {
 }
 
 static void gr_loadimage_and_report(CellImage *img) {
-	gloadimage(img, last_cw, last_ch);
+	gr_load_image(img, current_cw, current_ch);
 	if (!img->scaled_image) {
 		gr_reporterror_img(img, "EBADF: could not load image");
 	} else {
@@ -704,7 +811,7 @@ static void gr_reportuploaderror(CellImage *img) {
 /// spamming the client.
 static void gappenddata(CellImage *img, const char *payload, int more) {
 	if (!img)
-		img = gfindimage(current_upload_image_id);
+		img = gr_find_image(current_upload_image_id);
 	if (!more)
 		current_upload_image_id = 0;
 	if (!img) {
@@ -729,7 +836,7 @@ static void gappenddata(CellImage *img, const char *payload, int more) {
 	if (img->disk_size + data_size > max_image_disk_size ||
 	    img->expected_size > max_image_disk_size) {
 		free(data);
-		gr_deleteimagefile(img);
+		gr_delete_imagefile(img);
 		img->uploading_failure = ERROR_OVER_SIZE_LIMIT;
 		if (!more)
 			gr_reportuploaderror(img);
@@ -738,7 +845,7 @@ static void gappenddata(CellImage *img, const char *payload, int more) {
 
 	if (!img->open_file) {
 		char filename[MAX_FILENAME_SIZE];
-		gimagefilename(img, filename, MAX_FILENAME_SIZE);
+		gr_get_image_filename(img, filename, MAX_FILENAME_SIZE);
 		FILE *file = fopen(filename, img->disk_size ? "a" : "w");
 		if (!file) {
 			img->status = STATUS_UPLOADING_ERROR;
@@ -754,7 +861,7 @@ static void gappenddata(CellImage *img, const char *payload, int more) {
 	free(data);
 	img->disk_size += data_size;
 	cell_images_disk_size += data_size;
-	gtouchimage(img);
+	gr_touch_image(img);
 
 	if (more) {
 		current_upload_image_id = img->image_id;
@@ -780,7 +887,7 @@ static void gappenddata(CellImage *img, const char *payload, int more) {
 			gr_loadimage_and_report(img);
 		}
 	}
-	gchecklimits();
+	gr_check_limits();
 }
 
 static CellImage *gtransmitdata(GraphicsCommand *cmd) {
@@ -798,7 +905,7 @@ static CellImage *gtransmitdata(GraphicsCommand *cmd) {
 
 	CellImage *img = NULL;
 	if (cmd->transmission_medium == 'f') {
-		img = gnewimagewithid(cmd->image_id, cmd->columns, cmd->rows);
+		img = gr_new_image(cmd->image_id, cmd->columns, cmd->rows);
 		if (!img)
 			return NULL;
 		img->expected_size = cmd->size;
@@ -806,7 +913,7 @@ static CellImage *gtransmitdata(GraphicsCommand *cmd) {
 		char *original_filename = gbase64dec(cmd->payload, NULL);
 		char tmp_filename[MAX_FILENAME_SIZE];
 		char tmp_filename_symlink[MAX_FILENAME_SIZE + 4] = {0};
-		gimagefilename(img, tmp_filename, MAX_FILENAME_SIZE);
+		gr_get_image_filename(img, tmp_filename, MAX_FILENAME_SIZE);
 		strcat(tmp_filename_symlink, tmp_filename);
 		strcat(tmp_filename_symlink, ".sym");
 		if (access(original_filename, R_OK) != 0 ||
@@ -838,14 +945,16 @@ static CellImage *gtransmitdata(GraphicsCommand *cmd) {
 				img->disk_size = imgfile_stat.st_size;
 				cell_images_disk_size += img->disk_size;
 				if (img->disk_size > max_image_disk_size) {
-					gr_deleteimagefile(img);
-					img->uploading_failure = ERROR_OVER_SIZE_LIMIT;
+					gr_delete_imagefile(img);
+					img->uploading_failure =
+						ERROR_OVER_SIZE_LIMIT;
 					gr_reportuploaderror(img);
-				}
-				else if (img->expected_size &&
-				    img->expected_size != img->disk_size) {
+				} else if (img->expected_size &&
+					   img->expected_size !=
+						   img->disk_size) {
 					img->status = STATUS_UPLOADING_ERROR;
-					img->uploading_failure = ERROR_UNEXPECTED_SIZE;
+					img->uploading_failure =
+						ERROR_UNEXPECTED_SIZE;
 					gr_reportuploaderror(img);
 				} else {
 					gr_loadimage_and_report(img);
@@ -854,9 +963,9 @@ static CellImage *gtransmitdata(GraphicsCommand *cmd) {
 			unlink(tmp_filename_symlink);
 		}
 		free(original_filename);
-		gchecklimits();
+		gr_check_limits();
 	} else if (cmd->transmission_medium == 'd') {
-		img = gnewimagewithid(cmd->image_id, cmd->columns, cmd->rows);
+		img = gr_new_image(cmd->image_id, cmd->columns, cmd->rows);
 		if (!img)
 			return NULL;
 		img->expected_size = cmd->size;
@@ -896,7 +1005,7 @@ static void gr_handle_put_command(GraphicsCommand *cmd) {
 	}
 
 	// Find the image with the id.
-	CellImage *img = gfindimage(image_id);
+	CellImage *img = gr_find_image(image_id);
 	if (!img) {
 		gr_reporterror_cmd(cmd, "ENOENT: image not found");
 		return;
@@ -915,7 +1024,7 @@ static void gr_handle_put_command(GraphicsCommand *cmd) {
 		needs_unloading = 1;
 	}
 	if (needs_unloading)
-		gunloadimage(img);
+		gr_unload_image(img);
 
 	// Try to load the image into RAM.
 	gr_loadimage_and_report(img);
@@ -925,21 +1034,20 @@ static void gr_handle_delete_command(GraphicsCommand *cmd) {
 	if (!cmd->delete_specifier) {
 		for (size_t i = 0; i < MAX_CELL_IMAGES; ++i) {
 			if (cell_images[i].image_id)
-				gdeleteimage(&cell_images[i]);
+				gr_delete_image(&cell_images[i]);
 		}
-	}
-	else if (cmd->delete_specifier == 'I') {
+	} else if (cmd->delete_specifier == 'I') {
 		if (cmd->image_id == 0)
-			gr_reporterror_cmd(
-			    cmd, "EINVAL: no image id to delete");
-		CellImage *image = gfindimage(cmd->image_id);
+			gr_reporterror_cmd(cmd,
+					   "EINVAL: no image id to delete");
+		CellImage *image = gr_find_image(cmd->image_id);
 		if (image)
-			gdeleteimage(image);
+			gr_delete_image(image);
 		gr_reportsuccess_cmd(cmd);
 	} else {
 		gr_reporterror_cmd(
-		    cmd, "EINVAL: unsupported values of the d key : '%c'",
-		    cmd->delete_specifier);
+			cmd, "EINVAL: unsupported values of the d key : '%c'",
+			cmd->delete_specifier);
 	}
 }
 
@@ -1067,7 +1175,7 @@ static void gsetkeyvalue(GraphicsCommand *cmd, char *key_start, char *key_end,
 	}
 }
 
-int gparsecommand(char *buf, size_t len) {
+int gr_parse_command(char *buf, size_t len) {
 	if (buf[0] != 'G')
 		return 0;
 

@@ -345,7 +345,7 @@ previewimage(const Arg *arg)
 	Glyph g = getglyphat(mouse_col, mouse_row);
 	if (g.mode & ATTR_IMAGE) {
 		uint32_t image_id = g.fg & 0xFFFFFF;
-		gpreviewimage(image_id, arg->s);
+		gr_preview_image(image_id, arg->s);
 	}
 }
 
@@ -1258,7 +1258,7 @@ xinit(int cols, int rows)
 		xsel.xtarget = XA_STRING;
 
 	// Initialize the graphics (image display) module.
-	graphicsinit(xw.dpy, xw.vis, xw.cmap);
+	gr_init(xw.dpy, xw.vis, xw.cmap);
 }
 
 int
@@ -1668,8 +1668,11 @@ xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 		// line and start a new one.
 		if (cur_col != last_col + 1 || cur_row != last_row) {
 			if (last_row != 0)
-				gr_appendimagerect(xw.buf, image_id, last_start_col - 1, last_col,
-								 last_row - 1, last_row, x_pix, y_pix, win.cw, win.ch, base.mode & ATTR_REVERSE);
+				gr_append_imagerect(
+					xw.buf, image_id, last_start_col - 1,
+					last_col, last_row - 1, last_row, x_pix,
+					y_pix, win.cw, win.ch,
+					base.mode & ATTR_REVERSE);
 			last_start_col = cur_col;
 			x_pix = x_pix_start + i*win.cw;
 		}
@@ -1678,8 +1681,10 @@ xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 	}
 	// Draw the last contiguous stripe.
 	if (last_row != 0)
-		gr_appendimagerect(xw.buf, image_id, last_start_col - 1, last_col, last_row - 1, last_row,
-						 x_pix, y_pix, win.cw, win.ch, base.mode & ATTR_REVERSE);
+		gr_append_imagerect(xw.buf, image_id, last_start_col - 1,
+				    last_col, last_row - 1, last_row, x_pix,
+				    y_pix, win.cw, win.ch,
+				    base.mode & ATTR_REVERSE);
 }
 
 /* Prepare for image drawing. */
@@ -2108,7 +2113,7 @@ run(void)
 		}
 
 		if (graphics_uploading) {
-			if (!gcheckifstilluploading())
+			if (!gr_check_if_still_uploading())
 				redraw();
 		}
 
@@ -2199,7 +2204,7 @@ run:
 	selinit();
 	run();
 
-	graphicsdeinit();
+	gr_deinit();
 
 	return 0;
 }

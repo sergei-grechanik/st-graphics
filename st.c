@@ -1923,7 +1923,7 @@ strhandle(void)
 		xsettitle(strescseq.args[0]);
 		return;
 	case '_': /* APC -- Application Program Command */
-		if (gparsecommand(strescseq.buf, strescseq.len)) {
+		if (gr_parse_command(strescseq.buf, strescseq.len)) {
 			GraphicsCommandResult *res = &graphics_command_result;
 			if (res->response[0]) {
 				ttywrite(res->response, strlen(res->response), 0);
