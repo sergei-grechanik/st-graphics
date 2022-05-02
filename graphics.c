@@ -95,7 +95,7 @@ static CellImage *gr_find_image(uint32_t image_id);
 static void gr_get_image_filename(CellImage *img, char *out, size_t max_len);
 static void gr_delete_image(CellImage *img);
 static void gr_check_limits();
-static char *gbase64dec(const char *src, size_t *size);
+static char *gr_base64dec(const char *src, size_t *size);
 
 /// The array of image rectangles to draw. It is reset each frame.
 static ImageRect image_rects[MAX_IMAGE_RECTS] = {{0}};
@@ -138,37 +138,9 @@ char graphics_debug_mode = 0;
 char graphics_uploading = 0;
 GraphicsCommandResult graphics_command_result = {0};
 
-/// Initialize the graphics module.
-void gr_init(Display *disp, Visual *vis, Colormap cm) {
-	// Create the temporary dir.
-	if (!mkdtemp(temp_dir)) {
-		fprintf(stderr,
-			"Could not create temporary dir from template %s\n",
-			temp_dir);
-		abort();
-	}
-
-	// Initialize imlib.
-	imlib_context_set_display(disp);
-	imlib_context_set_visual(vis);
-	imlib_context_set_colormap(cm);
-	imlib_context_set_anti_alias(1);
-	imlib_context_set_blend(1);
-	imlib_set_cache_size(imlib_cache_size);
-
-	// Prepare for color inversion.
-	for (size_t i = 0; i < 256; ++i)
-		reverse_table[i] = 255 - i;
-}
-
-/// Deinitialize the graphics module.
-void gr_deinit() {
-	// Delete all images.
-	for (size_t i = 0; i < MAX_CELL_IMAGES; ++i)
-		gr_delete_image(&cell_images[i]);
-	// Remove the cache dir.
-	remove(temp_dir);
-}
+////////////////////////////////////////////////////////////////////////////////
+// Basic image management functions (create, delete, find, etc).
+////////////////////////////////////////////////////////////////////////////////
 
 /// Finds the image corresponding to the client id. Returns NULL if cannot find.
 static CellImage *gr_find_image(uint32_t image_id) {
@@ -182,7 +154,7 @@ static CellImage *gr_find_image(uint32_t image_id) {
 }
 
 /// Writes the name of the on-disk cache file to `out`. `max_len` should be the
-/// size of `out`.
+/// size of `out`. The name will be something like "/tmp/st-images-xxx/img-ID".
 static void gr_get_image_filename(CellImage *img, char *out, size_t max_len) {
 	snprintf(out, max_len, "%s/img-%.3d", temp_dir, img->image_id);
 }
@@ -439,6 +411,42 @@ static void gr_load_image(CellImage *img, int cw, int ch) {
 	img->status = STATUS_RAM_LOADING_SUCCESS;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// Interaction with the terminal (init, deinit, appending rects, etc).
+////////////////////////////////////////////////////////////////////////////////
+
+/// Initialize the graphics module.
+void gr_init(Display *disp, Visual *vis, Colormap cm) {
+	// Create the temporary dir.
+	if (!mkdtemp(temp_dir)) {
+		fprintf(stderr,
+			"Could not create temporary dir from template %s\n",
+			temp_dir);
+		abort();
+	}
+
+	// Initialize imlib.
+	imlib_context_set_display(disp);
+	imlib_context_set_visual(vis);
+	imlib_context_set_colormap(cm);
+	imlib_context_set_anti_alias(1);
+	imlib_context_set_blend(1);
+	imlib_set_cache_size(imlib_cache_size);
+
+	// Prepare for color inversion.
+	for (size_t i = 0; i < 256; ++i)
+		reverse_table[i] = 255 - i;
+}
+
+/// Deinitialize the graphics module.
+void gr_deinit() {
+	// Delete all images.
+	for (size_t i = 0; i < MAX_CELL_IMAGES; ++i)
+		gr_delete_image(&cell_images[i]);
+	// Remove the cache dir.
+	remove(temp_dir);
+}
+
 /// Executes `command` with the name of the file corresponding to `image_id` as
 /// the argument. Executes xmessage with an error message on failure.
 void gr_preview_image(uint32_t image_id, const char *exec) {
@@ -485,6 +493,7 @@ int gr_check_if_still_uploading() {
 	return graphics_uploading;
 }
 
+/// Displays debug information in the rectangle using colors col1 and col2.
 static void gr_displayinfo(Drawable buf, ImageRect *rect, int col1, int col2,
 			   const char *message) {
 	int w_pix = (rect->end_col - rect->start_col) * rect->cw;
@@ -504,6 +513,7 @@ static void gr_displayinfo(Drawable buf, ImageRect *rect, int col1, int col2,
 	XFreeGC(disp, gc);
 }
 
+/// Draws a rectangle (bounding box) for debugging.
 static void gr_showrect(Drawable buf, ImageRect *rect) {
 	int w_pix = (rect->end_col - rect->start_col) * rect->cw;
 	int h_pix = (rect->end_row - rect->start_row) * rect->ch;
@@ -518,6 +528,7 @@ static void gr_showrect(Drawable buf, ImageRect *rect) {
 	XFreeGC(disp, gc);
 }
 
+/// Draws the given part of an image.
 static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 	// If we are uploading data then we shouldn't do heavy computation (like
 	// displaying graphics), mostly because some versions of tmux may drop
@@ -525,20 +536,19 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 	if (graphics_uploading)
 		return;
 
-	if (rect->image_id == 0) {
-		gr_showrect(buf, rect);
-		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
-		return;
-	}
 	CellImage *img = gr_find_image(rect->image_id);
-	Imlib_Image scaled_image;
+	// If the image does not exist, display the bounding box and some info
+	// like the image id.
 	if (!img) {
 		gr_showrect(buf, rect);
 		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
 		return;
 	}
+
+	// Load the image.
 	gr_load_image(img, rect->cw, rect->ch);
 
+	// If the image couldn't be loaded, display the bounding box and info.
 	if (!img->scaled_image) {
 		gr_showrect(buf, rect);
 		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
@@ -547,6 +557,7 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 
 	gr_touch_image(img);
 
+	// Display the image.
 	imlib_context_set_anti_alias(0);
 	imlib_context_set_image(img->scaled_image);
 	imlib_context_set_drawable(buf);
@@ -566,26 +577,32 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 		imlib_context_set_color_modifier(NULL);
 	}
 
-	// In debug mode draw bounding boxes and print info.
+	// In debug mode always draw bounding boxes and print info.
 	if (graphics_debug_mode) {
 		gr_showrect(buf, rect);
-		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "# ");
+		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
 	}
 }
 
+/// Removes the given image rectangle.
 static void gr_freerect(ImageRect *rect) { memset(rect, 0, sizeof(ImageRect)); }
 
+/// Returns the bottom coordinate of the rect.
 static int gr_getrectbottom(ImageRect *rect) {
 	return rect->y_pix + (rect->end_row - rect->start_row) * rect->ch;
 }
 
+/// Prepare for image drawing. `cw` and `ch` are dimensions of the cell.
 void gr_start_drawing(Drawable buf, int cw, int ch) {
 	current_cw = cw;
 	current_ch = ch;
 	drawing_start_time = clock();
 }
 
+/// Finish image drawing. This functions will draw all the rectangles left to
+/// draw.
 void gr_finish_drawing(Drawable buf) {
+	// Draw and then delete all known image rectangles.
 	for (size_t i = 0; i < MAX_IMAGE_RECTS; ++i) {
 		ImageRect *rect = &image_rects[i];
 		if (!rect->image_id)
@@ -594,6 +611,7 @@ void gr_finish_drawing(Drawable buf) {
 		gr_freerect(rect);
 	}
 
+	// In debug mode display additional info.
 	if (graphics_debug_mode) {
 		clock_t drawing_end_time = clock();
 		int milliseconds = 1000 *
@@ -601,14 +619,6 @@ void gr_finish_drawing(Drawable buf) {
 				   CLOCKS_PER_SEC;
 
 		Display *disp = imlib_context_get_display();
-		/* Window win_unused; */
-		/* int x_unused, y_unused; */
-		/* unsigned border_unused, depth_unused; */
-		/* unsigned buf_width = 0; */
-		/* unsigned buf_height = 0; */
-		/* XGetGeometry(disp, buf, &win_unused, &x_unused, &y_unused, */
-		/*              &buf_width, &buf_height, &border_unused, */
-		/*              &depth_unused); */
 		GC gc = XCreateGC(disp, buf, 0, NULL);
 		char info[MAX_INFO_LEN];
 		snprintf(info, MAX_INFO_LEN,
@@ -624,6 +634,7 @@ void gr_finish_drawing(Drawable buf) {
 	}
 }
 
+// Add an image rectangle to a list if rectangles to draw.
 void gr_append_imagerect(Drawable buf, uint32_t image_id, int start_col,
 			 int end_col, int start_row, int end_row, int x_pix,
 			 int y_pix, int cw, int ch, int reverse) {
@@ -691,31 +702,45 @@ void gr_append_imagerect(Drawable buf, uint32_t image_id, int start_col,
 	*free_rect = new_rect;
 }
 
-static size_t findchar(char *buf, size_t start, size_t len, char c) {
-	while (start < len && buf[start] != c)
-		++start;
-	return start;
-}
+////////////////////////////////////////////////////////////////////////////////
+// Command parsing and handling.
+////////////////////////////////////////////////////////////////////////////////
 
+/// A parsed kitty graphics protocol command.
 typedef struct {
+	/// The command itself, without the 'G'.
 	char *command;
+	/// The payload (after ';').
 	char *payload;
+	/// 'a=', may be 't', 'T', 'p', 'd'.
 	char action;
+	/// 'q=', 1 to suppress OK response, 2 to suppress errors too.
 	int quiet;
+	/// 'f=', ignored.
 	int format;
+	/// 't=', may be 'f' or 'd'.
 	char transmission_medium;
+	/// 'd=', may be only 'I' if specified.
 	char delete_specifier;
+	/// 's=', 'v=', ignored,
 	int pix_width, pix_height;
+	/// 'r=', 'c='
 	int rows, columns;
+	/// 'i='
 	uint32_t image_id;
+	/// 'I=', not supported.
 	uint32_t image_number;
+	/// 'p=', not supported, must be 0 or 1.
 	uint32_t placement_id;
-	int has_more;
+	/// 'm=', may be 0 or 1.
 	int more;
+	/// True if either 'm=0' or 'm=1' is specified.
+	int has_more;
+	/// 'S=', used to check the size of uploaded data.
 	int size;
-	int offset;
 } GraphicsCommand;
 
+/// Creates a response to the current command in `graphics_command_result`.
 static void gr_createresponse(uint32_t image_id, uint32_t image_number,
 			      const char *msg) {
 	if (image_id && image_number) {
@@ -733,16 +758,19 @@ static void gr_createresponse(uint32_t image_id, uint32_t image_number,
 	}
 }
 
+/// Creates the 'OK' response to the current command (unless suppressed).
 static void gr_reportsuccess_cmd(GraphicsCommand *cmd) {
 	if (cmd->quiet < 1)
 		gr_createresponse(cmd->image_id, cmd->image_number, "OK");
 }
 
+/// Creates the 'OK' response to the current command (unless suppressed).
 static void gr_reportsuccess_img(CellImage *img) {
 	if (img->quiet < 1)
 		gr_createresponse(img->image_id, 0, "OK");
 }
 
+/// Creates an error response to the current command (unless suppressed).
 static void gr_reporterror_cmd(GraphicsCommand *cmd, const char *format, ...) {
 	char errmsg[MAX_GRAPHICS_RESPONSE_LEN];
 	graphics_command_result.error = 1;
@@ -756,6 +784,7 @@ static void gr_reporterror_cmd(GraphicsCommand *cmd, const char *format, ...) {
 		gr_createresponse(cmd->image_id, cmd->image_number, errmsg);
 }
 
+/// Creates an error response to the current command (unless suppressed).
 static void gr_reporterror_img(CellImage *img, const char *format, ...) {
 	char errmsg[MAX_GRAPHICS_RESPONSE_LEN];
 	graphics_command_result.error = 1;
@@ -774,6 +803,7 @@ static void gr_reporterror_img(CellImage *img, const char *format, ...) {
 	}
 }
 
+/// Loads an image and creates a success/failure response.
 static void gr_loadimage_and_report(CellImage *img) {
 	gr_load_image(img, current_cw, current_ch);
 	if (!img->scaled_image) {
@@ -783,6 +813,7 @@ static void gr_loadimage_and_report(CellImage *img) {
 	}
 }
 
+/// Creates an appropriate uploading failure response to the current command.
 static void gr_reportuploaderror(CellImage *img) {
 	switch (img->uploading_failure) {
 	case 0:
@@ -807,9 +838,10 @@ static void gr_reportuploaderror(CellImage *img) {
 	};
 }
 
-/// Note that we report errors only for the final command (`!more`) to avoid
-/// spamming the client.
-static void gappenddata(CellImage *img, const char *payload, int more) {
+/// Appends data from `payload` to the image `img` when using direct
+/// transmission. Note that we report errors only for the final command
+/// (`!more`) to avoid spamming the client.
+static void gr_append_data(CellImage *img, const char *payload, int more) {
 	if (!img)
 		img = gr_find_image(current_upload_image_id);
 	if (!more)
@@ -826,13 +858,15 @@ static void gappenddata(CellImage *img, const char *payload, int more) {
 		return;
 	}
 
+	// Decode the data.
 	size_t data_size = 0;
-	char *data = gbase64dec(payload, &data_size);
+	char *data = gr_base64dec(payload, &data_size);
 
 	if (graphics_debug_mode)
 		fprintf(stderr, "appending %u + %zu = %zu bytes\n",
 			img->disk_size, data_size, img->disk_size + data_size);
 
+	// Do not append this data if the image exceeds the size limit.
 	if (img->disk_size + data_size > max_image_disk_size ||
 	    img->expected_size > max_image_disk_size) {
 		free(data);
@@ -843,6 +877,7 @@ static void gappenddata(CellImage *img, const char *payload, int more) {
 		return;
 	}
 
+	// If there is no open file corresponding to the image, create it.
 	if (!img->open_file) {
 		char filename[MAX_FILENAME_SIZE];
 		gr_get_image_filename(img, filename, MAX_FILENAME_SIZE);
@@ -857,6 +892,7 @@ static void gappenddata(CellImage *img, const char *payload, int more) {
 		img->open_file = file;
 	}
 
+	// Write date to the file and update disk size variables.
 	fwrite(data, 1, data_size, img->open_file);
 	free(data);
 	img->disk_size += data_size;
@@ -869,10 +905,14 @@ static void gappenddata(CellImage *img, const char *payload, int more) {
 	} else {
 		if (graphics_uploading) {
 			graphics_uploading--;
+			// Since direct uploading suppresses image
+			// drawing (as a workaround), we need to redraw
+			// the screen whenever we finish all uploads.
 			if (!graphics_uploading)
 				graphics_command_result.redraw = 1;
 		}
 		current_upload_image_id = 0;
+		// Close the file.
 		if (img->open_file) {
 			fclose(img->open_file);
 			img->open_file = NULL;
@@ -880,17 +920,23 @@ static void gappenddata(CellImage *img, const char *payload, int more) {
 		img->status = STATUS_UPLOADING_SUCCESS;
 		if (img->expected_size &&
 		    img->expected_size != img->disk_size) {
+			// Report failure if the uploaded image size doesn't
+			// match the expected size.
 			img->status = STATUS_UPLOADING_ERROR;
 			img->uploading_failure = ERROR_UNEXPECTED_SIZE;
 			gr_reportuploaderror(img);
 		} else {
+			// Try to load the image into ram and report the result.
 			gr_loadimage_and_report(img);
 		}
 	}
+
+	// Check whether we need to delete old images.
 	gr_check_limits();
 }
 
-static CellImage *gtransmitdata(GraphicsCommand *cmd) {
+/// Handles a data transmission command.
+static CellImage *gr_transmit_data(GraphicsCommand *cmd) {
 	if (cmd->image_number != 0) {
 		gr_reporterror_cmd(
 			cmd, "EINVAL: image numbers (I) are not supported");
@@ -904,13 +950,19 @@ static CellImage *gtransmitdata(GraphicsCommand *cmd) {
 	}
 
 	CellImage *img = NULL;
-	if (cmd->transmission_medium == 'f') {
+	if (cmd->transmission_medium == 'f') { // file
+		// Create a new image structure.
 		img = gr_new_image(cmd->image_id, cmd->columns, cmd->rows);
 		if (!img)
 			return NULL;
 		img->expected_size = cmd->size;
 		last_image_id = cmd->image_id;
-		char *original_filename = gbase64dec(cmd->payload, NULL);
+		// Decode the filename.
+		char *original_filename = gr_base64dec(cmd->payload, NULL);
+		// We will create a symlink to the original file, and then copy
+		// the file to the temporary cache dir. We do this symlink trick
+		// mostly to be able to use cp for copying, and avoid escaping
+		// file name characters when calling system at the same time.
 		char tmp_filename[MAX_FILENAME_SIZE];
 		char tmp_filename_symlink[MAX_FILENAME_SIZE + 4] = {0};
 		gr_get_image_filename(img, tmp_filename, MAX_FILENAME_SIZE);
@@ -925,6 +977,7 @@ static CellImage *gtransmitdata(GraphicsCommand *cmd) {
 					   tmp_filename_symlink);
 			img->status = STATUS_UPLOADING_ERROR;
 		} else {
+			// We've successfully created a symlink, now call cp.
 			char command[MAX_FILENAME_SIZE + 256];
 			size_t len =
 				snprintf(command, MAX_FILENAME_SIZE + 255,
@@ -939,12 +992,16 @@ static CellImage *gtransmitdata(GraphicsCommand *cmd) {
 					tmp_filename_symlink, tmp_filename);
 				img->status = STATUS_UPLOADING_ERROR;
 			} else {
+				// Get the file size of the copied file.
 				struct stat imgfile_stat;
 				stat(tmp_filename, &imgfile_stat);
 				img->status = STATUS_UPLOADING_SUCCESS;
 				img->disk_size = imgfile_stat.st_size;
 				cell_images_disk_size += img->disk_size;
+				// Check whether the file is too large.
+				// TODO: Check it before copying.
 				if (img->disk_size > max_image_disk_size) {
+					// The file is too large.
 					gr_delete_imagefile(img);
 					img->uploading_failure =
 						ERROR_OVER_SIZE_LIMIT;
@@ -952,28 +1009,35 @@ static CellImage *gtransmitdata(GraphicsCommand *cmd) {
 				} else if (img->expected_size &&
 					   img->expected_size !=
 						   img->disk_size) {
+					// The file has unexpected size.
 					img->status = STATUS_UPLOADING_ERROR;
 					img->uploading_failure =
 						ERROR_UNEXPECTED_SIZE;
 					gr_reportuploaderror(img);
 				} else {
+					// Everything seems fine, try to load.
 					gr_loadimage_and_report(img);
 				}
 			}
+			// Delete the symlink.
 			unlink(tmp_filename_symlink);
 		}
 		free(original_filename);
 		gr_check_limits();
-	} else if (cmd->transmission_medium == 'd') {
+	} else if (cmd->transmission_medium == 'd') { // direct
+		// Create a new image structure.
 		img = gr_new_image(cmd->image_id, cmd->columns, cmd->rows);
 		if (!img)
 			return NULL;
 		img->expected_size = cmd->size;
 		last_image_id = cmd->image_id;
 		img->status = STATUS_UPLOADING;
+		// We save the quietness information in the image because
+		// subsequent transmission command won't contain this info.
 		img->quiet = cmd->quiet;
 		graphics_uploading++;
-		gappenddata(img, cmd->payload, cmd->more);
+		// Start appending data.
+		gr_append_data(img, cmd->payload, cmd->more);
 	} else {
 		gr_reporterror_cmd(
 			cmd,
@@ -1030,13 +1094,17 @@ static void gr_handle_put_command(GraphicsCommand *cmd) {
 	gr_loadimage_and_report(img);
 }
 
+/// Handles the delete command.
 static void gr_handle_delete_command(GraphicsCommand *cmd) {
 	if (!cmd->delete_specifier) {
+		// With no delete specifier just delete everything.
 		for (size_t i = 0; i < MAX_CELL_IMAGES; ++i) {
 			if (cell_images[i].image_id)
 				gr_delete_image(&cell_images[i]);
 		}
 	} else if (cmd->delete_specifier == 'I') {
+		// 'd=I' means delete the image with the given id, including the
+		// image data.
 		if (cmd->image_id == 0)
 			gr_reporterror_cmd(cmd,
 					   "EINVAL: no image id to delete");
@@ -1051,20 +1119,22 @@ static void gr_handle_delete_command(GraphicsCommand *cmd) {
 	}
 }
 
-static void gruncommand(GraphicsCommand *cmd) {
+/// Handles a command.
+static void gr_handle_command(GraphicsCommand *cmd) {
 	CellImage *img = NULL;
 	switch (cmd->action) {
 	case 0:
-		if (cmd->has_more) {
-			gappenddata(NULL, cmd->payload, cmd->more);
-		} else {
+		// If no action is specified, it may be a data transmission
+		// command if 'm=' is specified.
+		if (cmd->has_more)
+			gr_append_data(NULL, cmd->payload, cmd->more);
+		else
 			gr_reporterror_cmd(cmd, "EINVAL: no action specified");
-		}
 		break;
 	case 't':
 	case 'T':
 		// Transmit data or transmit and display.
-		gtransmitdata(cmd);
+		gr_transmit_data(cmd);
 		break;
 	case 'p':
 		// Display (put) the image.
@@ -1082,8 +1152,11 @@ static void gruncommand(GraphicsCommand *cmd) {
 	}
 }
 
-static void gsetkeyvalue(GraphicsCommand *cmd, char *key_start, char *key_end,
+/// Parses the value specified by `value_start` and `value_end` and assigns it
+/// to the field of `cmd` specified by `key_start` and `key_end`.
+static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start, char *key_end,
 			 char *value_start, char *value_end) {
+	// Currently all keys are one-character.
 	if (key_end - key_start != 1) {
 		gr_reporterror_cmd(cmd, "EINVAL: unknown key of length %ld: %s",
 				   key_end - key_start, key_start);
@@ -1091,6 +1164,7 @@ static void gsetkeyvalue(GraphicsCommand *cmd, char *key_start, char *key_end,
 	}
 	long num = 0;
 	if (*key_start == 'a' || *key_start == 't' || *key_start == 'd') {
+		// Some keys have one-character values.
 		if (value_end - value_start != 1) {
 			gr_reporterror_cmd(
 				cmd,
@@ -1100,6 +1174,7 @@ static void gsetkeyvalue(GraphicsCommand *cmd, char *key_start, char *key_end,
 			return;
 		}
 	} else {
+		// All the other keys have integer values.
 		char *num_end = NULL;
 		num = strtol(value_start, &num_end, 10);
 		if (num_end != value_end) {
@@ -1160,8 +1235,8 @@ static void gsetkeyvalue(GraphicsCommand *cmd, char *key_start, char *key_end,
 		cmd->size = num;
 		break;
 	case 'U':
-		// Placement using unicode chars, must be true since we don't
-		// support other forms of placement.
+		// Placement using unicode chars. If specified, it must be true
+		// since we don't support other forms of placement.
 		if (!num) {
 			gr_reporterror_cmd(cmd,
 					   "EINVAL: 'U' must be non-zero: %s",
@@ -1175,6 +1250,8 @@ static void gsetkeyvalue(GraphicsCommand *cmd, char *key_start, char *key_end,
 	}
 }
 
+/// Parse and execute a graphics command. `buf` must start with 'G' and contain
+/// at least `len + 1` characters. Returns 0 on success.
 int gr_parse_command(char *buf, size_t len) {
 	if (buf[0] != 'G')
 		return 0;
@@ -1191,6 +1268,8 @@ int gr_parse_command(char *buf, size_t len) {
 	--len;
 
 	GraphicsCommand cmd = {.command = buf};
+	// The state of parsing. 'k' to parse key, 'v' to parse value, 'p' to
+	// parse the payload.
 	char state = 'k';
 	char *key_start = buf;
 	char *key_end = NULL;
@@ -1224,7 +1303,7 @@ int gr_parse_command(char *buf, size_t len) {
 			case '\0':
 				state = *c == ',' ? 'k' : 'p';
 				val_end = c;
-				gsetkeyvalue(&cmd, key_start, key_end,
+				gr_set_keyvalue(&cmd, key_start, key_end,
 					     val_start, val_end);
 				key_start = c + 1;
 				break;
@@ -1243,13 +1322,16 @@ int gr_parse_command(char *buf, size_t len) {
 		cmd.payload = buf + len;
 
 	if (!graphics_command_result.error)
-		gruncommand(&cmd);
+		gr_handle_command(&cmd);
 
 	if (graphics_debug_mode) {
 		fprintf(stderr, "Response: %s\n",
 			graphics_command_result.response);
 	}
 
+	// Make sure that we suppress response if needed. Usually cmd.quiet is
+	// taken into account when creating the response, but it's not very
+	// reliable in the current implementation.
 	if (cmd.quiet) {
 		if (!graphics_command_result.error || cmd.quiet >= 2)
 			graphics_command_result.response[0] = '\0';
@@ -1258,7 +1340,11 @@ int gr_parse_command(char *buf, size_t len) {
 	return 1;
 }
 
-static const char g_base64_digits[] = {
+////////////////////////////////////////////////////////////////////////////////
+// base64 decoding part is basically copied from st.c
+////////////////////////////////////////////////////////////////////////////////
+
+static const char gr_base64_digits[] = {
 	0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
 	0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
 	0,  0,  0,  0,  0,  0,  0,  0,  0,  62, 0,  0,  0,  63, 52, 53, 54,
@@ -1275,22 +1361,22 @@ static const char g_base64_digits[] = {
 	0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
 	0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0};
 
-static char gbase64dec_getc(const char **src) {
+static char gr_base64_getc(const char **src) {
 	while (**src && !isprint(**src))
 		(*src)++;
 	return **src ? *((*src)++) : '='; /* emulate padding if string ends */
 }
 
-char *gbase64dec(const char *src, size_t *size) {
+char *gr_base64dec(const char *src, size_t *size) {
 	size_t in_len = strlen(src);
 	char *result, *dst;
 
 	result = dst = malloc((in_len + 3) / 4 * 3 + 1);
 	while (*src) {
-		int a = g_base64_digits[(unsigned char)gbase64dec_getc(&src)];
-		int b = g_base64_digits[(unsigned char)gbase64dec_getc(&src)];
-		int c = g_base64_digits[(unsigned char)gbase64dec_getc(&src)];
-		int d = g_base64_digits[(unsigned char)gbase64dec_getc(&src)];
+		int a = gr_base64_digits[(unsigned char)gr_base64_getc(&src)];
+		int b = gr_base64_digits[(unsigned char)gr_base64_getc(&src)];
+		int c = gr_base64_digits[(unsigned char)gr_base64_getc(&src)];
+		int d = gr_base64_digits[(unsigned char)gr_base64_getc(&src)];
 
 		if (a == -1 || b == -1)
 			break;
