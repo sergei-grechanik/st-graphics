@@ -117,6 +117,8 @@ typedef struct {
 typedef struct {
 	int row;      /* nb row */
 	int col;      /* nb col */
+	int pixw;     /* width of the text area in pixels */
+	int pixh;     /* height of the text area in pixels */
 	Line *line;   /* screen */
 	Line *alt;    /* alternate screen */
 	int *dirty;   /* dirtyness of lines */
@@ -940,6 +942,9 @@ write_error:
 void
 ttyresize(int tw, int th)
 {
+	term.pixw = tw;
+	term.pixh = th;
+
 	struct winsize w;
 
 	w.ws_row = term.row;
@@ -1814,6 +1819,28 @@ csihandle(void)
 		case 'q': /* DECSCUSR -- Set Cursor Style */
 			if (xsetcursor(csiescseq.arg[0]))
 				goto unknown;
+			break;
+		default:
+			goto unknown;
+		}
+		break;
+	case 't': /* XTWINOPS -- Window manipulation */
+		switch (csiescseq.arg[0]) {
+		case 14: /* Report text area size in pixels. */
+			len = snprintf(buf, sizeof(buf), "\033[4;%i;%it",
+					term.pixh, term.pixw);
+			ttywrite(buf, len, 0);
+			break;
+		case 16: /* Report character cell size in pixels. */
+			len = snprintf(buf, sizeof(buf), "\033[6;%i;%it",
+					term.pixh / term.row,
+					term.pixw / term.col);
+			ttywrite(buf, len, 0);
+			break;
+		case 18: /* Report the size of the text area in characters. */
+			len = snprintf(buf, sizeof(buf), "\033[8;%i;%it",
+					term.row, term.col);
+			ttywrite(buf, len, 0);
 			break;
 		default:
 			goto unknown;
