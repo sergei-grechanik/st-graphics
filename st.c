@@ -1997,7 +1997,7 @@ strhandle(void)
 		if (gr_parse_command(strescseq.buf, strescseq.len)) {
 			GraphicsCommandResult *res = &graphics_command_result;
 			if (res->response[0]) {
-				ttywrite(res->response, strlen(res->response), 0);
+				ttywriteraw(res->response, strlen(res->response));
 			}
 			if (res->redraw)
 				redraw();

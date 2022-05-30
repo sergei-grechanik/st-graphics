@@ -1334,8 +1334,15 @@ int gr_parse_command(char *buf, size_t len) {
 		gr_handle_command(&cmd);
 
 	if (graphics_debug_mode) {
-		fprintf(stderr, "Response: %s\n",
-			graphics_command_result.response);
+		fprintf(stderr, "Response: ");
+		for (const char *resp = graphics_command_result.response;
+		     *resp != '\0'; ++resp) {
+			if (isprint(*resp))
+				fprintf(stderr, "%c", *resp);
+			else
+				fprintf(stderr, "(0x%x)", *resp);
+		}
+		fprintf(stderr, "\n");
 	}
 
 	// Make sure that we suppress response if needed. Usually cmd.quiet is
