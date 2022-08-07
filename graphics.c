@@ -471,7 +471,7 @@ void gr_preview_image(uint32_t image_id, const char *exec) {
 				       "fully copied to %s'",
 				       image_id, filename);
 		} else {
-			len = snprintf(command, 255, "%s %s", exec, filename);
+			len = snprintf(command, 255, "%s %s &", exec, filename);
 		}
 	} else {
 		len = snprintf(command, 255,
