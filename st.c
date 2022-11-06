@@ -38,7 +38,8 @@
 #define STR_ARG_SIZ   ESC_ARG_SIZ
 
 /* PUA character used as an image placeholder */
-#define IMAGE_PLACEHOLDER_CHAR 0xEEEE
+#define IMAGE_PLACEHOLDER_CHAR 0x10EEEE
+#define IMAGE_PLACEHOLDER_CHAR_OLD 0xEEEE
 
 /* macros */
 #define IS_SET(flag)		((term.mode & (flag)) != 0)
@@ -1233,7 +1234,7 @@ tsetchar(Rune u, const Glyph *attr, int x, int y)
 	term.line[y][x] = *attr;
 	term.line[y][x].u = u;
 
-	if (u == IMAGE_PLACEHOLDER_CHAR) {
+	if (u == IMAGE_PLACEHOLDER_CHAR || u == IMAGE_PLACEHOLDER_CHAR_OLD) {
 		term.line[y][x].u = 0;
 		term.line[y][x].mode |= ATTR_IMAGE;
 	}

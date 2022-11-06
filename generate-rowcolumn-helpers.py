@@ -69,7 +69,7 @@ with open("./rowcolumn_diacritics.sh", "w") as file:
 
 print("Checking that image placeholder cannot be normalized further")
 
-img_char = chr(0xEEEE)
+img_char = chr(0x10EEEE)
 for row_code in codes:
     row_char = chr(row_code)
     for col_code in codes:

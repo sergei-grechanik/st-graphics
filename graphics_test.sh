@@ -52,7 +52,7 @@ line() {
     echo -en "\e[48;5;${BG}m"
     echo -en "\e[38;5;${ID}m"
     for col in `seq $1 $2`; do
-        printf "\UEEEE${ROWCOLUMN_DIACRITICS[$3]}${ROWCOLUMN_DIACRITICS[$col]}"
+        printf "\U10EEEE${ROWCOLUMN_DIACRITICS[$3]}${ROWCOLUMN_DIACRITICS[$col]}"
     done
     echo -en "\e[49;m"
     echo -en "\e[39;m"
