@@ -1552,9 +1552,9 @@ xdrawglyph(Glyph g, int x, int y)
 
 	numspecs = xmakeglyphfontspecs(&spec, &g, 1, x, y);
 	xdrawglyphfontspecs(&spec, g, numspecs, x, y);
-    if (g.mode & ATTR_IMAGE) {
-        xdrawimages(g, &g - x, x, y, x + 1);
-    }
+	if (g.mode & ATTR_IMAGE) {
+		xdrawimages(g, &g - x, x, y, x + 1);
+	}
 }
 
 void
@@ -1573,9 +1573,9 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 	if (IS_SET(MODE_HIDE))
 		return;
 
-    // If it's an image, just draw a ballot box for simplicity.
-    if (g.mode & ATTR_IMAGE)
-        g.u = 0x2610;
+	// If it's an image, just draw a ballot box for simplicity.
+	if (g.mode & ATTR_IMAGE)
+		g.u = 0x2610;
 
 	/*
 	 * Select the right color for the right mode.
