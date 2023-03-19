@@ -1167,7 +1167,7 @@ csiparse(void)
 			v = -1;
 		csiescseq.arg[csiescseq.narg++] = v;
 		p = np;
-		if (*p != ';' || csiescseq.narg == ESC_ARG_SIZ)
+		if ((*p != ';' && *p != ':') || csiescseq.narg == ESC_ARG_SIZ)
 			break;
 		p++;
 	}
@@ -2521,10 +2521,16 @@ check_control_code:
 			gp = &term.line[term.c.y][term.c.x-1];
 		uint16_t num = diacritic_to_num(u);
 		if (num && (gp->mode & ATTR_IMAGE)) {
-			if (!(gp->u & 0xFFFF))
-				gp->u |= (num & 0xFFFF);
-			else if (!(gp->u & 0xFFFF0000))
-				gp->u |= (num & 0xFFFF) << 16;
+			// 11 bits for the row, 12 bits for the column, 9 bits
+			// for the most significant byte of the image ID (we
+			// need to know if it's specified, so we need 9 bits
+			// instead of 8).
+			if (!(gp->u & 0x000007FF))
+				gp->u |= (num & 0x7FF);
+			else if (!(gp->u & 0x007FF800))
+				gp->u |= (num & 0xFFF) << 11;
+			else if (!(gp->u & 0xFF800000))
+				gp->u |= ((num - 1) & 0xFF) << 23 | 0x80000000;
 		}
 		term.lastc = u;
 		return;

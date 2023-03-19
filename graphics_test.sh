@@ -1,15 +1,5 @@
 #!/bin/bash
 
-stty_orig=`stty -g`
-stty -echo
-stty susp undef
-
-cleanup() {
-    stty $stty_orig
-}
-
-trap cleanup EXIT TERM
-
 INSIDE_TMUX=""
 if [[ -n "$TMUX" ]] && [[ "$TERM" =~ "screen" ]]; then
     INSIDE_TMUX="1"
@@ -40,6 +30,25 @@ fi
     curl -o neuschwanstein.jpg https://upload.wikimedia.org/wikipedia/commons/1/10/Neuschwanstein_Castle_from_Marienbr%C3%BCcke_Bridge.jpg
 [[ -f transparency.png ]] || \
     curl -o transparency.png https://upload.wikimedia.org/wikipedia/commons/4/47/PNG_transparency_demonstration_1.png
+
+mkdir _test_screenshots
+
+stty_orig=`stty -g`
+reset
+stty -echo
+stty susp undef
+
+cleanup() {
+    stty $stty_orig
+}
+
+trap cleanup EXIT TERM
+
+save_screenshot() {
+    local name="$1"
+    sleep 0.2
+    import -depth 8 -resize 320x192 -window "$WINDOWID" "_test_screenshots/$name.jpg"
+}
 
 read_response() {
     TERM_RESPONSE=""
@@ -85,11 +94,15 @@ ID=1
 BG=2
 box 0 19 0 9 > _1.txt
 
+# We crop the neuschwanstein image to 60 columns to get 80 columns total.
 ID=2
 BG=3
-box 0 71 0 9 > _2.txt
+box 0 59 0 9 > _2.txt
 
 paste -d "" _1.txt _2.txt
+
+save_screenshot "010-wiki-neuschwanstein"
+
 
 echo "Wikipedia logo in different sizes:"
 
@@ -134,6 +147,9 @@ ID=6
 box 0 1 0 1 > _2.txt
 paste -d "" _1.txt _2.txt
 
+save_screenshot "020-wikipedia-sizes"
+
+
 echo "Transparency test:"
 
 start_gr_command
@@ -170,6 +186,9 @@ ID=9
 BG=2
 box 0 1 0 1
 
+save_screenshot "030-transparency"
+
+
 echo "Neuschwanstein with blocks of wikipedia inside:"
 
 BG=0
@@ -198,12 +217,18 @@ ID=2 line 0 40 $N; ID=1 line 1 19 7; ID=2 line 60 71 $N; echo
 N=9
 ID=2 line 0 40 $N; ID=1 line 1 9 8; ID=2 line 50 50 $N; ID=1 line 11 19 8; ID=2 line 60 71 $N; echo
 
+save_screenshot "040-neuschwanstein-with-wikipedia"
+
+
 echo "Part of wiki logo, lower half indented:"
 
 ID=1 line 0 9 3; echo "aaaaaaaaaa"
 ID=1 line 0 9 4; echo "aaaaaaaaaa"
 echo -n "bbbbbbbbbb"; ID=1 line 0 9 5; echo
 echo -n "bbbbbbbbbb"; ID=1 line 0 9 6; echo
+
+save_screenshot "050-wikipedia-lower-half-indented"
+
 
 echo "Direct uploading test:"
 
@@ -236,6 +261,9 @@ test_direct() {
 QUIET=1
 test_direct 3800 10
 
+save_screenshot "060-direct-upload"
+
+
 echo "Invalid image (broken uploading):"
 QUIET=2
 test_direct 3800 200 t
@@ -261,6 +289,9 @@ echo "There shouldn't be any responses here:"
 
 read_response
 echo
+
+save_screenshot "070-invalid-image"
+
 
 echo "Now testing responses"
 
@@ -326,3 +357,5 @@ echo -n "a=T,U=1,f=100,t=f,i=0,r=1,c=1;"
 echo -n "$(echo __dummy__nonexisting | tr -d '\n' | base64 -w0)"
 end_gr_command
 read_response
+
+save_screenshot "080-responses"
