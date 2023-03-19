@@ -1167,7 +1167,7 @@ csiparse(void)
 			v = -1;
 		csiescseq.arg[csiescseq.narg++] = v;
 		p = np;
-		if (*p != ';' || csiescseq.narg == ESC_ARG_SIZ)
+		if ((*p != ';' && *p != ':') || csiescseq.narg == ESC_ARG_SIZ)
 			break;
 		p++;
 	}
