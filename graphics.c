@@ -952,14 +952,30 @@ static CellImage *gr_transmit_data(GraphicsCommand *cmd) {
 		return NULL;
 	}
 
+	// The default is direct transmission.
+	if (!cmd->transmission_medium)
+		cmd->transmission_medium = 'd';
+
 	if (cmd->image_id == 0) {
-		gr_reporterror_cmd(cmd,
-				   "EINVAL: image id is not specified or zero");
-		return NULL;
+		if (cmd->image_id == 0 && cmd->image_number == 0 &&
+		    cmd->transmission_medium == 'd') {
+			// This is a continuation of the previous transmission
+			// with an implicit image id.
+			cmd->image_id = current_upload_image_id;
+		} else {
+			gr_reporterror_cmd(
+				cmd,
+				"EINVAL: image id is not specified or zero");
+			return NULL;
+		}
 	}
 
 	CellImage *img = NULL;
-	if (cmd->transmission_medium == 'f') { // file
+	if (cmd->transmission_medium == 'f' ||
+	    cmd->transmission_medium == 't') {
+		// File transmission.
+		// TODO: Delete the file if the medium is 't' and the file is in
+		//       a known temporary directory.
 		// Create a new image structure.
 		img = gr_new_image(cmd->image_id, cmd->columns, cmd->rows);
 		if (!img)
@@ -1033,8 +1049,15 @@ static CellImage *gr_transmit_data(GraphicsCommand *cmd) {
 		}
 		free(original_filename);
 		gr_check_limits();
-	} else if (cmd->transmission_medium == 'd') { // direct
-		// Create a new image structure.
+	} else if (cmd->transmission_medium == 'd') {
+		// Direct transmission (default if 't' is not specified).
+		img = gr_find_image(cmd->image_id);
+		if (img && img->status == STATUS_UPLOADING) {
+			// This is a continuation of the previous transmission.
+			gr_append_data(img, cmd->payload, cmd->more);
+			return img;
+		}
+		// Otherwise create a new image structure.
 		img = gr_new_image(cmd->image_id, cmd->columns, cmd->rows);
 		if (!img)
 			return NULL;
@@ -1172,7 +1195,8 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start, char *key_end
 		return;
 	}
 	long num = 0;
-	if (*key_start == 'a' || *key_start == 't' || *key_start == 'd') {
+	if (*key_start == 'a' || *key_start == 't' || *key_start == 'd' ||
+	    *key_start == 'o') {
 		// Some keys have one-character values.
 		if (value_end - value_start != 1) {
 			gr_reporterror_cmd(
@@ -1252,6 +1276,14 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start, char *key_end
 					   key_start);
 		}
 		break;
+	case 'X':
+	case 'Y':
+		fprintf(stderr,
+			"WARNING: the key '%c' is not supported but should be "
+			"safe to ignore\n",
+			*key_start);
+		break;
+	case 'o':
 	default:
 		gr_reporterror_cmd(cmd, "EINVAL: unsupported key: %s",
 				   key_start);
@@ -1269,7 +1301,7 @@ int gr_parse_command(char *buf, size_t len) {
 
 	static int cmdnum = 0;
 	if (graphics_debug_mode)
-		fprintf(stderr, "### Command %d: %.50s\n", cmdnum, buf);
+		fprintf(stderr, "### Command %d: %.80s\n", cmdnum, buf);
 	cmdnum++;
 
 	// Eat the 'G'.

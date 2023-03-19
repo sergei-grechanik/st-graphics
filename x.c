@@ -260,6 +260,11 @@ static char *opt_title = NULL;
 
 static uint buttons; /* bit field of pressed buttons */
 
+static uint32_t
+getimageid(Glyph g) {
+	return ((g.u >> 23) & 0xFF) << 24 | (g.fg & 0xFFFFFF);
+}
+
 void
 clipcopy(const Arg *dummy)
 {
@@ -339,7 +344,7 @@ previewimage(const Arg *arg)
 {
 	Glyph g = getglyphat(mouse_col, mouse_row);
 	if (g.mode & ATTR_IMAGE) {
-		uint32_t image_id = g.fg & 0xFFFFFF;
+		uint32_t image_id = getimageid(g);
 		gr_preview_image(image_id, arg->s);
 	}
 }
@@ -1651,19 +1656,24 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 }
 
 /* Draw (or queue for drawing) image cells between columns x1 and x2 assuming
- * that they belong to the same image id. */
+ * that they have the same attributes (and thus the same lower 24 bits of the
+ * image ID). */
 void
 xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 	int x_pix_start = win.hborderpx + x1 * win.cw;
 	int x_pix = x_pix_start;
 	int y_pix = win.vborderpx + y1 * win.ch;
-	uint32_t image_id = base.fg & 0xFFFFFF;
+	uint32_t image_id_24bits = base.fg & 0xFFFFFF;
+	uint8_t last_id_additional_byte = 0;
+	// Columns and rows are 1-based, 0 means unspecified.
 	int last_col = 0;
 	int last_row = 0;
 	int last_start_col = 0;
 	for (int i = 0; i < x2 - x1; ++i) {
-		uint32_t cur_row = line[x1 + i].u & 0xFFFF;
-		uint32_t cur_col = (line[x1 + i].u >> 16) & 0xFFFF;
+		uint32_t cur_row = line[x1 + i].u & 0x7FF;
+		uint32_t cur_col = (line[x1 + i].u >> 11) & 0xFFF;
+		uint32_t cur_id_additional_byte_specified = line[x1 + i].u >> 23;
+		uint8_t cur_id_additional_byte = (line[x1 + i].u >> 23) & 0xFF;
 		// If the row is not specified, assume it's the same as the row of the
 		// previous cell.
 		if (cur_row == 0) cur_row = last_row;
@@ -1672,12 +1682,19 @@ xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 		// next one.
 		if (cur_col == 0 && cur_row == last_row)
 			cur_col = last_col + 1;
+		// If the additional id byte is not specified and the
+		// coordinates are the same, assume the byte is also the same.
+		if (!cur_id_additional_byte_specified && cur_row == last_row &&
+				cur_col == last_col)
+			cur_id_additional_byte = last_id_additional_byte;
 		// If we couldn't infer row and column, start from the top left corner.
 		if (cur_row == 0) cur_row = 1;
 		if (cur_col == 0) cur_col = 1;
 		// If this cell breaks a contiguous stripe of image cells, draw that
 		// line and start a new one.
 		if (cur_col != last_col + 1 || cur_row != last_row) {
+			uint32_t image_id = image_id_24bits |
+					    (last_id_additional_byte << 24);
 			if (last_row != 0)
 				gr_append_imagerect(
 					xw.buf, image_id, last_start_col - 1,
@@ -1689,7 +1706,17 @@ xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 		}
 		last_row = cur_row;
 		last_col = cur_col;
+		last_id_additional_byte = cur_id_additional_byte;
+		// Set the additional byte for this glyph if it wasn't
+		// specified. This is to make the naive implementation of
+		// getimageid work.
+		if (!cur_id_additional_byte_specified) {
+			line[x1 + i].u |=
+				(cur_id_additional_byte << 23) | 0x80000000;
+		}
 	}
+	uint32_t image_id = image_id_24bits |
+			    (last_id_additional_byte << 24);
 	// Draw the last contiguous stripe.
 	if (last_row != 0)
 		gr_append_imagerect(xw.buf, image_id, last_start_col - 1,
