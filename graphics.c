@@ -1283,6 +1283,10 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start, char *key_end
 			"safe to ignore\n",
 			*key_start);
 		break;
+	case 'C':
+		// Cursor movement policy. Currently we never move the cursor,
+		// so we ignore this.
+		break;
 	case 'o':
 	default:
 		gr_reporterror_cmd(cmd, "EINVAL: unsupported key: %s",
