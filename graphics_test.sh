@@ -24,12 +24,26 @@ fi
 
 . rowcolumn_diacritics.sh
 
+my_compress() {
+    python3 -c "import zlib, sys; sys.stdout.buffer.write(zlib.compress(sys.stdin.buffer.read()))"
+}
+
 [[ -f wikipedia.png ]] || \
     curl -o wikipedia.png https://upload.wikimedia.org/wikipedia/en/thumb/8/80/Wikipedia-logo-v2.svg/440px-Wikipedia-logo-v2.svg.png
 [[ -f neuschwanstein.jpg ]] || \
     curl -o neuschwanstein.jpg https://upload.wikimedia.org/wikipedia/commons/1/10/Neuschwanstein_Castle_from_Marienbr%C3%BCcke_Bridge.jpg
 [[ -f transparency.png ]] || \
     curl -o transparency.png https://upload.wikimedia.org/wikipedia/commons/4/47/PNG_transparency_demonstration_1.png
+[[ -f transparency.rgba ]] || \
+    (convert transparency.png -depth 8 RGBA:transparency.rgba &&
+     echo "extra truncated data" >> transparency.rgba)
+[[ -f transparency.rgb ]] || \
+    (convert transparency.png -depth 8 RGB:transparency.rgb &&
+     echo "extra truncated data" >> transparency.rgba)
+[[ -f transparency.rgba.zlib ]] || \
+    cat transparency.rgba | my_compress > transparency.rgba.zlib
+[[ -f transparency.rgb.zlib ]] || \
+    cat transparency.rgb | my_compress > transparency.rgb.zlib
 
 mkdir _test_screenshots
 
@@ -187,6 +201,62 @@ BG=2
 box 0 1 0 1
 
 save_screenshot "030-transparency"
+
+
+echo "Raw pixel data test, RGBA:"
+
+start_gr_command
+echo -n "a=T,U=1,f=32,t=f,i=35,r=10,c=20,q=1,s=800,v=600;"
+echo -n "$(realpath transparency.rgba | tr -d '\n' | base64 -w0)"
+end_gr_command
+
+ID=35
+for row in `seq 0 9`; do
+    BG=$row
+    line 0 19 $row
+    echo
+done
+
+echo "Raw pixel data test, RGB, the background will be black on green:"
+
+start_gr_command
+echo -n "a=T,U=1,f=24,t=f,i=36,r=10,c=20,q=1,s=800,v=600;"
+echo -n "$(realpath transparency.rgb | tr -d '\n' | base64 -w0)"
+end_gr_command
+
+ID=36
+BG=2
+box 0 19 0 9
+
+save_screenshot "035-raw-pixel-data"
+
+
+echo "Compressed raw pixel data test, RGBA:"
+
+start_gr_command
+echo -n "a=T,U=1,f=32,o=z,t=f,i=37,r=10,c=20,q=1,s=800,v=600;"
+echo -n "$(realpath transparency.rgba.zlib | tr -d '\n' | base64 -w0)"
+end_gr_command
+
+ID=37
+for row in `seq 0 9`; do
+    BG=$row
+    line 0 19 $row
+    echo
+done
+
+echo "Compressed raw pixel data test, RGB, the background will be black on green:"
+
+start_gr_command
+echo -n "a=T,U=1,f=24,o=z,t=f,i=38,r=10,c=20,q=1,s=800,v=600;"
+echo -n "$(realpath transparency.rgb.zlib | tr -d '\n' | base64 -w0)"
+end_gr_command
+
+ID=38
+BG=2
+box 0 19 0 9
+
+save_screenshot "035-raw-pixel-data"
 
 
 echo "Neuschwanstein with blocks of wikipedia inside:"
