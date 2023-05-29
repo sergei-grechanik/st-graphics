@@ -9,6 +9,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include <zlib.h>
 #include <Imlib2.h>
 #include <X11/Xlib.h>
 #include <assert.h>
@@ -69,6 +70,12 @@ typedef struct {
 	/// The expected size of the image file (specified with 'S='), used to
 	/// check if uploading uploading succeeded.
 	unsigned expected_size;
+	/// Format specification (see the `f=` key).
+	int format;
+	/// Compression mode (see the `o=` key).
+	char compression;
+	/// Pixel width and height if format is 32 or 24.
+	int pix_width, pix_height;
 	/// The scaling mode (see `ScaleMode`).
 	char scale_mode;
 	/// The status (see `ImageStatus`).
@@ -316,6 +323,191 @@ static CellImage *gr_new_image(uint32_t id, int cols, int rows) {
 /// Update the atime of the image.
 static void gr_touch_image(CellImage *img) { time(&img->atime); }
 
+////////////////////////////////////////////////////////////////////////////////
+// Image loading.
+////////////////////////////////////////////////////////////////////////////////
+
+/// Copies `num_pixels` pixels (not bytes!) from a buffer `from` to an imlib2
+/// image data `to`. The format may be 24 (RGBA) or 32 (RGB), and it's converted
+/// to imlib2's representation, which depends on the endianness, and on
+/// little-endian architectures the memory layout is actually BGRA.
+static inline void gr_copy_pixels(DATA32 *to, unsigned char *from, int format,
+				  size_t num_pixels) {
+	size_t pixel_size = format == 24 ? 3 : 4;
+	if (format == 32) {
+		for (unsigned i = 0; i < num_pixels; ++i) {
+			unsigned byte_i = i * pixel_size;
+			to[i] = ((DATA32)from[byte_i + 2]) |
+				((DATA32)from[byte_i + 1]) << 8 |
+				((DATA32)from[byte_i]) << 16 |
+				((DATA32)from[byte_i + 3]) << 24;
+		}
+	} else {
+		for (unsigned i = 0; i < num_pixels; ++i) {
+			unsigned byte_i = i * pixel_size;
+			to[i] = ((DATA32)from[byte_i + 2]) |
+				((DATA32)from[byte_i + 1]) << 8 |
+				((DATA32)from[byte_i]) << 16 | 0xFF000000;
+		}
+	}
+}
+
+/// Loads uncompressed RGB or RGBA image data from a file.
+static void gr_load_raw_pixel_data_uncompressed(DATA32 *data, FILE *file,
+						int format,
+						size_t total_pixels) {
+	size_t pixel_size = format == 24 ? 3 : 4;
+	size_t chunk_size_pix = BUFSIZ / 4;
+	size_t chunk_size_bytes = chunk_size_pix * pixel_size;
+	unsigned char chunk[chunk_size_bytes];
+	size_t bytes = total_pixels * pixel_size;
+	for (size_t chunk_start_pix = 0; chunk_start_pix < total_pixels;
+	     chunk_start_pix += chunk_size_pix) {
+		size_t read_size = fread(chunk, 1, chunk_size_bytes, file);
+		size_t read_pixels = read_size / pixel_size;
+		if (chunk_start_pix + read_pixels > total_pixels)
+			read_pixels = total_pixels - chunk_start_pix;
+		gr_copy_pixels(data + chunk_start_pix, chunk, format,
+			       read_pixels);
+	}
+}
+
+/// Loads compressed RGB or RGBA image data from a file.
+static int gr_load_raw_pixel_data_compressed(DATA32 *data, FILE *file,
+					     int format, size_t total_pixels) {
+	size_t pixel_size = format == 24 ? 3 : 4;
+	const size_t COMPRESSED_CHUNK_SIZE = BUFSIZ;
+	const size_t DECOMPRESSED_CHUNK_SIZE = BUFSIZ * 4;
+	unsigned char compressed_chunk[COMPRESSED_CHUNK_SIZE];
+	unsigned char decompressed_chunk[DECOMPRESSED_CHUNK_SIZE];
+
+	z_stream strm;
+	strm.zalloc = Z_NULL;
+	strm.zfree = Z_NULL;
+	strm.opaque = Z_NULL;
+	strm.next_out = decompressed_chunk;
+	strm.avail_out = DECOMPRESSED_CHUNK_SIZE;
+	strm.avail_in = 0;
+	strm.next_in = Z_NULL;
+	int ret = inflateInit(&strm);
+	if (ret != Z_OK)
+	    return 1;
+
+	int error = 0;
+	int progress = 0;
+	size_t total_copied_pixels = 0;
+	while (1) {
+		// If we don't have enough data in the input buffer, try to read
+		// from the file.
+		if (strm.avail_in <= COMPRESSED_CHUNK_SIZE / 4) {
+			// Move the existing data to the beginning.
+			memmove(compressed_chunk, strm.next_in, strm.avail_in);
+			strm.next_in = compressed_chunk;
+			// Read more data.
+			size_t bytes_read = fread(
+				compressed_chunk + strm.avail_in, 1,
+				COMPRESSED_CHUNK_SIZE - strm.avail_in, file);
+			strm.avail_in += bytes_read;
+			if (bytes_read != 0)
+				progress = 1;
+		}
+
+		// Try to inflate the data.
+		int ret = inflate(&strm, Z_SYNC_FLUSH);
+		if (ret == Z_MEM_ERROR || ret == Z_DATA_ERROR) {
+			error = 1;
+			fprintf(stderr,
+				"error: could not decompress the image, error "
+				"%d\n",
+				ret);
+			break;
+		}
+
+		// Copy the data from the output buffer to the image.
+		size_t full_pixels =
+			(DECOMPRESSED_CHUNK_SIZE - strm.avail_out) / pixel_size;
+		// Make sure we don't overflow the image.
+		if (full_pixels > total_pixels - total_copied_pixels)
+			full_pixels = total_pixels - total_copied_pixels;
+		if (full_pixels > 0) {
+			// Copy pixels.
+			gr_copy_pixels(data, decompressed_chunk, format,
+				       full_pixels);
+			data += full_pixels;
+			total_copied_pixels += full_pixels;
+			if (total_copied_pixels >= total_pixels) {
+				// We filled the whole image, there may be some
+				// data left, but we just truncate it.
+				break;
+			}
+			// Move the remaining data to the beginning.
+			size_t copied_bytes = full_pixels * pixel_size;
+			size_t leftover =
+				(DECOMPRESSED_CHUNK_SIZE - strm.avail_out) -
+				copied_bytes;
+			memmove(decompressed_chunk,
+				decompressed_chunk + copied_bytes, leftover);
+			strm.next_out -= copied_bytes;
+			strm.avail_out += copied_bytes;
+			progress = 1;
+		}
+
+		// If we haven't made any progress, then we have reached the end
+		// of both the file and the inflated data.
+		if (!progress)
+			break;
+		progress = 0;
+	}
+
+	inflateEnd(&strm);
+	return error;
+}
+
+/// Load the image from a file containing raw pixel data (RGB or RGBA), the data
+/// may be compressed.
+static Imlib_Image gr_load_raw_pixel_data(CellImage *img,
+					  const char *filename) {
+	FILE* file = fopen(filename, "rb");
+	if (!file) {
+		fprintf(stderr,
+			"error: could not open image file: %s\n",
+			filename);
+		return NULL;
+	}
+
+	size_t total_pixels = img->pix_width * img->pix_height;
+	Imlib_Image image = imlib_create_image(img->pix_width, img->pix_height);
+	if (!image) {
+		fprintf(stderr,
+			"error: could not create an image of size %d x %d\n",
+			img->pix_width, img->pix_height);
+		fclose(file);
+		return NULL;
+	}
+
+	imlib_context_set_image(image);
+	imlib_image_set_has_alpha(1);
+	DATA32* data = imlib_image_get_data();
+
+	if (img->compression == 0) {
+		gr_load_raw_pixel_data_uncompressed(data, file, img->format,
+						    total_pixels);
+	} else {
+		int ret = gr_load_raw_pixel_data_compressed(
+			data, file, img->format, total_pixels);
+		if (ret != 0) {
+			imlib_image_put_back_data(data);
+			imlib_free_image();
+			fclose(file);
+			return NULL;
+		}
+	}
+
+	fclose(file);
+	imlib_image_put_back_data(data);
+	return image;
+}
+
 /// Loads the image into RAM by creating an imlib object. The in-ram image is
 /// correctly fit to the box defined by the number of rows/columns of the image
 /// and the provided cell dimensions in pixels. If the image is already loaded,
@@ -337,7 +529,13 @@ static void gr_load_image(CellImage *img, int cw, int ch) {
 	// Load the original (non-scaled) image.
 	char filename[MAX_FILENAME_SIZE];
 	gr_get_image_filename(img, filename, MAX_FILENAME_SIZE);
-	Imlib_Image image = imlib_load_image(filename);
+	Imlib_Image image;
+	if (img->format == 100 || img->format == 0)
+		image = imlib_load_image(filename);
+	if (img->format == 32 || img->format == 24 ||
+	    (!image && img->format == 0)) {
+		image = gr_load_raw_pixel_data(img, filename);
+	}
 	if (!image) {
 		if (img->status != STATUS_RAM_LOADING_ERROR) {
 			fprintf(stderr, "error: could not load image: %s\n",
@@ -725,13 +923,17 @@ typedef struct {
 	char action;
 	/// 'q=', 1 to suppress OK response, 2 to suppress errors too.
 	int quiet;
-	/// 'f=', ignored.
+	/// 'f=', use 24 or 32 for raw pixel data, 100 to autodetect with
+	/// imlib2. If 'f=0', will try to load with imlib2, then fallback to
+	/// 32-bit pixel data.
 	int format;
+	/// 'o=', may be 'z' for RFC 1950 ZLIB.
+	int compression;
 	/// 't=', may be 'f' or 'd'.
 	char transmission_medium;
 	/// 'd=', may be only 'I' if specified.
 	char delete_specifier;
-	/// 's=', 'v=', ignored,
+	/// 's=', 'v=', used only when 'f=24' or 'f=32'.
 	int pix_width, pix_height;
 	/// 'r=', 'c='
 	int rows, columns;
@@ -944,6 +1146,24 @@ static void gr_append_data(CellImage *img, const char *payload, int more) {
 	gr_check_limits();
 }
 
+/// Copy some image parameters from `cmd` to `img`.
+static void gr_set_image_params_from_command(CellImage *img,
+					     GraphicsCommand *cmd) {
+	if (cmd->format != 0 && cmd->format != 32 && cmd->format != 24 &&
+	    cmd->compression != 0) {
+		gr_reporterror_cmd(cmd, "EINVAL: compression is supported only "
+					"for raw pixel data (f=32 or f=24)");
+	}
+	img->expected_size = cmd->size;
+	img->format = cmd->format;
+	img->compression = cmd->compression;
+	img->pix_width = cmd->pix_width;
+	img->pix_height = cmd->pix_height;
+	// We save the quietness information in the image because for direct
+	// transmission subsequent transmission command won't contain this info.
+	img->quiet = cmd->quiet;
+}
+
 /// Handles a data transmission command.
 static CellImage *gr_transmit_data(GraphicsCommand *cmd) {
 	if (cmd->image_number != 0) {
@@ -980,7 +1200,7 @@ static CellImage *gr_transmit_data(GraphicsCommand *cmd) {
 		img = gr_new_image(cmd->image_id, cmd->columns, cmd->rows);
 		if (!img)
 			return NULL;
-		img->expected_size = cmd->size;
+		gr_set_image_params_from_command(img, cmd);
 		last_image_id = cmd->image_id;
 		// Decode the filename.
 		char *original_filename = gr_base64dec(cmd->payload, NULL);
@@ -1061,12 +1281,9 @@ static CellImage *gr_transmit_data(GraphicsCommand *cmd) {
 		img = gr_new_image(cmd->image_id, cmd->columns, cmd->rows);
 		if (!img)
 			return NULL;
-		img->expected_size = cmd->size;
+		gr_set_image_params_from_command(img, cmd);
 		last_image_id = cmd->image_id;
 		img->status = STATUS_UPLOADING;
-		// We save the quietness information in the image because
-		// subsequent transmission command won't contain this info.
-		img->quiet = cmd->quiet;
 		graphics_uploading++;
 		// Start appending data.
 		gr_append_data(img, cmd->payload, cmd->more);
@@ -1232,6 +1449,21 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start, char *key_end
 		break;
 	case 'f':
 		cmd->format = num;
+		if (num != 0 && num != 24 && num != 32 && num != 100) {
+			gr_reporterror_cmd(
+				cmd,
+				"EINVAL: unsupported format specification: %s",
+				key_start);
+		}
+		break;
+	case 'o':
+		cmd->compression = *value_start;
+		if (cmd->compression != 'z') {
+			gr_reporterror_cmd(cmd,
+					   "EINVAL: unsupported compression "
+					   "specification: %s",
+					   key_start);
+		}
 		break;
 	case 's':
 		cmd->pix_width = num;
@@ -1287,7 +1519,6 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start, char *key_end
 		// Cursor movement policy. Currently we never move the cursor,
 		// so we ignore this.
 		break;
-	case 'o':
 	default:
 		gr_reporterror_cmd(cmd, "EINVAL: unsupported key: %s",
 				   key_start);
