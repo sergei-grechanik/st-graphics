@@ -23,10 +23,10 @@
 #include <unistd.h>
 
 #include "graphics.h"
+#include "khash.h"
 
 #define MAX_FILENAME_SIZE 256
 #define MAX_INFO_LEN 256
-#define MAX_CELL_IMAGES 1024
 #define MAX_IMAGE_RECTS 20
 
 enum ScaleMode {
@@ -91,7 +91,7 @@ typedef struct {
 	/// The dimensions of the cell used to scale the image. If cell
 	/// dimensions are changed (font change), the image will be rescaled.
 	uint16_t scaled_cw, scaled_ch;
-} CellImage;
+} Image;
 
 /// A rectangular piece of an image to be drawn.
 typedef struct {
@@ -107,22 +107,22 @@ typedef struct {
 	int reverse;
 } ImageRect;
 
-static CellImage *gr_find_image(uint32_t image_id);
-static void gr_get_image_filename(CellImage *img, char *out, size_t max_len);
-static void gr_delete_image(CellImage *img);
+KHASH_MAP_INIT_INT(id2image, Image *)
+
+static Image *gr_find_image(uint32_t image_id);
+static void gr_get_image_filename(Image *img, char *out, size_t max_len);
+static void gr_delete_image(Image *img);
 static void gr_check_limits();
 static char *gr_base64dec(const char *src, size_t *size);
 
 /// The array of image rectangles to draw. It is reset each frame.
 static ImageRect image_rects[MAX_IMAGE_RECTS] = {{0}};
 /// The known images (including the ones being uploaded).
-static CellImage cell_images[MAX_CELL_IMAGES] = {{0}};
-/// The number of known images.
-static int images_count = 0;
+static khash_t(id2image) *images = NULL;
 /// The total size of all image files stored in the on-disk cache.
-static int32_t cell_images_disk_size = 0;
+static int32_t images_disk_size = 0;
 /// The total size of all images loaded into ram.
-static int32_t cell_images_ram_size = 0;
+static int32_t images_ram_size = 0;
 /// The id of the last loaded image.
 static uint32_t last_image_id = 0;
 /// Current cell width and heigh in pixels.
@@ -159,38 +159,36 @@ GraphicsCommandResult graphics_command_result = {0};
 ////////////////////////////////////////////////////////////////////////////////
 
 /// Finds the image corresponding to the client id. Returns NULL if cannot find.
-static CellImage *gr_find_image(uint32_t image_id) {
-	if (!image_id)
+static Image *gr_find_image(uint32_t image_id) {
+	khiter_t k = kh_get(id2image, images, image_id);
+	if (k == kh_end(images))
 		return NULL;
-	for (size_t i = 0; i < MAX_CELL_IMAGES; ++i) {
-		if (cell_images[i].image_id == image_id)
-			return &cell_images[i];
-	}
-	return NULL;
+	Image *res = kh_value(images, k);
+	return res;
 }
 
 /// Writes the name of the on-disk cache file to `out`. `max_len` should be the
 /// size of `out`. The name will be something like "/tmp/st-images-xxx/img-ID".
-static void gr_get_image_filename(CellImage *img, char *out, size_t max_len) {
+static void gr_get_image_filename(Image *img, char *out, size_t max_len) {
 	snprintf(out, max_len, "%s/img-%.3d", temp_dir, img->image_id);
 }
 
 /// Returns the (estimation) of the RAM size used by the image when loaded.
-static unsigned gr_image_ram_size(CellImage *img) {
+static unsigned gr_image_ram_size(Image *img) {
 	return (unsigned)img->rows * img->cols * img->scaled_ch *
 	       img->scaled_cw * 4;
 }
 
 /// Unload the image from RAM (i.e. delete the corresponding imlib object). If
 /// the on-disk file is preserved, it can be reloaded later.
-static void gr_unload_image(CellImage *img) {
+static void gr_unload_image(Image *img) {
 	if (!img->scaled_image)
 		return;
 
 	imlib_context_set_image(img->scaled_image);
 	imlib_free_image();
 
-	cell_images_ram_size -= gr_image_ram_size(img);
+	images_ram_size -= gr_image_ram_size(img);
 
 	img->scaled_image = NULL;
 	img->scaled_ch = img->scaled_cw = 0;
@@ -198,14 +196,14 @@ static void gr_unload_image(CellImage *img) {
 
 	if (graphics_debug_mode) {
 		fprintf(stderr, "After unloading image %u ram: %d KiB\n",
-			img->image_id, cell_images_ram_size / 1024);
+			img->image_id, images_ram_size / 1024);
 	}
 }
 
 /// Delete the on-disk cache file corresponding to the image. The in-ram image
 /// object (if it exists) is not deleted, so the image may still be displayed
 /// with the same cell width/height values.
-static void gr_delete_imagefile(CellImage *img) {
+static void gr_delete_imagefile(Image *img) {
 	// It may still be being loaded. Close the file in this case.
 	if (img->open_file) {
 		fclose(img->open_file);
@@ -219,33 +217,53 @@ static void gr_delete_imagefile(CellImage *img) {
 	gr_get_image_filename(img, filename, MAX_FILENAME_SIZE);
 	remove(filename);
 
-	cell_images_disk_size -= img->disk_size;
+	images_disk_size -= img->disk_size;
 	img->disk_size = 0;
 	if (img->status < STATUS_RAM_LOADING_SUCCESS)
 		img->status = STATUS_UPLOADING_ERROR;
 
 	if (graphics_debug_mode) {
 		fprintf(stderr, "After deleting image file %u disk: %d KiB\n",
-			img->image_id, cell_images_disk_size / 1024);
+			img->image_id, images_disk_size / 1024);
 	}
 }
 
-/// Deletes the given image (unloads, deletes the file, removes from images).
-/// The corresponding CellImage structure is zeroed out.
-static void gr_delete_image(CellImage *img) {
+/// Deletes the given image: unloads, deletes the file, frees the Image object,
+/// but doesn't change the `images` hash table.
+static void gr_delete_image_keep_id(Image *img) {
+	if (!img)
+		return;
 	gr_unload_image(img);
 	gr_delete_imagefile(img);
-	if (img->image_id)
-		images_count--;
-	memset(img, 0, sizeof(CellImage));
+	free(img);
+}
+
+/// Deletes the given image: unloads, deletes the file, frees the Image object,
+/// and also removes it from `images`.
+static void gr_delete_image(Image *img) {
+	if (!img)
+		return;
+	uint32_t id = img->image_id;
+	gr_delete_image_keep_id(img);
+	khiter_t k = kh_get(id2image, images, img->image_id);
+	kh_del(id2image, images, k);
+}
+
+/// Deletes all images and clears `images`.
+static void gr_delete_all_images() {
+	Image *img = NULL;
+	kh_foreach_value(images, img, {
+		gr_delete_image_keep_id(img);
+	});
+	kh_clear(id2image, images);
 }
 
 /// Returns the oldest image that is profitable to delete to free up disk space
-/// (if ram == 0) or RAM (if ram == 0).
-static CellImage *gr_get_image_to_delete(int ram) {
-	CellImage *oldest_image = NULL;
-	for (size_t i = 0; i < MAX_CELL_IMAGES; ++i) {
-		CellImage *img = &cell_images[i];
+/// (if ram == 0) or RAM (if ram == 1).
+static Image *gr_get_image_to_delete(int ram) {
+	Image *oldest_image = NULL;
+	Image *img = NULL;
+	kh_foreach_value(images, img, {
 		if (img->image_id == 0)
 			continue;
 		if (ram && !img->scaled_image)
@@ -255,7 +273,7 @@ static CellImage *gr_get_image_to_delete(int ram) {
 		if (!oldest_image ||
 		    difftime(img->atime, oldest_image->atime) < 0)
 			oldest_image = img;
-	}
+	});
 	if (graphics_debug_mode && oldest_image) {
 		fprintf(stderr, "Oldest image id %u\n", oldest_image->image_id);
 	}
@@ -267,53 +285,38 @@ static void gr_check_limits() {
 	if (graphics_debug_mode) {
 		fprintf(stderr,
 			"Checking limits ram: %d KiB disk: %d KiB count: %d\n",
-			cell_images_ram_size / 1024,
-			cell_images_disk_size / 1024, images_count);
+			images_ram_size / 1024,
+			images_disk_size / 1024, kh_size(images));
 	}
 	char changed = 0;
-	while (cell_images_disk_size > max_total_disk_size) {
+	while (images_disk_size > max_total_disk_size) {
 		gr_delete_imagefile(gr_get_image_to_delete(0));
 		changed = 1;
 	}
-	while (cell_images_ram_size > max_total_ram_size) {
+	while (images_ram_size > max_total_ram_size) {
 		gr_unload_image(gr_get_image_to_delete(1));
 		changed = 1;
 	}
 	if (graphics_debug_mode && changed) {
 		fprintf(stderr,
 			"After cleaning ram: %d KiB disk: %d KiB count: %d\n",
-			cell_images_ram_size / 1024,
-			cell_images_disk_size / 1024, images_count);
+			images_ram_size / 1024,
+			images_disk_size / 1024, kh_size(images));
 	}
-}
-
-/// Finds a free CellImage structure for a new image. If there are too many
-/// images, deletes the oldest image.
-static CellImage *gr_allocate_image() {
-	CellImage *oldest_image = NULL;
-	for (size_t i = 0; i < MAX_CELL_IMAGES; ++i) {
-		CellImage *img = &cell_images[i];
-		if (img->image_id == 0)
-			return img;
-		if (!oldest_image ||
-		    difftime(img->atime, oldest_image->atime) < 0)
-			oldest_image = img;
-	}
-	gr_delete_image(oldest_image);
-	return oldest_image;
 }
 
 /// Creates a new image with the given id. If an image with that id already
 /// exists, it is deleted first. The id must not be 0.
-static CellImage *gr_new_image(uint32_t id, int cols, int rows) {
+static Image *gr_new_image(uint32_t id, int cols, int rows) {
 	if (id == 0)
 		return NULL;
-	CellImage *image = gr_find_image(id);
-	if (image)
-		gr_delete_image(image);
-	else
-		image = gr_allocate_image();
-	images_count++;
+	Image *image = gr_find_image(id);
+	gr_delete_image_keep_id(image);
+	image = malloc(sizeof(Image));
+	memset(image, 0, sizeof(Image));
+	int ret;
+	khiter_t k = kh_put(id2image, images, id, &ret);
+	kh_value(images, k) = image;
 	image->image_id = id;
 	image->cols = cols;
 	image->rows = rows;
@@ -321,7 +324,7 @@ static CellImage *gr_new_image(uint32_t id, int cols, int rows) {
 }
 
 /// Update the atime of the image.
-static void gr_touch_image(CellImage *img) { time(&img->atime); }
+static void gr_touch_image(Image *img) { time(&img->atime); }
 
 ////////////////////////////////////////////////////////////////////////////////
 // Image loading.
@@ -465,7 +468,7 @@ static int gr_load_raw_pixel_data_compressed(DATA32 *data, FILE *file,
 
 /// Load the image from a file containing raw pixel data (RGB or RGBA), the data
 /// may be compressed.
-static Imlib_Image gr_load_raw_pixel_data(CellImage *img,
+static Imlib_Image gr_load_raw_pixel_data(Image *img,
 					  const char *filename) {
 	FILE* file = fopen(filename, "rb");
 	if (!file) {
@@ -514,7 +517,7 @@ static Imlib_Image gr_load_raw_pixel_data(CellImage *img,
 /// it will be reloaded only if the cell dimensions have changed.
 /// Loading may fail, in which case the status of the image will be set to
 /// STATUS_RAM_LOADING_ERROR.
-static void gr_load_image(CellImage *img, int cw, int ch) {
+static void gr_load_image(Image *img, int cw, int ch) {
 	// If it's already loaded with the same cw and ch, do nothing.
 	if (img->scaled_image && img->scaled_ch == ch && img->scaled_cw == cw)
 		return;
@@ -614,7 +617,7 @@ static void gr_load_image(CellImage *img, int cw, int ch) {
 	// Mark the image as loaded.
 	img->scaled_ch = ch;
 	img->scaled_cw = cw;
-	cell_images_ram_size += gr_image_ram_size(img);
+	images_ram_size += gr_image_ram_size(img);
 	img->status = STATUS_RAM_LOADING_SUCCESS;
 }
 
@@ -643,15 +646,19 @@ void gr_init(Display *disp, Visual *vis, Colormap cm) {
 	// Prepare for color inversion.
 	for (size_t i = 0; i < 256; ++i)
 		reverse_table[i] = 255 - i;
+
+	// Create data structures.
+	images = kh_init(id2image);
 }
 
 /// Deinitialize the graphics module.
 void gr_deinit() {
 	// Delete all images.
-	for (size_t i = 0; i < MAX_CELL_IMAGES; ++i)
-		gr_delete_image(&cell_images[i]);
+	gr_delete_all_images();
 	// Remove the cache dir.
 	remove(temp_dir);
+	// Destroy the data structures.
+	kh_destroy(id2image, images);
 }
 
 /// Executes `command` with the name of the file corresponding to `image_id` as
@@ -659,7 +666,7 @@ void gr_deinit() {
 void gr_preview_image(uint32_t image_id, const char *exec) {
 	char command[256];
 	size_t len;
-	CellImage *img = gr_find_image(image_id);
+	Image *img = gr_find_image(image_id);
 	if (img) {
 		char filename[MAX_FILENAME_SIZE];
 		gr_get_image_filename(img, filename, MAX_FILENAME_SIZE);
@@ -743,7 +750,7 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 	if (graphics_uploading)
 		return;
 
-	CellImage *img = gr_find_image(rect->image_id);
+	Image *img = gr_find_image(rect->image_id);
 	// If the image does not exist, display the bounding box and some info
 	// like the image id.
 	if (!img) {
@@ -831,8 +838,8 @@ void gr_finish_drawing(Drawable buf) {
 		snprintf(info, MAX_INFO_LEN,
 			 "Frame rendering time: %d ms  Image storage ram: %d "
 			 "KiB disk: %d KiB  count: %d",
-			 milliseconds, cell_images_ram_size / 1024,
-			 cell_images_disk_size / 1024, images_count);
+			 milliseconds, images_ram_size / 1024,
+			 images_disk_size / 1024, kh_size(images));
 		XSetForeground(disp, gc, 0x000000);
 		XFillRectangle(disp, buf, gc, 0, 0, 600, 16);
 		XSetForeground(disp, gc, 0xFFFFFF);
@@ -949,6 +956,8 @@ typedef struct {
 	int has_more;
 	/// 'S=', used to check the size of uploaded data.
 	int size;
+	/// 'U=', whether it's a virtual placement for Unicode placeholders.
+	int virtual;
 } GraphicsCommand;
 
 /// Creates a response to the current command in `graphics_command_result`.
@@ -976,7 +985,7 @@ static void gr_reportsuccess_cmd(GraphicsCommand *cmd) {
 }
 
 /// Creates the 'OK' response to the current command (unless suppressed).
-static void gr_reportsuccess_img(CellImage *img) {
+static void gr_reportsuccess_img(Image *img) {
 	if (img->quiet < 1)
 		gr_createresponse(img->image_id, 0, "OK");
 }
@@ -996,7 +1005,7 @@ static void gr_reporterror_cmd(GraphicsCommand *cmd, const char *format, ...) {
 }
 
 /// Creates an error response to the current command (unless suppressed).
-static void gr_reporterror_img(CellImage *img, const char *format, ...) {
+static void gr_reporterror_img(Image *img, const char *format, ...) {
 	char errmsg[MAX_GRAPHICS_RESPONSE_LEN];
 	graphics_command_result.error = 1;
 	va_list args;
@@ -1015,7 +1024,7 @@ static void gr_reporterror_img(CellImage *img, const char *format, ...) {
 }
 
 /// Loads an image and creates a success/failure response.
-static void gr_loadimage_and_report(CellImage *img) {
+static void gr_loadimage_and_report(Image *img) {
 	gr_load_image(img, current_cw, current_ch);
 	if (!img->scaled_image) {
 		gr_reporterror_img(img, "EBADF: could not load image");
@@ -1025,7 +1034,7 @@ static void gr_loadimage_and_report(CellImage *img) {
 }
 
 /// Creates an appropriate uploading failure response to the current command.
-static void gr_reportuploaderror(CellImage *img) {
+static void gr_reportuploaderror(Image *img) {
 	switch (img->uploading_failure) {
 	case 0:
 		return;
@@ -1052,7 +1061,7 @@ static void gr_reportuploaderror(CellImage *img) {
 /// Appends data from `payload` to the image `img` when using direct
 /// transmission. Note that we report errors only for the final command
 /// (`!more`) to avoid spamming the client.
-static void gr_append_data(CellImage *img, const char *payload, int more) {
+static void gr_append_data(Image *img, const char *payload, int more) {
 	if (!img)
 		img = gr_find_image(current_upload_image_id);
 	if (!more)
@@ -1107,7 +1116,7 @@ static void gr_append_data(CellImage *img, const char *payload, int more) {
 	fwrite(data, 1, data_size, img->open_file);
 	free(data);
 	img->disk_size += data_size;
-	cell_images_disk_size += data_size;
+	images_disk_size += data_size;
 	gr_touch_image(img);
 
 	if (more) {
@@ -1147,7 +1156,7 @@ static void gr_append_data(CellImage *img, const char *payload, int more) {
 }
 
 /// Copy some image parameters from `cmd` to `img`.
-static void gr_set_image_params_from_command(CellImage *img,
+static void gr_set_image_params_from_command(Image *img,
 					     GraphicsCommand *cmd) {
 	if (cmd->format != 0 && cmd->format != 32 && cmd->format != 24 &&
 	    cmd->compression != 0) {
@@ -1165,7 +1174,7 @@ static void gr_set_image_params_from_command(CellImage *img,
 }
 
 /// Handles a data transmission command.
-static CellImage *gr_transmit_data(GraphicsCommand *cmd) {
+static Image *gr_transmit_data(GraphicsCommand *cmd) {
 	if (cmd->image_number != 0) {
 		gr_reporterror_cmd(
 			cmd, "EINVAL: image numbers (I) are not supported");
@@ -1190,7 +1199,7 @@ static CellImage *gr_transmit_data(GraphicsCommand *cmd) {
 		}
 	}
 
-	CellImage *img = NULL;
+	Image *img = NULL;
 	if (cmd->transmission_medium == 'f' ||
 	    cmd->transmission_medium == 't') {
 		// File transmission.
@@ -1242,7 +1251,7 @@ static CellImage *gr_transmit_data(GraphicsCommand *cmd) {
 				stat(tmp_filename, &imgfile_stat);
 				img->status = STATUS_UPLOADING_SUCCESS;
 				img->disk_size = imgfile_stat.st_size;
-				cell_images_disk_size += img->disk_size;
+				images_disk_size += img->disk_size;
 				// Check whether the file is too large.
 				// TODO: Check it before copying.
 				if (img->disk_size > max_image_disk_size) {
@@ -1318,7 +1327,7 @@ static void gr_handle_put_command(GraphicsCommand *cmd) {
 	}
 
 	// Find the image with the id.
-	CellImage *img = gr_find_image(image_id);
+	Image *img = gr_find_image(image_id);
 	if (!img) {
 		gr_reporterror_cmd(cmd, "ENOENT: image not found");
 		return;
@@ -1347,17 +1356,14 @@ static void gr_handle_put_command(GraphicsCommand *cmd) {
 static void gr_handle_delete_command(GraphicsCommand *cmd) {
 	if (!cmd->delete_specifier) {
 		// With no delete specifier just delete everything.
-		for (size_t i = 0; i < MAX_CELL_IMAGES; ++i) {
-			if (cell_images[i].image_id)
-				gr_delete_image(&cell_images[i]);
-		}
+		gr_delete_all_images();
 	} else if (cmd->delete_specifier == 'I') {
 		// 'd=I' means delete the image with the given id, including the
 		// image data.
 		if (cmd->image_id == 0)
 			gr_reporterror_cmd(cmd,
 					   "EINVAL: no image id to delete");
-		CellImage *image = gr_find_image(cmd->image_id);
+		Image *image = gr_find_image(cmd->image_id);
 		if (image)
 			gr_delete_image(image);
 		gr_reportsuccess_cmd(cmd);
@@ -1370,7 +1376,7 @@ static void gr_handle_delete_command(GraphicsCommand *cmd) {
 
 /// Handles a command.
 static void gr_handle_command(GraphicsCommand *cmd) {
-	CellImage *img = NULL;
+	Image *img = NULL;
 	switch (cmd->action) {
 	case 0:
 		// If no action is specified, it may be a data transmission
@@ -1403,8 +1409,8 @@ static void gr_handle_command(GraphicsCommand *cmd) {
 
 /// Parses the value specified by `value_start` and `value_end` and assigns it
 /// to the field of `cmd` specified by `key_start` and `key_end`.
-static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start, char *key_end,
-			 char *value_start, char *value_end) {
+static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start,
+			    char *key_end, char *value_start, char *value_end) {
 	// Currently all keys are one-character.
 	if (key_end - key_start != 1) {
 		gr_reporterror_cmd(cmd, "EINVAL: unknown key of length %ld: %s",
@@ -1480,10 +1486,10 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start, char *key_end
 	case 'p':
 		cmd->placement_id = num;
 		if (num != 0 && num != 1) {
-			gr_reporterror_cmd(cmd,
-					   "EINVAL: placement id other than 0 "
-					   "or 1 is not supported: %s",
-					   key_start);
+			fprintf(stderr,
+				"WARNING: placement id other than 0 or 1 is "
+				"not supported: %s\n",
+				key_start);
 		}
 		break;
 	case 'c':
@@ -1500,13 +1506,7 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start, char *key_end
 		cmd->size = num;
 		break;
 	case 'U':
-		// Placement using unicode chars. If specified, it must be true
-		// since we don't support other forms of placement.
-		if (!num) {
-			gr_reporterror_cmd(cmd,
-					   "EINVAL: 'U' must be non-zero: %s",
-					   key_start);
-		}
+		cmd->virtual = num;
 		break;
 	case 'X':
 	case 'Y':
