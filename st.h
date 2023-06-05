@@ -12,13 +12,16 @@
 #define DEFAULT(a, b)		(a) = (a) ? (a) : (b)
 #define LIMIT(x, a, b)		(x) = (x) < (a) ? (a) : (x) > (b) ? (b) : (x)
 #define ATTRCMP(a, b)		((a).mode != (b).mode || (a).fg != (b).fg || \
-				(a).bg != (b).bg)
+				(a).bg != (b).bg || (a).decor != (b).decor)
 #define TIMEDIFF(t1, t2)	((t1.tv_sec-t2.tv_sec)*1000 + \
 				(t1.tv_nsec-t2.tv_nsec)/1E6)
 #define MODBIT(x, set, bit)	((set) ? ((x) |= (bit)) : ((x) &= ~(bit)))
 
 #define TRUECOLOR(r,g,b)	(1 << 24 | (r) << 16 | (g) << 8 | (b))
 #define IS_TRUECOL(x)		(1 << 24 & (x))
+
+#define DECOR_UNSET		0xffffffff
+#define IS_DECOR_UNSET(x)	((0xffffffff & (x)) == 0xffffffff)
 
 enum glyph_attribute {
 	ATTR_NULL       = 0,
@@ -66,6 +69,7 @@ typedef struct {
 	ushort mode;      /* attribute flags */
 	uint32_t fg;      /* foreground  */
 	uint32_t bg;      /* background  */
+	uint32_t decor;   /* decoration (like underline) */
 } Glyph;
 
 typedef Glyph *Line;

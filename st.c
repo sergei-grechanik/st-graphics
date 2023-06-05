@@ -1033,7 +1033,8 @@ treset(void)
 	term.c = (TCursor){{
 		.mode = ATTR_NULL,
 		.fg = defaultfg,
-		.bg = defaultbg
+		.bg = defaultbg,
+		.decor = DECOR_UNSET
 	}, .x = 0, .y = 0, .state = CURSOR_DEFAULT};
 
 	memset(term.tabs, 0, term.col * sizeof(*term.tabs));
@@ -1056,7 +1057,9 @@ treset(void)
 void
 tnew(int col, int row)
 {
-	term = (Term){ .c = { .attr = { .fg = defaultfg, .bg = defaultbg } } };
+	term = (Term){.c = {.attr = {.fg = defaultfg,
+				     .bg = defaultbg,
+				     .decor = DECOR_UNSET}}};
 	tresize(col, row);
 	treset();
 }
@@ -1264,6 +1267,7 @@ tclearregion(int x1, int y1, int x2, int y2)
 				selclear();
 			gp->fg = term.c.attr.fg;
 			gp->bg = term.c.attr.bg;
+			gp->decor = term.c.attr.decor;
 			gp->mode = 0;
 			gp->u = ' ';
 		}
@@ -1388,6 +1392,7 @@ tsetattr(const int *attr, int l)
 				ATTR_STRUCK     );
 			term.c.attr.fg = defaultfg;
 			term.c.attr.bg = defaultbg;
+			term.c.attr.decor = DECOR_UNSET;
 			break;
 		case 1:
 			term.c.attr.mode |= ATTR_BOLD;
@@ -1449,6 +1454,13 @@ tsetattr(const int *attr, int l)
 			break;
 		case 49:
 			term.c.attr.bg = defaultbg;
+			break;
+		case 58:
+			if ((idx = tdefcolor(attr, &i, l)) >= 0)
+				term.c.attr.decor = idx;
+			break;
+		case 59:
+			term.c.attr.decor = DECOR_UNSET;
 			break;
 		default:
 			if (BETWEEN(attr[i], 30, 37)) {

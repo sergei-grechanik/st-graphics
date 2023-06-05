@@ -1534,14 +1534,29 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 	/* Render the glyphs. */
 	XftDrawGlyphFontSpec(xw.draw, fg, specs, len);
 
+	/* Decoration color. */
+	Color *decor = fg;
+	if (IS_DECOR_UNSET(base.decor)) {
+		decor = fg;
+	} else if (IS_TRUECOL(base.decor)) {
+		colfg.alpha = 0xffff;
+		colfg.red = TRUERED(base.decor);
+		colfg.green = TRUEGREEN(base.decor);
+		colfg.blue = TRUEBLUE(base.decor);
+		XftColorAllocValue(xw.dpy, xw.vis, xw.cmap, &colfg, &truefg);
+		decor = &truefg;
+	} else {
+		decor = &dc.col[base.decor];
+	}
+
 	/* Render underline and strikethrough. */
 	if (base.mode & ATTR_UNDERLINE) {
-		XftDrawRect(xw.draw, fg, winx, winy + dc.font.ascent * chscale + 1,
+		XftDrawRect(xw.draw, decor, winx, winy + dc.font.ascent * chscale + 1,
 				width, 1);
 	}
 
 	if (base.mode & ATTR_STRUCK) {
-		XftDrawRect(xw.draw, fg, winx, winy + 2 * dc.font.ascent * chscale / 3,
+		XftDrawRect(xw.draw, decor, winx, winy + 2 * dc.font.ascent * chscale / 3,
 				width, 1);
 	}
 
