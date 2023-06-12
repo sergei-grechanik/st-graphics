@@ -62,6 +62,7 @@ static void zoomreset(const Arg *);
 static void ttysend(const Arg *);
 static void previewimage(const Arg *);
 static void togglegrdebug(const Arg *);
+static void dumpgrstate(const Arg *);
 
 /* config.h for applying patches and the configuration. */
 #include "config.h"
@@ -354,6 +355,12 @@ togglegrdebug(const Arg *arg)
 {
 	graphics_debug_mode = !graphics_debug_mode;
 	redraw();
+}
+
+void
+dumpgrstate(const Arg *arg)
+{
+	gr_dump_state();
 }
 
 int
@@ -1672,13 +1679,16 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 
 /* Draw (or queue for drawing) image cells between columns x1 and x2 assuming
  * that they have the same attributes (and thus the same lower 24 bits of the
- * image ID). */
+ * image ID and the same placement ID). */
 void
 xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 	int x_pix_start = win.hborderpx + x1 * win.cw;
 	int x_pix = x_pix_start;
 	int y_pix = win.vborderpx + y1 * win.ch;
 	uint32_t image_id_24bits = base.fg & 0xFFFFFF;
+	uint32_t placement_id = base.decor & 0xFFFFFF;
+	if (IS_DECOR_UNSET(base.decor))
+		placement_id = 0;
 	uint8_t last_id_additional_byte = 0;
 	// Columns and rows are 1-based, 0 means unspecified.
 	int last_col = 0;
@@ -1712,9 +1722,10 @@ xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 					    (last_id_additional_byte << 24);
 			if (last_row != 0)
 				gr_append_imagerect(
-					xw.buf, image_id, last_start_col - 1,
-					last_col, last_row - 1, last_row, x_pix,
-					y_pix, win.cw, win.ch,
+					xw.buf, image_id, placement_id,
+					last_start_col - 1, last_col,
+					last_row - 1, last_row, x_pix, y_pix,
+					win.cw, win.ch,
 					base.mode & ATTR_REVERSE);
 			last_start_col = cur_col;
 			x_pix = x_pix_start + i*win.cw;
@@ -1734,9 +1745,9 @@ xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 			    (last_id_additional_byte << 24);
 	// Draw the last contiguous stripe.
 	if (last_row != 0)
-		gr_append_imagerect(xw.buf, image_id, last_start_col - 1,
-				    last_col, last_row - 1, last_row, x_pix,
-				    y_pix, win.cw, win.ch,
+		gr_append_imagerect(xw.buf, image_id, placement_id,
+				    last_start_col - 1, last_col, last_row - 1,
+				    last_row, x_pix, y_pix, win.cw, win.ch,
 				    base.mode & ATTR_REVERSE);
 }
 
@@ -2050,6 +2061,7 @@ cmessage(XEvent *e)
 		}
 	} else if (e->xclient.data.l[0] == xw.wmdeletewin) {
 		ttyhangup();
+		gr_deinit();
 		exit(0);
 	}
 }
@@ -2251,8 +2263,6 @@ run:
 	xsetenv();
 	selinit();
 	run();
-
-	gr_deinit();
 
 	return 0;
 }

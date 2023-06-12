@@ -14,9 +14,9 @@ void gr_deinit();
 /// - `start_col` and `start_row` are zero-based.
 /// - `end_col` and `end_row` are exclusive (beyond the last col/row).
 /// - `reverse` indicates whether colors should be inverted.
-void gr_append_imagerect(Drawable buf, uint32_t image_id, int start_col,
-			 int end_col, int start_row, int end_row, int x_pix,
-			 int y_pix, int cw, int ch, int reverse);
+void gr_append_imagerect(Drawable buf, uint32_t image_id, uint32_t placement_id,
+			 int start_col, int end_col, int start_row, int end_row,
+			 int x_pix, int y_pix, int cw, int ch, int reverse);
 /// Prepare for image drawing. `cw` and `ch` are dimensions of the cell.
 void gr_start_drawing(Drawable buf, int cw, int ch);
 /// Finish image drawing. This functions will draw all the rectangles left to
@@ -31,6 +31,9 @@ int gr_parse_command(char *buf, size_t len);
 /// Executes `command` with the name of the file corresponding to `image_id` as
 /// the argument. Executes xmessage with an error message on failure.
 void gr_preview_image(uint32_t image_id, const char *command);
+
+/// Dumps the internal state (images and placements) to stderr.
+void gr_dump_state();
 
 /// Checks if we are still really uploading something. Returns 1 if we may be
 /// and 0 if we aren't. This is more precise than `graphics_uploading` (and may
