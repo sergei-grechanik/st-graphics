@@ -206,6 +206,8 @@ static char temp_dir[] = "/tmp/st-images-XXXXXX";
 static size_t max_image_disk_size = 20 * 1024 * 1024;
 /// The max size of the on-disk cache, in bytes.
 static int max_total_disk_size = 300 * 1024 * 1024;
+/// The max ram size of an image or placement, in bytes.
+static size_t max_image_ram_size = 100 * 1024 * 1024;
 /// The max total size of all images loaded into RAM.
 static int max_total_ram_size = 300 * 1024 * 1024;
 
@@ -724,6 +726,14 @@ static int gr_load_raw_pixel_data_compressed(DATA32 *data, FILE *file,
 /// may be compressed.
 static Imlib_Image gr_load_raw_pixel_data(Image *img,
 					  const char *filename) {
+	size_t total_pixels = img->pix_width * img->pix_height;
+	if (total_pixels > max_image_ram_size) {
+		fprintf(stderr,
+			"error: image %u is too big too load: %zu > %zu\n",
+			img->image_id, total_pixels, max_image_ram_size);
+		return NULL;
+	}
+
 	FILE* file = fopen(filename, "rb");
 	if (!file) {
 		fprintf(stderr,
@@ -732,7 +742,6 @@ static Imlib_Image gr_load_raw_pixel_data(Image *img,
 		return NULL;
 	}
 
-	size_t total_pixels = img->pix_width * img->pix_height;
 	Imlib_Image image = imlib_create_image(img->pix_width, img->pix_height);
 	if (!image) {
 		fprintf(stderr,
@@ -844,6 +853,14 @@ static void gr_load_placement(ImagePlacement *placement, int cw, int ch) {
 	// Create the scaled image.
 	int scaled_w = (int)placement->cols * cw;
 	int scaled_h = (int)placement->rows * ch;
+	if (scaled_w * scaled_h * 4 > max_image_ram_size) {
+		fprintf(stderr,
+			"error: placement %u/%u would be too big to load: %d x "
+			"%d x 4 > %zu\n",
+			img->image_id, placement->placement_id, scaled_w,
+			scaled_h, max_image_ram_size);
+		return;
+	}
 	placement->scaled_image = imlib_create_image(scaled_w, scaled_h);
 	if (!placement->scaled_image) {
 		fprintf(stderr,
