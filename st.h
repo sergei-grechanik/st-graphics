@@ -131,3 +131,45 @@ extern unsigned int tabspaces;
 extern unsigned int defaultfg;
 extern unsigned int defaultbg;
 extern unsigned int defaultcs;
+
+// Some accessors to image placeholder properties. The row, column, and the most
+// significant byte of the image id are stored in `u`: 11 bits for the row, 12
+// bits for the column, 9 bits for the most significant byte of the image ID.
+// Everything is 1-base, 0 means "not specified", that's why we need 9 bits for
+// the most significant byte. Don't forget to add/subtract 1.
+static inline uint32_t tgetimgrow(Glyph *g) { return g->u & 0x7ff; }
+static inline uint32_t tgetimgcol(Glyph *g) { return (g->u >> 11) & 0xfff; }
+static inline uint32_t tgetimgid4thbyteplus1(Glyph *g) { return (g->u >> 23) & 0x1ff; }
+static inline void tsetimgrow(Glyph *g, uint32_t row) {
+	g->u = (g->u & ~0x7ff) | (row & 0x7ff);
+}
+static inline void tsetimgcol(Glyph *g, uint32_t row) {
+	g->u = (g->u & ~(0xfff << 11)) | ((row & 0xfff) << 11);
+}
+static inline void tsetimg4thbyteplus1(Glyph *g, uint32_t byteplus1) {
+	g->u = (g->u & ~(0x1ff << 23)) | ((byteplus1 & 0x1ff) << 23);
+}
+
+/// Returns the full image id. This is a naive implementation, if the most
+/// significant byte is not specified, it's assumed to be 0 instead of inferring
+/// it from the cells to the left.
+static inline uint32_t tgetimgid(Glyph *g) {
+	uint32_t msb = tgetimgid4thbyteplus1(g);
+	if (msb != 0)
+		--msb;
+	return (msb << 24) | (g->fg & 0xFFFFFF);
+}
+
+/// Sets the full image id.
+static inline void tsetimgid(Glyph *g, uint32_t id) {
+	g->fg = (id & 0xFFFFFF) | (1 << 24);
+	tsetimg4thbyteplus1(g, ((id >> 24) & 0xFF) + 1);
+}
+
+static inline uint32_t tgetimgplacementid(Glyph *g) {
+	return g->decor & 0xFFFFFF;
+}
+
+static inline void tsetimgplacementid(Glyph *g, uint32_t id) {
+	g->decor = (id & 0xFFFFFF) | (1 << 24);
+}

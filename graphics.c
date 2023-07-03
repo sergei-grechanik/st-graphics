@@ -110,6 +110,9 @@ KHASH_MAP_INIT_INT(id2placement, struct ImagePlacement *)
 typedef struct Image {
 	/// The client id (the one specified with 'i='). Must be nonzero.
 	uint32_t image_id;
+	/// The client id specified in the query command (`a=q`). This one must
+	/// be used to create the response if it's non-zero.
+	uint32_t query_id;
 	/// The last time when the image was displayed or otherwise touched.
 	time_t atime;
 	/// The size of the corresponding file cached on disk.
@@ -148,6 +151,8 @@ typedef struct ImagePlacement {
 	time_t atime;
 	/// Whether the placement shouldn't be unloaded from RAM.
 	char protected;
+	/// Whether the placement is used only for Unicode placeholders.
+	char virtual;
 	/// The scaling mode (see `ScaleMode`).
 	char scale_mode;
 	/// Height and width in cells.
@@ -559,10 +564,10 @@ static Image *gr_new_image(uint32_t id) {
 static ImagePlacement *gr_new_placement(Image *img, uint32_t id) {
 	if (id == 0) {
 		do {
-			id = rand();
-			// Avoid IDs that don't need full 32 bits.
-		} while ((id & 0xFF000000) == 0 || (id & 0x00FFFF00) == 0 ||
-			 gr_find_placement(img, id));
+			// Currently we support only 24-bit IDs.
+			id = rand() & 0xFFFFFF;
+			// Avoid IDs that need only one byte.
+		} while ((id & 0x00FFFF00) == 0 || gr_find_placement(img, id));
 	}
 	ImagePlacement *placement = gr_find_placement(img, id);
 	gr_delete_placement_keep_id(placement);
@@ -580,6 +585,22 @@ static ImagePlacement *gr_new_placement(Image *img, uint32_t id) {
 	if (img->default_placement == 0)
 		img->default_placement = id;
 	return placement;
+}
+
+/// Computes the best number of rows and columns for a placement if it's not
+/// specified.
+static void gr_infer_placement_size_maybe(ImagePlacement *placement) {
+	if (placement->cols != 0 || placement->rows != 0)
+		return;
+	if (placement->image->pix_width == 0 ||
+	    placement->image->pix_height == 0)
+		return;
+	if (current_cw == 0 || current_ch == 0)
+		return;
+	placement->cols =
+		(placement->image->pix_width + current_cw - 1) / current_cw;
+	placement->rows =
+		(placement->image->pix_height + current_ch - 1) / current_ch;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -677,8 +698,9 @@ static int gr_load_raw_pixel_data_compressed(DATA32 *data, FILE *file,
 			error = 1;
 			fprintf(stderr,
 				"error: could not decompress the image, error "
-				"%d\n",
-				ret);
+				"%s\n",
+				ret == Z_MEM_ERROR ? "Z_MEM_ERROR"
+						   : "Z_DATA_ERROR");
 			break;
 		}
 
@@ -849,6 +871,9 @@ static void gr_load_placement(ImagePlacement *placement, int cw, int ch) {
 	gr_load_image(img);
 	if (!img->original_image)
 		return;
+
+	// Infer the placement size if needed.
+	gr_infer_placement_size_maybe(placement);
 
 	// Create the scaled image.
 	int scaled_w = (int)placement->cols * cw;
@@ -1382,7 +1407,11 @@ typedef struct {
 	/// 'm=', may be 0 or 1.
 	int more;
 	/// True if either 'm=0' or 'm=1' is specified.
-	int has_more;
+	char is_data_transmission;
+	/// True if turns out that this command is a continuation of a data
+	/// transmission and not the first one for this image. Populated by
+	/// `gr_handle_transmit_command`.
+	char is_direct_transmission_continuation;
 	/// 'S=', used to check the size of uploaded data.
 	int size;
 	/// 'U=', whether it's a virtual placement for Unicode placeholders.
@@ -1415,8 +1444,9 @@ static void gr_reportsuccess_cmd(GraphicsCommand *cmd) {
 
 /// Creates the 'OK' response to the current command (unless suppressed).
 static void gr_reportsuccess_img(Image *img) {
+	uint32_t id = img->query_id ? img->query_id : img->image_id;
 	if (img->quiet < 1)
-		gr_createresponse(img->image_id, 0, "OK");
+		gr_createresponse(id, 0, "OK");
 }
 
 /// Creates an error response to the current command (unless suppressed).
@@ -1446,20 +1476,28 @@ static void gr_reporterror_img(Image *img, const char *format, ...) {
 		fprintf(stderr, "%s\n", errmsg);
 		gr_createresponse(0, 0, errmsg);
 	} else {
-		fprintf(stderr, "%s  id=%u\n", errmsg, img->image_id);
+		uint32_t id = img->query_id ? img->query_id : img->image_id;
+		fprintf(stderr, "%s  id=%u\n", errmsg, id);
 		if (img->quiet < 2)
-			gr_createresponse(img->image_id, 0, errmsg);
+			gr_createresponse(id, 0, errmsg);
 	}
 }
 
-/// Loads an image and creates a success/failure response.
-static void gr_loadimage_and_report(Image *img) {
+/// Loads an image and creates a success/failure response. Returns `img`, or
+/// NULL if it's a query action and the image was deleted.
+static Image *gr_loadimage_and_report(Image *img) {
 	gr_load_image(img);
 	if (!img->original_image) {
 		gr_reporterror_img(img, "EBADF: could not load image");
 	} else {
 		gr_reportsuccess_img(img);
 	}
+	// If it was a query action, discard the image.
+	if (img->query_id) {
+		gr_delete_image(img);
+		return NULL;
+	}
+	return img;
 }
 
 /// Creates an appropriate uploading failure response to the current command.
@@ -1485,6 +1523,30 @@ static void gr_reportuploaderror(Image *img) {
 				   img->disk_size, img->expected_size);
 		break;
 	};
+}
+
+/// Displays a non-virtual placement. This functions records the information in
+/// `graphics_command_result`, the placeholder itself is created by the terminal
+/// after handling the current command in the graphics module.
+static void gr_display_nonvirtual_placement(ImagePlacement *placement) {
+	if (placement->virtual)
+		return;
+	if (placement->image->status < STATUS_RAM_LOADING_SUCCESS)
+		return;
+	// Infer the placement size if needed.
+	gr_infer_placement_size_maybe(placement);
+	// Populate the information about the placeholder which will be created
+	// by the terminal.
+	graphics_command_result.create_placeholder = 1;
+	graphics_command_result.placeholder.image_id = placement->image->image_id;
+	graphics_command_result.placeholder.placement_id = placement->placement_id;
+	graphics_command_result.placeholder.columns = placement->cols;
+	graphics_command_result.placeholder.rows = placement->rows;
+	if (graphics_debug_mode) {
+		fprintf(stderr, "Creating a placeholder for %u/%u  %d x %d\n",
+			placement->image->image_id, placement->placement_id,
+			placement->cols, placement->rows);
+	}
 }
 
 /// Appends data from `payload` to the image `img` when using direct
@@ -1576,7 +1638,15 @@ static void gr_append_data(Image *img, const char *payload, int more) {
 			gr_reportuploaderror(img);
 		} else {
 			// Try to load the image into ram and report the result.
-			gr_loadimage_and_report(img);
+			img = gr_loadimage_and_report(img);
+			if (img) {
+				// If there is a non-virtual image placement, we
+				// may need to display it.
+				ImagePlacement *placement = NULL;
+				kh_foreach_value(img->placements, placement, {
+					gr_display_nonvirtual_placement(placement);
+				});
+			}
 		}
 	}
 
@@ -1584,14 +1654,23 @@ static void gr_append_data(Image *img, const char *payload, int more) {
 	gr_check_limits();
 }
 
-/// Copy some image parameters from `cmd` to `img`.
-static void gr_set_image_params_from_command(Image *img,
-					     GraphicsCommand *cmd) {
+/// Create a new image and initialize its parameters from the command.
+static Image *gr_new_image_from_command(GraphicsCommand *cmd) {
 	if (cmd->format != 0 && cmd->format != 32 && cmd->format != 24 &&
 	    cmd->compression != 0) {
 		gr_reporterror_cmd(cmd, "EINVAL: compression is supported only "
 					"for raw pixel data (f=32 or f=24)");
+		return NULL;
 	}
+	// Create an image object. If the action is `q`, we'll use random id
+	// instead of the one specified in the command.
+	uint32_t image_id = cmd->action == 'q' ? 0 : cmd->image_id;
+	Image *img = gr_new_image(image_id);
+	if (!img)
+		return NULL;
+	if (cmd->action == 'q')
+		img->query_id = cmd->image_id;
+	// Set parameters.
 	img->expected_size = cmd->size;
 	img->format = cmd->format;
 	img->compression = cmd->compression;
@@ -1600,10 +1679,11 @@ static void gr_set_image_params_from_command(Image *img,
 	// We save the quietness information in the image because for direct
 	// transmission subsequent transmission command won't contain this info.
 	img->quiet = cmd->quiet;
+	return img;
 }
 
 /// Handles a data transmission command.
-static Image *gr_transmit_data(GraphicsCommand *cmd) {
+static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 	if (cmd->image_number != 0) {
 		gr_reporterror_cmd(
 			cmd, "EINVAL: image numbers (I) are not supported");
@@ -1614,18 +1694,12 @@ static Image *gr_transmit_data(GraphicsCommand *cmd) {
 	if (!cmd->transmission_medium)
 		cmd->transmission_medium = 'd';
 
-	if (cmd->image_id == 0) {
-		if (cmd->image_id == 0 && cmd->image_number == 0 &&
-		    cmd->transmission_medium == 'd') {
-			// This is a continuation of the previous transmission
-			// with an implicit image id.
-			cmd->image_id = current_upload_image_id;
-		} else {
-			gr_reporterror_cmd(
-				cmd,
-				"EINVAL: image id is not specified or zero");
-			return NULL;
-		}
+	// If neither id, nor image number is specified, and the transmission
+	// medium is 'd' (or unspecified), and there is an active direct upload,
+	// this is a continuation of the upload.
+	if (current_upload_image_id != 0 && cmd->image_id == 0 &&
+	    cmd->image_number == 0 && cmd->transmission_medium == 'd') {
+		cmd->image_id = current_upload_image_id;
 	}
 
 	Image *img = NULL;
@@ -1635,11 +1709,10 @@ static Image *gr_transmit_data(GraphicsCommand *cmd) {
 		// TODO: Delete the file if the medium is 't' and the file is in
 		//       a known temporary directory.
 		// Create a new image structure.
-		img = gr_new_image(cmd->image_id);
+		img = gr_new_image_from_command(cmd);
 		if (!img)
 			return NULL;
-		gr_set_image_params_from_command(img, cmd);
-		last_image_id = cmd->image_id;
+		last_image_id = img->image_id;
 		// Decode the filename.
 		char *original_filename = gr_base64dec(cmd->payload, NULL);
 		// We will create a symlink to the original file, and then copy
@@ -1701,7 +1774,7 @@ static Image *gr_transmit_data(GraphicsCommand *cmd) {
 					gr_reportuploaderror(img);
 				} else {
 					// Everything seems fine, try to load.
-					gr_loadimage_and_report(img);
+					img = gr_loadimage_and_report(img);
 				}
 			}
 			// Delete the symlink.
@@ -1714,15 +1787,15 @@ static Image *gr_transmit_data(GraphicsCommand *cmd) {
 		img = gr_find_image(cmd->image_id);
 		if (img && img->status == STATUS_UPLOADING) {
 			// This is a continuation of the previous transmission.
+			cmd->is_direct_transmission_continuation = 1;
 			gr_append_data(img, cmd->payload, cmd->more);
 			return img;
 		}
 		// Otherwise create a new image structure.
-		img = gr_new_image(cmd->image_id);
+		img = gr_new_image_from_command(cmd);
 		if (!img)
 			return NULL;
-		gr_set_image_params_from_command(img, cmd);
-		last_image_id = cmd->image_id;
+		last_image_id = img->image_id;
 		img->status = STATUS_UPLOADING;
 		graphics_uploading++;
 		// Start appending data.
@@ -1765,10 +1838,12 @@ static void gr_handle_put_command(GraphicsCommand *cmd) {
 	// Create a placement. If a placement with the same id already exists,
 	// it will be deleted. If the id is zero, a random id will be generated.
 	ImagePlacement *placement = gr_new_placement(img, cmd->placement_id);
+	placement->virtual = cmd->virtual;
 	placement->cols = cmd->columns;
 	placement->rows = cmd->rows;
 
-	// TODO: Handle non-virtual placements.
+	// Display the placement unless it's virtual.
+	gr_display_nonvirtual_placement(placement);
 }
 
 /// Handles the delete command.
@@ -1800,14 +1875,17 @@ static void gr_handle_command(GraphicsCommand *cmd) {
 	case 0:
 		// If no action is specified, it may be a data transmission
 		// command if 'm=' is specified.
-		if (cmd->has_more)
+		if (cmd->is_data_transmission) {
 			gr_append_data(NULL, cmd->payload, cmd->more);
-		else
-			gr_reporterror_cmd(cmd, "EINVAL: no action specified");
+			break;
+		}
+		gr_reporterror_cmd(cmd, "EINVAL: no action specified");
 		break;
 	case 't':
-		// Transmit data.
-		gr_transmit_data(cmd);
+	case 'q':
+		// Transmit data. 'q' means query, which is basically the same
+		// as transmit, but the image is discarded, and the id is fake.
+		gr_handle_transmit_command(cmd);
 		break;
 	case 'p':
 		// Display (put) the image.
@@ -1815,14 +1893,14 @@ static void gr_handle_command(GraphicsCommand *cmd) {
 		break;
 	case 'T':
 		// Transmit and display.
-		if (gr_transmit_data(cmd))
+		if (gr_handle_transmit_command(cmd) &&
+		    !cmd->is_direct_transmission_continuation) {
 			gr_handle_put_command(cmd);
+		}
 		break;
 	case 'd':
 		gr_handle_delete_command(cmd);
 		break;
-	case 'q':
-		// query
 	default:
 		gr_reporterror_cmd(cmd, "EINVAL: unsupported action: %c",
 				   cmd->action);
@@ -1916,7 +1994,7 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start,
 		cmd->rows = num;
 		break;
 	case 'm':
-		cmd->has_more = 1;
+		cmd->is_data_transmission = 1;
 		cmd->more = num;
 		break;
 	case 'S':

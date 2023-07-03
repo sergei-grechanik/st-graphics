@@ -59,6 +59,14 @@ typedef struct {
 	/// Whether there was an error executing this command (not very useful,
 	/// the response must be sent back anyway).
 	char error;
+	/// Whether the terminal has to create a placeholder for a non-virtual
+	/// placement.
+	char create_placeholder;
+	/// The placeholder that needs to be created.
+	struct {
+		uint32_t rows, columns;
+		uint32_t image_id, placement_id;
+	} placeholder;
 } GraphicsCommandResult;
 
 /// The result of a graphics command.
