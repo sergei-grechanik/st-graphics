@@ -238,7 +238,8 @@ static const uchar utfmask[UTF_SIZ + 1] = {0xC0, 0x80, 0xE0, 0xF0, 0xF8};
 static const Rune utfmin[UTF_SIZ + 1] = {       0,    0,  0x80,  0x800,  0x10000};
 static const Rune utfmax[UTF_SIZ + 1] = {0x10FFFF, 0x7F, 0x7FF, 0xFFFF, 0x10FFFF};
 
-/* Defined in rowcolumn_diacritics_helpers.c */
+/* Converts a diacritic to a row/column/etc number. The result is 1-base, 0
+ * means "couldn't convert". Defined in rowcolumn_diacritics_helpers.c */
 uint16_t diacritic_to_num(uint32_t code);
 
 ssize_t
@@ -1033,7 +1034,8 @@ treset(void)
 	term.c = (TCursor){{
 		.mode = ATTR_NULL,
 		.fg = defaultfg,
-		.bg = defaultbg
+		.bg = defaultbg,
+		.decor = DECOR_UNSET
 	}, .x = 0, .y = 0, .state = CURSOR_DEFAULT};
 
 	memset(term.tabs, 0, term.col * sizeof(*term.tabs));
@@ -1056,7 +1058,9 @@ treset(void)
 void
 tnew(int col, int row)
 {
-	term = (Term){ .c = { .attr = { .fg = defaultfg, .bg = defaultbg } } };
+	term = (Term){.c = {.attr = {.fg = defaultfg,
+				     .bg = defaultbg,
+				     .decor = DECOR_UNSET}}};
 	tresize(col, row);
 	treset();
 }
@@ -1264,9 +1268,39 @@ tclearregion(int x1, int y1, int x2, int y2)
 				selclear();
 			gp->fg = term.c.attr.fg;
 			gp->bg = term.c.attr.bg;
+			gp->decor = term.c.attr.decor;
 			gp->mode = 0;
 			gp->u = ' ';
 		}
+	}
+}
+
+/// Fills a rectangle area with an image placeholder. The starting point is the
+/// cursor. Adds empty lines if needed.
+void
+tcreateimgplaceholder(uint32_t image_id, uint32_t placement_id,
+		      int cols, int rows)
+{
+	for (int row = 0; row < rows; ++row) {
+		int y = term.c.y;
+		term.dirty[y] = 1;
+		for (int col = 0; col < cols; ++col) {
+			int x = term.c.x + col;
+			if (x >= term.col)
+				break;
+			Glyph *gp = &term.line[y][x];
+			if (selected(x, y))
+				selclear();
+			gp->mode = ATTR_IMAGE;
+			gp->u = 0;
+			tsetimgrow(gp, row + 1);
+			tsetimgcol(gp, col + 1);
+			tsetimgid(gp, image_id);
+			tsetimgplacementid(gp, placement_id);
+		}
+		// Move the cursor down, maybe creating a new line. The x is
+		// preserved.
+		tnewline(0);
 	}
 }
 
@@ -1388,6 +1422,7 @@ tsetattr(const int *attr, int l)
 				ATTR_STRUCK     );
 			term.c.attr.fg = defaultfg;
 			term.c.attr.bg = defaultbg;
+			term.c.attr.decor = DECOR_UNSET;
 			break;
 		case 1:
 			term.c.attr.mode |= ATTR_BOLD;
@@ -1449,6 +1484,13 @@ tsetattr(const int *attr, int l)
 			break;
 		case 49:
 			term.c.attr.bg = defaultbg;
+			break;
+		case 58:
+			if ((idx = tdefcolor(attr, &i, l)) >= 0)
+				term.c.attr.decor = idx;
+			break;
+		case 59:
+			term.c.attr.decor = DECOR_UNSET;
 			break;
 		default:
 			if (BETWEEN(attr[i], 30, 37)) {
@@ -1997,9 +2039,15 @@ strhandle(void)
 	case '_': /* APC -- Application Program Command */
 		if (gr_parse_command(strescseq.buf, strescseq.len)) {
 			GraphicsCommandResult *res = &graphics_command_result;
-			if (res->response[0]) {
-				ttywriteraw(res->response, strlen(res->response));
+			if (res->create_placeholder) {
+				tcreateimgplaceholder(
+					res->placeholder.image_id,
+					res->placeholder.placement_id,
+					res->placeholder.columns,
+					res->placeholder.rows);
 			}
+			if (res->response[0])
+				ttywriteraw(res->response, strlen(res->response));
 			if (res->redraw)
 				redraw();
 			return;
@@ -2521,16 +2569,12 @@ check_control_code:
 			gp = &term.line[term.c.y][term.c.x-1];
 		uint16_t num = diacritic_to_num(u);
 		if (num && (gp->mode & ATTR_IMAGE)) {
-			// 11 bits for the row, 12 bits for the column, 9 bits
-			// for the most significant byte of the image ID (we
-			// need to know if it's specified, so we need 9 bits
-			// instead of 8).
-			if (!(gp->u & 0x000007FF))
-				gp->u |= (num & 0x7FF);
-			else if (!(gp->u & 0x007FF800))
-				gp->u |= (num & 0xFFF) << 11;
-			else if (!(gp->u & 0xFF800000))
-				gp->u |= ((num - 1) & 0xFF) << 23 | 0x80000000;
+			if (!tgetimgrow(gp))
+				tsetimgrow(gp, num);
+			else if (!tgetimgcol(gp))
+				tsetimgcol(gp, num);
+			else if (!tgetimgid4thbyteplus1(gp))
+				tsetimg4thbyteplus1(gp, num);
 		}
 		term.lastc = u;
 		return;

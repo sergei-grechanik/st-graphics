@@ -4,6 +4,7 @@
 #include <limits.h>
 #include <locale.h>
 #include <signal.h>
+#include <stdio.h>
 #include <sys/select.h>
 #include <time.h>
 #include <unistd.h>
@@ -62,6 +63,7 @@ static void zoomreset(const Arg *);
 static void ttysend(const Arg *);
 static void previewimage(const Arg *);
 static void togglegrdebug(const Arg *);
+static void dumpgrstate(const Arg *);
 
 /* config.h for applying patches and the configuration. */
 #include "config.h"
@@ -265,11 +267,6 @@ static char *opt_title = NULL;
 
 static uint buttons; /* bit field of pressed buttons */
 
-static uint32_t
-getimageid(Glyph g) {
-	return ((g.u >> 23) & 0xFF) << 24 | (g.fg & 0xFFFFFF);
-}
-
 void
 clipcopy(const Arg *dummy)
 {
@@ -349,7 +346,10 @@ previewimage(const Arg *arg)
 {
 	Glyph g = getglyphat(mouse_col, mouse_row);
 	if (g.mode & ATTR_IMAGE) {
-		uint32_t image_id = getimageid(g);
+		uint32_t image_id = tgetimgid(&g);
+		fprintf(stderr, "Clicked on placeholder %u/%u, x=%d, y=%d\n",
+			image_id, tgetimgplacementid(&g), tgetimgcol(&g),
+			tgetimgrow(&g));
 		gr_preview_image(image_id, arg->s);
 	}
 }
@@ -359,6 +359,12 @@ togglegrdebug(const Arg *arg)
 {
 	graphics_debug_mode = !graphics_debug_mode;
 	redraw();
+}
+
+void
+dumpgrstate(const Arg *arg)
+{
+	gr_dump_state();
 }
 
 int
@@ -1552,14 +1558,29 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 	/* Render the glyphs. */
 	XftDrawGlyphFontSpec(xw.draw, fg, specs, len);
 
+	/* Decoration color. */
+	Color *decor = fg;
+	if (IS_DECOR_UNSET(base.decor)) {
+		decor = fg;
+	} else if (IS_TRUECOL(base.decor)) {
+		colfg.alpha = 0xffff;
+		colfg.red = TRUERED(base.decor);
+		colfg.green = TRUEGREEN(base.decor);
+		colfg.blue = TRUEBLUE(base.decor);
+		XftColorAllocValue(xw.dpy, xw.vis, xw.cmap, &colfg, &truefg);
+		decor = &truefg;
+	} else {
+		decor = &dc.col[base.decor];
+	}
+
 	/* Render underline and strikethrough. */
 	if (base.mode & ATTR_UNDERLINE) {
-		XftDrawRect(xw.draw, fg, winx, winy + dc.font.ascent * chscale + 1,
+		XftDrawRect(xw.draw, decor, winx, winy + dc.font.ascent * chscale + 1,
 				width, 1);
 	}
 
 	if (base.mode & ATTR_STRUCK) {
-		XftDrawRect(xw.draw, fg, winx, winy + 2 * dc.font.ascent * chscale / 3,
+		XftDrawRect(xw.draw, decor, winx, winy + 2 * dc.font.ascent * chscale / 3,
 				width, 1);
 	}
 
@@ -1675,23 +1696,27 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 
 /* Draw (or queue for drawing) image cells between columns x1 and x2 assuming
  * that they have the same attributes (and thus the same lower 24 bits of the
- * image ID). */
+ * image ID and the same placement ID). */
 void
 xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 	int x_pix_start = win.hborderpx + x1 * win.cw;
 	int x_pix = x_pix_start;
 	int y_pix = win.vborderpx + y1 * win.ch;
 	uint32_t image_id_24bits = base.fg & 0xFFFFFF;
-	uint8_t last_id_additional_byte = 0;
+	uint32_t placement_id = base.decor & 0xFFFFFF;
+	if (IS_DECOR_UNSET(base.decor))
+		placement_id = 0;
 	// Columns and rows are 1-based, 0 means unspecified.
 	int last_col = 0;
 	int last_row = 0;
 	int last_start_col = 0;
+	// The most significant byte is also 1-base, subtract 1 before use.
+	uint8_t last_id_4thbyteplus1 = 0;
 	for (int i = 0; i < x2 - x1; ++i) {
-		uint32_t cur_row = line[x1 + i].u & 0x7FF;
-		uint32_t cur_col = (line[x1 + i].u >> 11) & 0xFFF;
-		uint32_t cur_id_additional_byte_specified = line[x1 + i].u >> 23;
-		uint8_t cur_id_additional_byte = (line[x1 + i].u >> 23) & 0xFF;
+		Glyph *g = &line[x1 + i];
+		uint32_t cur_row = tgetimgrow(g);
+		uint32_t cur_col = tgetimgcol(g);
+		uint8_t cur_id_4thbyteplus1 = tgetimgid4thbyteplus1(g);
 		// If the row is not specified, assume it's the same as the row of the
 		// previous cell.
 		if (cur_row == 0) cur_row = last_row;
@@ -1702,44 +1727,45 @@ xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 			cur_col = last_col + 1;
 		// If the additional id byte is not specified and the
 		// coordinates are the same, assume the byte is also the same.
-		if (!cur_id_additional_byte_specified && cur_row == last_row &&
-				cur_col == last_col)
-			cur_id_additional_byte = last_id_additional_byte;
+		if (!cur_id_4thbyteplus1 && cur_row == last_row &&
+		    cur_col == last_col)
+			cur_id_4thbyteplus1 = last_id_4thbyteplus1;
 		// If we couldn't infer row and column, start from the top left corner.
 		if (cur_row == 0) cur_row = 1;
 		if (cur_col == 0) cur_col = 1;
 		// If this cell breaks a contiguous stripe of image cells, draw that
 		// line and start a new one.
 		if (cur_col != last_col + 1 || cur_row != last_row) {
-			uint32_t image_id = image_id_24bits |
-					    (last_id_additional_byte << 24);
+			uint32_t image_id = image_id_24bits;
+			if (last_id_4thbyteplus1)
+				image_id |= (last_id_4thbyteplus1 - 1) << 24;
 			if (last_row != 0)
 				gr_append_imagerect(
-					xw.buf, image_id, last_start_col - 1,
-					last_col, last_row - 1, last_row, x_pix,
-					y_pix, win.cw, win.ch,
+					xw.buf, image_id, placement_id,
+					last_start_col - 1, last_col,
+					last_row - 1, last_row, x_pix, y_pix,
+					win.cw, win.ch,
 					base.mode & ATTR_REVERSE);
 			last_start_col = cur_col;
 			x_pix = x_pix_start + i*win.cw;
 		}
 		last_row = cur_row;
 		last_col = cur_col;
-		last_id_additional_byte = cur_id_additional_byte;
+		last_id_4thbyteplus1 = cur_id_4thbyteplus1;
 		// Set the additional byte for this glyph if it wasn't
 		// specified. This is to make the naive implementation of
-		// getimageid work.
-		if (!cur_id_additional_byte_specified) {
-			line[x1 + i].u |=
-				(cur_id_additional_byte << 23) | 0x80000000;
-		}
+		// tgetimgid work.
+		if (!tgetimgid4thbyteplus1(g))
+			tsetimg4thbyteplus1(g, cur_id_4thbyteplus1);
 	}
-	uint32_t image_id = image_id_24bits |
-			    (last_id_additional_byte << 24);
+	uint32_t image_id = image_id_24bits;
+	if (last_id_4thbyteplus1)
+		image_id |= (last_id_4thbyteplus1 - 1) << 24;
 	// Draw the last contiguous stripe.
 	if (last_row != 0)
-		gr_append_imagerect(xw.buf, image_id, last_start_col - 1,
-				    last_col, last_row - 1, last_row, x_pix,
-				    y_pix, win.cw, win.ch,
+		gr_append_imagerect(xw.buf, image_id, placement_id,
+				    last_start_col - 1, last_col, last_row - 1,
+				    last_row, x_pix, y_pix, win.cw, win.ch,
 				    base.mode & ATTR_REVERSE);
 }
 
@@ -2061,6 +2087,7 @@ cmessage(XEvent *e)
 		}
 	} else if (e->xclient.data.l[0] == xw.wmdeletewin) {
 		ttyhangup();
+		gr_deinit();
 		exit(0);
 	}
 }
@@ -2262,8 +2289,6 @@ run:
 	xsetenv();
 	selinit();
 	run();
-
-	gr_deinit();
 
 	return 0;
 }

@@ -12,13 +12,16 @@
 #define DEFAULT(a, b)		(a) = (a) ? (a) : (b)
 #define LIMIT(x, a, b)		(x) = (x) < (a) ? (a) : (x) > (b) ? (b) : (x)
 #define ATTRCMP(a, b)		((a).mode != (b).mode || (a).fg != (b).fg || \
-				(a).bg != (b).bg)
+				(a).bg != (b).bg || (a).decor != (b).decor)
 #define TIMEDIFF(t1, t2)	((t1.tv_sec-t2.tv_sec)*1000 + \
 				(t1.tv_nsec-t2.tv_nsec)/1E6)
 #define MODBIT(x, set, bit)	((set) ? ((x) |= (bit)) : ((x) &= ~(bit)))
 
 #define TRUECOLOR(r,g,b)	(1 << 24 | (r) << 16 | (g) << 8 | (b))
 #define IS_TRUECOL(x)		(1 << 24 & (x))
+
+#define DECOR_UNSET		0xffffffff
+#define IS_DECOR_UNSET(x)	((0xffffffff & (x)) == 0xffffffff)
 
 enum glyph_attribute {
 	ATTR_NULL       = 0,
@@ -66,6 +69,7 @@ typedef struct {
 	ushort mode;      /* attribute flags */
 	uint32_t fg;      /* foreground  */
 	uint32_t bg;      /* background  */
+	uint32_t decor;   /* decoration (like underline) */
 } Glyph;
 
 typedef Glyph *Line;
@@ -127,3 +131,45 @@ extern unsigned int tabspaces;
 extern unsigned int defaultfg;
 extern unsigned int defaultbg;
 extern unsigned int defaultcs;
+
+// Some accessors to image placeholder properties. The row, column, and the most
+// significant byte of the image id are stored in `u`: 11 bits for the row, 12
+// bits for the column, 9 bits for the most significant byte of the image ID.
+// Everything is 1-base, 0 means "not specified", that's why we need 9 bits for
+// the most significant byte. Don't forget to add/subtract 1.
+static inline uint32_t tgetimgrow(Glyph *g) { return g->u & 0x7ff; }
+static inline uint32_t tgetimgcol(Glyph *g) { return (g->u >> 11) & 0xfff; }
+static inline uint32_t tgetimgid4thbyteplus1(Glyph *g) { return (g->u >> 23) & 0x1ff; }
+static inline void tsetimgrow(Glyph *g, uint32_t row) {
+	g->u = (g->u & ~0x7ff) | (row & 0x7ff);
+}
+static inline void tsetimgcol(Glyph *g, uint32_t row) {
+	g->u = (g->u & ~(0xfff << 11)) | ((row & 0xfff) << 11);
+}
+static inline void tsetimg4thbyteplus1(Glyph *g, uint32_t byteplus1) {
+	g->u = (g->u & ~(0x1ff << 23)) | ((byteplus1 & 0x1ff) << 23);
+}
+
+/// Returns the full image id. This is a naive implementation, if the most
+/// significant byte is not specified, it's assumed to be 0 instead of inferring
+/// it from the cells to the left.
+static inline uint32_t tgetimgid(Glyph *g) {
+	uint32_t msb = tgetimgid4thbyteplus1(g);
+	if (msb != 0)
+		--msb;
+	return (msb << 24) | (g->fg & 0xFFFFFF);
+}
+
+/// Sets the full image id.
+static inline void tsetimgid(Glyph *g, uint32_t id) {
+	g->fg = (id & 0xFFFFFF) | (1 << 24);
+	tsetimg4thbyteplus1(g, ((id >> 24) & 0xFF) + 1);
+}
+
+static inline uint32_t tgetimgplacementid(Glyph *g) {
+	return g->decor & 0xFFFFFF;
+}
+
+static inline void tsetimgplacementid(Glyph *g, uint32_t id) {
+	g->decor = (id & 0xFFFFFF) | (1 << 24);
+}
