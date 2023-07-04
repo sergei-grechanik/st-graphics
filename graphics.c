@@ -205,7 +205,8 @@ static time_t last_uploading_time = 0;
 static clock_t drawing_start_time;
 
 /// The directory where the on-disk cache files are stored.
-static char temp_dir[] = "/tmp/st-images-XXXXXX";
+static char temp_dir[MAX_FILENAME_SIZE];
+static const char temp_dir_template[] = "/tmp/st-images-XXXXXX";
 
 /// The max size of a single image file, in bytes.
 static size_t max_image_disk_size = 20 * 1024 * 1024;
@@ -952,15 +953,37 @@ static void gr_load_placement(ImagePlacement *placement, int cw, int ch) {
 // Interaction with the terminal (init, deinit, appending rects, etc).
 ////////////////////////////////////////////////////////////////////////////////
 
+/// Creates a temporary directory.
+static int gr_create_temp_dir() {
+	strncpy(temp_dir, temp_dir_template, sizeof(temp_dir));
+	if (!mkdtemp(temp_dir)) {
+		fprintf(stderr,
+			"error: could not create temporary dir from template "
+			"%s\n",
+			temp_dir);
+		return 0;
+	}
+	fprintf(stderr, "Graphics cache directory: %s\n", temp_dir);
+	return 1;
+}
+
+/// Checks whether `tmp_dir` exists and recreates it if it doesn't.
+static void gr_make_sure_tmpdir_exists() {
+	struct stat st;
+	if (stat(temp_dir, &st) == 0 && S_ISDIR(st.st_mode))
+		return;
+	fprintf(stderr,
+		"error: %s is not a directory, will need to create a new "
+		"graphics cache directory\n",
+		temp_dir);
+	gr_create_temp_dir();
+}
+
 /// Initialize the graphics module.
 void gr_init(Display *disp, Visual *vis, Colormap cm) {
 	// Create the temporary dir.
-	if (!mkdtemp(temp_dir)) {
-		fprintf(stderr,
-			"Could not create temporary dir from template %s\n",
-			temp_dir);
+	if (!gr_create_temp_dir())
 		abort();
-	}
 
 	// Initialize imlib.
 	imlib_context_set_display(disp);
@@ -1590,6 +1613,7 @@ static void gr_append_data(Image *img, const char *payload, int more) {
 
 	// If there is no open file corresponding to the image, create it.
 	if (!img->open_file) {
+		gr_make_sure_tmpdir_exists();
 		char filename[MAX_FILENAME_SIZE];
 		gr_get_image_filename(img, filename, MAX_FILENAME_SIZE);
 		FILE *file = fopen(filename, img->disk_size ? "a" : "w");
@@ -1719,6 +1743,7 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 		// the file to the temporary cache dir. We do this symlink trick
 		// mostly to be able to use cp for copying, and avoid escaping
 		// file name characters when calling system at the same time.
+		gr_make_sure_tmpdir_exists();
 		char tmp_filename[MAX_FILENAME_SIZE];
 		char tmp_filename_symlink[MAX_FILENAME_SIZE + 4] = {0};
 		gr_get_image_filename(img, tmp_filename, MAX_FILENAME_SIZE);
