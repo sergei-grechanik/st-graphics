@@ -64,8 +64,7 @@ enum ScaleMode {
 };
 
 /// The status of an image. Each image uploaded to the terminal is cached on
-/// disk. Then it is loaded to ram when needed in the ready to display form
-/// (scaled to the requested box given the current cell width and height).
+/// disk, then it is loaded to ram when needed.
 enum ImageStatus {
 	STATUS_UNINITIALIZED = 0,
 	STATUS_UPLOADING = 1,
@@ -1452,10 +1451,18 @@ static void gr_createresponse(uint32_t image_id, uint32_t image_number,
 		snprintf(graphics_command_result.response,
 			 MAX_GRAPHICS_RESPONSE_LEN, "\033_GI=%u;%s\033\\",
 			 image_number, msg);
-	} else {
+	} else if (image_id) {
 		snprintf(graphics_command_result.response,
 			 MAX_GRAPHICS_RESPONSE_LEN, "\033_Gi=%u;%s\033\\",
 			 image_id, msg);
+	} else {
+		// No image_id and no image_number. This shouldn't actually
+		// happen, but let's handle it anyway. Nobody expects the
+		// response in this case, so just print it to stderr.
+		fprintf(stderr,
+			"error: No image id or image number, but still there "
+			"is a response: %s\n",
+			msg);
 	}
 }
 
@@ -1708,12 +1715,6 @@ static Image *gr_new_image_from_command(GraphicsCommand *cmd) {
 
 /// Handles a data transmission command.
 static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
-	if (cmd->image_number != 0) {
-		gr_reporterror_cmd(
-			cmd, "EINVAL: image numbers (I) are not supported");
-		return NULL;
-	}
-
 	// The default is direct transmission.
 	if (!cmd->transmission_medium)
 		cmd->transmission_medium = 'd';
@@ -1838,12 +1839,6 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 
 /// Handles the 'put' command by creating a placement.
 static void gr_handle_put_command(GraphicsCommand *cmd) {
-	if (cmd->image_number != 0) {
-		gr_reporterror_cmd(
-			cmd, "EINVAL: image numbers (I) are not supported");
-		return;
-	}
-
 	// If image id is not specified, use last image id.
 	uint32_t image_id = cmd->image_id ? cmd->image_id : last_image_id;
 
@@ -1895,6 +1890,11 @@ static void gr_handle_delete_command(GraphicsCommand *cmd) {
 
 /// Handles a command.
 static void gr_handle_command(GraphicsCommand *cmd) {
+	if (!cmd->image_id && !cmd->image_number) {
+		// If there is no image id or image number, nobody expects a
+		// response, so set quiet to 2.
+		cmd->quiet = 2;
+	}
 	Image *img = NULL;
 	switch (cmd->action) {
 	case 0:
