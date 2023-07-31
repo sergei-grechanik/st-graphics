@@ -66,6 +66,7 @@ typedef struct {
 	struct {
 		uint32_t rows, columns;
 		uint32_t image_id, placement_id;
+		char do_not_move_cursor;
 	} placeholder;
 } GraphicsCommandResult;
 

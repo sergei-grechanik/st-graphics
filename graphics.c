@@ -161,6 +161,9 @@ typedef struct ImagePlacement {
 	/// The dimensions of the cell used to scale the image. If cell
 	/// dimensions are changed (font change), the image will be rescaled.
 	uint16_t scaled_cw, scaled_ch;
+	/// If true, do not move the cursor when displaying this placement
+	/// (non-virtual placements only).
+	char do_not_move_cursor;
 } ImagePlacement;
 
 /// A rectangular piece of an image to be drawn.
@@ -1438,6 +1441,9 @@ typedef struct {
 	int size;
 	/// 'U=', whether it's a virtual placement for Unicode placeholders.
 	int virtual;
+	/// 'C=', if true, do not move the cursor when displaying this placement
+	/// (non-virtual placements only).
+	char do_not_move_cursor;
 } GraphicsCommand;
 
 /// Creates a response to the current command in `graphics_command_result`.
@@ -1572,6 +1578,8 @@ static void gr_display_nonvirtual_placement(ImagePlacement *placement) {
 	graphics_command_result.placeholder.placement_id = placement->placement_id;
 	graphics_command_result.placeholder.columns = placement->cols;
 	graphics_command_result.placeholder.rows = placement->rows;
+	graphics_command_result.placeholder.do_not_move_cursor =
+		placement->do_not_move_cursor;
 	if (graphics_debug_mode) {
 		fprintf(stderr, "Creating a placeholder for %u/%u  %d x %d\n",
 			placement->image->image_id, placement->placement_id,
@@ -1861,9 +1869,13 @@ static void gr_handle_put_command(GraphicsCommand *cmd) {
 	placement->virtual = cmd->virtual;
 	placement->cols = cmd->columns;
 	placement->rows = cmd->rows;
+	placement->do_not_move_cursor = cmd->do_not_move_cursor;
 
 	// Display the placement unless it's virtual.
 	gr_display_nonvirtual_placement(placement);
+
+	// Report success.
+	gr_reportsuccess_cmd(cmd);
 }
 
 /// Handles the delete command.
@@ -2036,8 +2048,7 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start,
 			*key_start);
 		break;
 	case 'C':
-		// Cursor movement policy. Currently we never move the cursor,
-		// so we ignore this.
+		cmd->do_not_move_cursor = num;
 		break;
 	default:
 		gr_reporterror_cmd(cmd, "EINVAL: unsupported key: %s",

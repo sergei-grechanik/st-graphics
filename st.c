@@ -1279,7 +1279,7 @@ tclearregion(int x1, int y1, int x2, int y2)
 /// cursor. Adds empty lines if needed.
 void
 tcreateimgplaceholder(uint32_t image_id, uint32_t placement_id,
-		      int cols, int rows)
+		      int cols, int rows, char do_not_move_cursor)
 {
 	for (int row = 0; row < rows; ++row) {
 		int y = term.c.y;
@@ -1299,8 +1299,17 @@ tcreateimgplaceholder(uint32_t image_id, uint32_t placement_id,
 			tsetimgplacementid(gp, placement_id);
 		}
 		// Move the cursor down, maybe creating a new line. The x is
-		// preserved.
-		tnewline(0);
+		// preserved (we never change term.c.x in the loop above).
+		if (row != rows - 1)
+			tnewline(0);
+	}
+	if (do_not_move_cursor) {
+		// Return the cursor to the original position.
+		tmoveto(term.c.x, term.c.y - rows + 1);
+	} else {
+		// Move the cursor beyond the last column, as required by the
+		// protocol.
+		tmoveto(term.c.x + cols, term.c.y);
 	}
 }
 
@@ -2053,7 +2062,8 @@ strhandle(void)
 					res->placeholder.image_id,
 					res->placeholder.placement_id,
 					res->placeholder.columns,
-					res->placeholder.rows);
+					res->placeholder.rows,
+					res->placeholder.do_not_move_cursor);
 			}
 			if (res->response[0])
 				ttywriteraw(res->response, strlen(res->response));
