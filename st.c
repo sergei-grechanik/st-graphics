@@ -1298,6 +1298,10 @@ tcreateimgplaceholder(uint32_t image_id, uint32_t placement_id,
 			tsetimgid(gp, image_id);
 			tsetimgplacementid(gp, placement_id);
 		}
+		// If moving the cursor is not allowed and this is the last line
+		// of the terminal, we are done.
+		if (do_not_move_cursor && y == term.row - 1)
+			break;
 		// Move the cursor down, maybe creating a new line. The x is
 		// preserved (we never change term.c.x in the loop above).
 		if (row != rows - 1)
