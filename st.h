@@ -167,6 +167,8 @@ static inline void tsetimgid(Glyph *g, uint32_t id) {
 }
 
 static inline uint32_t tgetimgplacementid(Glyph *g) {
+	if (IS_DECOR_UNSET(g->decor))
+		return 0;
 	return g->decor & 0xFFFFFF;
 }
 

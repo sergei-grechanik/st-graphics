@@ -5,6 +5,7 @@
 #include <locale.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/select.h>
 #include <time.h>
 #include <unistd.h>
@@ -62,6 +63,7 @@ static void zoomabs(const Arg *);
 static void zoomreset(const Arg *);
 static void ttysend(const Arg *);
 static void previewimage(const Arg *);
+static void showimageinfo(const Arg *);
 static void togglegrdebug(const Arg *);
 static void dumpgrstate(const Arg *);
 
@@ -347,6 +349,28 @@ previewimage(const Arg *arg)
 			tgetimgrow(&g));
 		gr_preview_image(image_id, arg->s);
 	}
+}
+
+void
+showimageinfo(const Arg *arg)
+{
+	Glyph g = getglyphat(mouse_col, mouse_row);
+	if (!(g.mode & ATTR_IMAGE))
+		return;
+	uint32_t image_id = tgetimgid(&g);
+	uint32_t placement_id = tgetimgplacementid(&g);
+	char command[256];
+	size_t len = snprintf(command, 255,
+			      "xmessage 'image_id = %u = 0x%08X\n"
+			      "placement_id = %u = 0x%08X\n"
+			      "column = %d, row = %d'",
+			      image_id, image_id, placement_id, placement_id,
+			      tgetimgcol(&g), tgetimgrow(&g));
+	if (len > 255) {
+		fprintf(stderr, "error: command too long: %s\n", command);
+		return;
+	}
+	system(command);
 }
 
 void
@@ -1685,9 +1709,7 @@ xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 	int x_pix = x_pix_start;
 	int y_pix = win.vborderpx + y1 * win.ch;
 	uint32_t image_id_24bits = base.fg & 0xFFFFFF;
-	uint32_t placement_id = base.decor & 0xFFFFFF;
-	if (IS_DECOR_UNSET(base.decor))
-		placement_id = 0;
+	uint32_t placement_id = tgetimgplacementid(&base);
 	// Columns and rows are 1-based, 0 means unspecified.
 	int last_col = 0;
 	int last_row = 0;
