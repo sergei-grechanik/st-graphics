@@ -1305,15 +1305,19 @@ tcreateimgplaceholder(uint32_t image_id, uint32_t placement_id,
 		// Move the cursor down, maybe creating a new line. The x is
 		// preserved (we never change term.c.x in the loop above).
 		if (row != rows - 1)
-			tnewline(0);
+			tnewline(/*first_col=*/0);
 	}
 	if (do_not_move_cursor) {
 		// Return the cursor to the original position.
 		tmoveto(term.c.x, term.c.y - rows + 1);
 	} else {
 		// Move the cursor beyond the last column, as required by the
-		// protocol.
-		tmoveto(term.c.x + cols, term.c.y);
+		// protocol. If the cursor goes beyond the screen edge, insert a
+		// newline to match the behavior of kitty.
+		if (term.c.x + cols >= term.col)
+			tnewline(/*first_col=*/1);
+		else
+			tmoveto(term.c.x + cols, term.c.y);
 	}
 }
 
