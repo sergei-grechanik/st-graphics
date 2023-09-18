@@ -370,7 +370,10 @@ showimageinfo(const Arg *arg)
 		fprintf(stderr, "error: command too long: %s\n", command);
 		return;
 	}
-	system(command);
+	if (system(command) != 0) {
+		fprintf(stderr, "error: could not execute command %s\n",
+			command);
+	}
 }
 
 void
