@@ -2075,8 +2075,6 @@ strhandle(void)
 			}
 			if (res->response[0])
 				ttywriteraw(res->response, strlen(res->response));
-			if (res->redraw)
-				redraw();
 			return;
 		}
 		return;

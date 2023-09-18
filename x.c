@@ -2197,11 +2197,6 @@ run(void)
 			}
 		}
 
-		if (graphics_uploading) {
-			if (!gr_check_if_still_uploading())
-				redraw();
-		}
-
 		draw();
 		XFlush(xw.dpy);
 		drawing = 0;

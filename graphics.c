@@ -224,7 +224,6 @@ static unsigned char reverse_table[256];
 
 // Declared in the header.
 char graphics_debug_mode = 0;
-char graphics_uploading = 0;
 GraphicsCommandResult graphics_command_result = {0};
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1164,20 +1163,6 @@ void gr_dump_state() {
 	fprintf(stderr, "============================================\n");
 }
 
-/// Checks if we are still really uploading something. Returns 1 if we may be
-/// and 0 if we aren't. If certain amount of time has passed since the last data
-/// transmission command, we assume that all uploads have failed.
-int gr_check_if_still_uploading() {
-	if (!graphics_uploading)
-		return 0;
-	time_t cur_time;
-	time(&cur_time);
-	double dt = difftime(last_uploading_time, cur_time);
-	if (difftime(last_uploading_time, cur_time) < -1.0)
-		graphics_uploading = 0;
-	return graphics_uploading;
-}
-
 /// Displays debug information in the rectangle using colors col1 and col2.
 static void gr_displayinfo(Drawable buf, ImageRect *rect, int col1, int col2,
 			   const char *message) {
@@ -1220,12 +1205,6 @@ static void gr_showrect(Drawable buf, ImageRect *rect) {
 
 /// Draws the given part of an image.
 static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
-	// If we are uploading data then we shouldn't do heavy computation (like
-	// displaying graphics), mostly because some versions of tmux may drop
-	// pass-through commands if the terminal is too slow.
-	if (graphics_uploading)
-		return;
-
 	ImagePlacement *placement =
 		gr_find_image_and_placement(rect->image_id, rect->placement_id);
 	// If the image does not exist, display the bounding box and some info
@@ -1653,14 +1632,6 @@ static void gr_append_data(Image *img, const char *payload, int more) {
 		current_upload_image_id = img->image_id;
 		time(&last_uploading_time);
 	} else {
-		if (graphics_uploading) {
-			graphics_uploading--;
-			// Since direct uploading suppresses image
-			// drawing (as a workaround), we need to redraw
-			// the screen whenever we finish all uploads.
-			if (!graphics_uploading)
-				graphics_command_result.redraw = 1;
-		}
 		current_upload_image_id = 0;
 		// Close the file.
 		if (img->open_file) {
@@ -1831,7 +1802,6 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 			return NULL;
 		last_image_id = img->image_id;
 		img->status = STATUS_UPLOADING;
-		graphics_uploading++;
 		// Start appending data.
 		gr_append_data(img, cmd->payload, cmd->more);
 	} else {
