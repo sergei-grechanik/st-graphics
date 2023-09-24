@@ -1718,12 +1718,12 @@ xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 	int last_row = 0;
 	int last_start_col = 0;
 	// The most significant byte is also 1-base, subtract 1 before use.
-	uint8_t last_id_4thbyteplus1 = 0;
+	uint32_t last_id_4thbyteplus1 = 0;
 	for (int i = 0; i < x2 - x1; ++i) {
 		Glyph *g = &line[x1 + i];
 		uint32_t cur_row = tgetimgrow(g);
 		uint32_t cur_col = tgetimgcol(g);
-		uint8_t cur_id_4thbyteplus1 = tgetimgid4thbyteplus1(g);
+		uint32_t cur_id_4thbyteplus1 = tgetimgid4thbyteplus1(g);
 		// If the row is not specified, assume it's the same as the row of the
 		// previous cell.
 		if (cur_row == 0) cur_row = last_row;
