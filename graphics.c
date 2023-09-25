@@ -112,6 +112,10 @@ typedef struct Image {
 	/// The client id specified in the query command (`a=q`). This one must
 	/// be used to create the response if it's non-zero.
 	uint32_t query_id;
+	/// The number specified in the transmission command (`I=`). If
+	/// non-zero, it may be used to identify the image instead of the
+	/// image_id, and it also should be mentioned in responses.
+	uint32_t image_number;
 	/// The last time when the image was displayed or otherwise touched.
 	time_t atime;
 	/// The size of the corresponding file cached on disk.
@@ -237,6 +241,27 @@ static Image *gr_find_image(uint32_t image_id) {
 		return NULL;
 	Image *res = kh_value(images, k);
 	return res;
+}
+
+/// Finds the image corresponding to the image number. If `number` is zero,
+/// returns the last image. Returns NULL if cannot find.
+static Image *gr_find_image_by_number(uint32_t image_number) {
+	if (image_number == 0)
+		return gr_find_image(last_image_id);
+	Image *img = NULL;
+	kh_foreach_value(images, img, {
+		if (img->image_number == image_number)
+			return img;
+	});
+	return NULL;
+}
+
+/// Finds the image either by id or by number, depending on which is non-zero.
+static Image *gr_find_image_by_id_or_number(uint32_t image_id,
+					    uint32_t image_number) {
+	if (image_id)
+		return gr_find_image(image_id);
+	return gr_find_image_by_number(image_number);
 }
 
 /// Finds the placement corresponding to the id. If the placement id is 0,
@@ -1680,6 +1705,17 @@ static Image *gr_new_image_from_command(GraphicsCommand *cmd) {
 		return NULL;
 	if (cmd->action == 'q')
 		img->query_id = cmd->image_id;
+	// Set the image number.
+	if (cmd->image_number) {
+		// If there is an old image with this number, forget that it had
+		// this number.
+		Image *old_img_with_this_number =
+			gr_find_image_by_number(cmd->image_number);
+		if (old_img_with_this_number)
+			old_img_with_this_number->image_number = 0;
+		// The new image has this number now.
+		img->image_number = cmd->image_number;
+	}
 	// Set parameters.
 	img->expected_size = cmd->size;
 	img->format = cmd->format;
@@ -1789,7 +1825,8 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 		gr_check_limits();
 	} else if (cmd->transmission_medium == 'd') {
 		// Direct transmission (default if 't' is not specified).
-		img = gr_find_image(cmd->image_id);
+		img = gr_find_image_by_id_or_number(cmd->image_id,
+						    cmd->image_number);
 		if (img && img->status == STATUS_UPLOADING) {
 			// This is a continuation of the previous transmission.
 			cmd->is_direct_transmission_continuation = 1;
@@ -1817,17 +1854,16 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 
 /// Handles the 'put' command by creating a placement.
 static void gr_handle_put_command(GraphicsCommand *cmd) {
-	// If image id is not specified, use last image id.
-	uint32_t image_id = cmd->image_id ? cmd->image_id : last_image_id;
-
-	if (image_id == 0) {
+	if (cmd->image_id == 0 && cmd->image_number == 0) {
 		gr_reporterror_cmd(cmd,
-				   "EINVAL: image id is not specified or zero");
+				   "EINVAL: neither image id nor image number "
+				   "are specified or both are zero");
 		return;
 	}
 
-	// Find the image with the id.
-	Image *img = gr_find_image(image_id);
+	// Find the image with the id or number.
+	Image *img = gr_find_image_by_id_or_number(cmd->image_id,
+						   cmd->image_number);
 	if (!img) {
 		gr_reporterror_cmd(cmd, "ENOENT: image not found");
 		return;
@@ -1859,7 +1895,8 @@ static void gr_handle_delete_command(GraphicsCommand *cmd) {
 		if (cmd->image_id == 0)
 			gr_reporterror_cmd(cmd,
 					   "EINVAL: no image id to delete");
-		Image *img = gr_find_image(cmd->image_id);
+		Image *img = gr_find_image_by_id_or_number(cmd->image_id,
+							   cmd->image_number);
 		if (img)
 			gr_delete_image(img);
 		gr_reportsuccess_cmd(cmd);
@@ -1877,7 +1914,6 @@ static void gr_handle_command(GraphicsCommand *cmd) {
 		// response, so set quiet to 2.
 		cmd->quiet = 2;
 	}
-	Image *img = NULL;
 	switch (cmd->action) {
 	case 0:
 		// If no action is specified, it may be a data transmission
