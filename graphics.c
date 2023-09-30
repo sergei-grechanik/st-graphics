@@ -1486,7 +1486,7 @@ static void gr_reportsuccess_cmd(GraphicsCommand *cmd) {
 static void gr_reportsuccess_img(Image *img) {
 	uint32_t id = img->query_id ? img->query_id : img->image_id;
 	if (img->quiet < 1)
-		gr_createresponse(id, 0, "OK");
+		gr_createresponse(id, img->image_number, "OK");
 }
 
 /// Creates an error response to the current command (unless suppressed).
@@ -1519,7 +1519,7 @@ static void gr_reporterror_img(Image *img, const char *format, ...) {
 		uint32_t id = img->query_id ? img->query_id : img->image_id;
 		fprintf(stderr, "%s  id=%u\n", errmsg, id);
 		if (img->quiet < 2)
-			gr_createresponse(id, 0, errmsg);
+			gr_createresponse(id, img->image_number, errmsg);
 	}
 }
 
