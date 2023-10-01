@@ -1444,41 +1444,57 @@ typedef struct {
 
 /// Creates a response to the current command in `graphics_command_result`.
 static void gr_createresponse(uint32_t image_id, uint32_t image_number,
-			      const char *msg) {
-	if (image_id && image_number) {
-		snprintf(graphics_command_result.response,
-			 MAX_GRAPHICS_RESPONSE_LEN, "\033_Gi=%u,I=%u;%s\033\\",
-			 image_id, image_number, msg);
-	} else if (!image_id && image_number) {
-		snprintf(graphics_command_result.response,
-			 MAX_GRAPHICS_RESPONSE_LEN, "\033_GI=%u;%s\033\\",
-			 image_number, msg);
-	} else if (image_id) {
-		snprintf(graphics_command_result.response,
-			 MAX_GRAPHICS_RESPONSE_LEN, "\033_Gi=%u;%s\033\\",
-			 image_id, msg);
-	} else {
-		// No image_id and no image_number. This shouldn't actually
-		// happen, but let's handle it anyway. Nobody expects the
-		// response in this case, so just print it to stderr.
+			      uint32_t placement_id, const char *msg) {
+	if (!image_id && !image_number && !placement_id) {
+		// Nobody expects the response in this case, so just print it to
+		// stderr.
 		fprintf(stderr,
-			"error: No image id or image number, but still there "
-			"is a response: %s\n",
+			"error: No image id or image number or placement_id, "
+			"but still there is a response: %s\n",
 			msg);
+		return;
 	}
+	char *buf = graphics_command_result.response;
+	size_t maxlen = MAX_GRAPHICS_RESPONSE_LEN;
+	size_t written;
+	written = snprintf(buf, maxlen, "\033_G");
+	buf += written;
+	maxlen -= written;
+	if (image_id) {
+		written = snprintf(buf, maxlen, "i=%u,", image_id);
+		buf += written;
+		maxlen -= written;
+	}
+	if (image_number) {
+		written = snprintf(buf, maxlen, "I=%u,", image_number);
+		buf += written;
+		maxlen -= written;
+	}
+	if (placement_id) {
+		written = snprintf(buf, maxlen, "p=%u,", placement_id);
+		buf += written;
+		maxlen -= written;
+	}
+	buf[-1] = ';';
+	written = snprintf(buf, maxlen, "%s\033\\", msg);
+	buf += written;
+	maxlen -= written;
+	buf[-2] = '\033';
+	buf[-1] = '\\';
 }
 
 /// Creates the 'OK' response to the current command (unless suppressed).
 static void gr_reportsuccess_cmd(GraphicsCommand *cmd) {
 	if (cmd->quiet < 1)
-		gr_createresponse(cmd->image_id, cmd->image_number, "OK");
+		gr_createresponse(cmd->image_id, cmd->image_number,
+				  cmd->placement_id, "OK");
 }
 
 /// Creates the 'OK' response to the current command (unless suppressed).
 static void gr_reportsuccess_img(Image *img) {
 	uint32_t id = img->query_id ? img->query_id : img->image_id;
 	if (img->quiet < 1)
-		gr_createresponse(id, img->image_number, "OK");
+		gr_createresponse(id, img->image_number, 0, "OK");
 }
 
 /// Creates an error response to the current command (unless suppressed).
@@ -1492,7 +1508,8 @@ static void gr_reporterror_cmd(GraphicsCommand *cmd, const char *format, ...) {
 
 	fprintf(stderr, "%s  in command: %s\n", errmsg, cmd->command);
 	if (cmd->quiet < 2)
-		gr_createresponse(cmd->image_id, cmd->image_number, errmsg);
+		gr_createresponse(cmd->image_id, cmd->image_number,
+				  cmd->placement_id, errmsg);
 }
 
 /// Creates an error response to the current command (unless suppressed).
@@ -1506,12 +1523,12 @@ static void gr_reporterror_img(Image *img, const char *format, ...) {
 
 	if (!img) {
 		fprintf(stderr, "%s\n", errmsg);
-		gr_createresponse(0, 0, errmsg);
+		gr_createresponse(0, 0, 0, errmsg);
 	} else {
 		uint32_t id = img->query_id ? img->query_id : img->image_id;
 		fprintf(stderr, "%s  id=%u\n", errmsg, id);
 		if (img->quiet < 2)
-			gr_createresponse(id, img->image_number, errmsg);
+			gr_createresponse(id, img->image_number, 0, errmsg);
 	}
 }
 
