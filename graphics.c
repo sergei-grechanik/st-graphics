@@ -256,14 +256,6 @@ static Image *gr_find_image_by_number(uint32_t image_number) {
 	return NULL;
 }
 
-/// Finds the image either by id or by number, depending on which is non-zero.
-static Image *gr_find_image_by_id_or_number(uint32_t image_id,
-					    uint32_t image_number) {
-	if (image_id)
-		return gr_find_image(image_id);
-	return gr_find_image_by_number(image_number);
-}
-
 /// Finds the placement corresponding to the id. If the placement id is 0,
 /// returns some default placement.
 static ImagePlacement *gr_find_placement(Image *img, uint32_t placement_id) {
@@ -1689,6 +1681,17 @@ static void gr_append_data(Image *img, const char *payload, int more) {
 	gr_check_limits();
 }
 
+/// Finds the image either by id or by number specified in the command and sets
+/// the image_id of `cmd` if the image was found.
+static Image *gr_find_image_for_command(GraphicsCommand *cmd) {
+	if (cmd->image_id)
+		return gr_find_image(cmd->image_id);
+	Image *img = gr_find_image_by_number(cmd->image_number);
+	if (img)
+		cmd->image_id = img->image_id;
+	return img;
+}
+
 /// Create a new image and initialize its parameters from the command.
 static Image *gr_new_image_from_command(GraphicsCommand *cmd) {
 	if (cmd->format != 0 && cmd->format != 32 && cmd->format != 24 &&
@@ -1825,8 +1828,7 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 		gr_check_limits();
 	} else if (cmd->transmission_medium == 'd') {
 		// Direct transmission (default if 't' is not specified).
-		img = gr_find_image_by_id_or_number(cmd->image_id,
-						    cmd->image_number);
+		img = gr_find_image_for_command(cmd);
 		if (img && img->status == STATUS_UPLOADING) {
 			// This is a continuation of the previous transmission.
 			cmd->is_direct_transmission_continuation = 1;
@@ -1862,8 +1864,7 @@ static void gr_handle_put_command(GraphicsCommand *cmd) {
 	}
 
 	// Find the image with the id or number.
-	Image *img = gr_find_image_by_id_or_number(cmd->image_id,
-						   cmd->image_number);
+	Image *img = gr_find_image_for_command(cmd);
 	if (!img) {
 		gr_reporterror_cmd(cmd, "ENOENT: image not found");
 		return;
@@ -1895,8 +1896,7 @@ static void gr_handle_delete_command(GraphicsCommand *cmd) {
 		if (cmd->image_id == 0)
 			gr_reporterror_cmd(cmd,
 					   "EINVAL: no image id to delete");
-		Image *img = gr_find_image_by_id_or_number(cmd->image_id,
-							   cmd->image_number);
+		Image *img = gr_find_image_for_command(cmd);
 		if (img)
 			gr_delete_image(img);
 		gr_reportsuccess_cmd(cmd);
@@ -2133,6 +2133,9 @@ int gr_parse_command(char *buf, size_t len) {
 
 	if (!cmd.payload)
 		cmd.payload = buf + len;
+
+	if (graphics_debug_mode && cmd.payload && cmd.payload[0])
+		fprintf(stderr, "    payload size: %ld\n", strlen(cmd.payload));
 
 	if (!graphics_command_result.error)
 		gr_handle_command(&cmd);
