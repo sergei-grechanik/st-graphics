@@ -143,6 +143,9 @@ typedef struct Image {
 	khash_t(id2placement) *placements;
 	/// The default placement.
 	uint32_t default_placement;
+	/// The initial placement id, specified with the transmission command,
+	/// used to report success or failure.
+	uint32_t initial_placement_id;
 } Image;
 
 typedef struct ImagePlacement {
@@ -1483,9 +1486,10 @@ static void gr_createresponse(uint32_t image_id, uint32_t image_number,
 	buf[-1] = '\\';
 }
 
-/// Creates the 'OK' response to the current command (unless suppressed).
+/// Creates the 'OK' response to the current command, unless suppressed or a
+/// non-final data transmission.
 static void gr_reportsuccess_cmd(GraphicsCommand *cmd) {
-	if (cmd->quiet < 1)
+	if (cmd->quiet < 1 && !cmd->more)
 		gr_createresponse(cmd->image_id, cmd->image_number,
 				  cmd->placement_id, "OK");
 }
@@ -1494,7 +1498,8 @@ static void gr_reportsuccess_cmd(GraphicsCommand *cmd) {
 static void gr_reportsuccess_img(Image *img) {
 	uint32_t id = img->query_id ? img->query_id : img->image_id;
 	if (img->quiet < 1)
-		gr_createresponse(id, img->image_number, 0, "OK");
+		gr_createresponse(id, img->image_number,
+				  img->initial_placement_id, "OK");
 }
 
 /// Creates an error response to the current command (unless suppressed).
@@ -1528,7 +1533,8 @@ static void gr_reporterror_img(Image *img, const char *format, ...) {
 		uint32_t id = img->query_id ? img->query_id : img->image_id;
 		fprintf(stderr, "%s  id=%u\n", errmsg, id);
 		if (img->quiet < 2)
-			gr_createresponse(id, img->image_number, 0, errmsg);
+			gr_createresponse(id, img->image_number,
+					  img->initial_placement_id, errmsg);
 	}
 }
 
@@ -1673,6 +1679,7 @@ static void gr_append_data(Image *img, const char *payload, int more) {
 			img->open_file = NULL;
 		}
 		img->status = STATUS_UPLOADING_SUCCESS;
+		uint32_t placement_id = img->default_placement;
 		if (img->expected_size &&
 		    img->expected_size != img->disk_size) {
 			// Report failure if the uploaded image size doesn't
@@ -1931,6 +1938,7 @@ static void gr_handle_command(GraphicsCommand *cmd) {
 		// response, so set quiet to 2.
 		cmd->quiet = 2;
 	}
+	Image *img = NULL;
 	switch (cmd->action) {
 	case 0:
 		// If no action is specified, it may be a data transmission
@@ -1953,9 +1961,11 @@ static void gr_handle_command(GraphicsCommand *cmd) {
 		break;
 	case 'T':
 		// Transmit and display.
-		if (gr_handle_transmit_command(cmd) &&
-		    !cmd->is_direct_transmission_continuation) {
+		img = gr_handle_transmit_command(cmd);
+		if (img && !cmd->is_direct_transmission_continuation) {
 			gr_handle_put_command(cmd);
+			if (cmd->placement_id)
+				img->initial_placement_id = cmd->placement_id;
 		}
 		break;
 	case 'd':
