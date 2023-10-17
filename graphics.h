@@ -42,6 +42,8 @@ extern char graphics_debug_mode;
 
 /// A structure representing the result of a graphics command.
 typedef struct {
+	/// Indicates if the terminal needs to be redrawn.
+	char redraw;
 	/// The response of the command that should be sent back to the client
 	/// (may be empty if the quiet flag is set).
 	char response[MAX_GRAPHICS_RESPONSE_LEN];

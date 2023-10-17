@@ -1921,8 +1921,10 @@ static void gr_handle_delete_command(GraphicsCommand *cmd) {
 			gr_reporterror_cmd(cmd,
 					   "EINVAL: no image id to delete");
 		Image *img = gr_find_image_for_command(cmd);
-		if (img)
+		if (img) {
 			gr_delete_image(img);
+			graphics_command_result.redraw = 1;
+		}
 		gr_reportsuccess_cmd(cmd);
 	} else {
 		gr_reporterror_cmd(
