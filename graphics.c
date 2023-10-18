@@ -25,10 +25,7 @@
 
 ////////////////////////////////////////////////////////////////////////////////
 //
-// This file implements a subset of the kitty graphics protocol with the unicode
-// placeholder extension (placing images using a special unicode symbol with
-// diacritics to indicate rows and columns). Actually, unicode placeholder image
-// placement is the only supported image placement method right now.
+// This file implements a subset of the kitty graphics protocol.
 //
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -1782,39 +1779,41 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 		last_image_id = img->image_id;
 		// Decode the filename.
 		char *original_filename = gr_base64dec(cmd->payload, NULL);
-		// We will create a symlink to the original file, and then copy
-		// the file to the temporary cache dir. We do this symlink trick
-		// mostly to be able to use cp for copying, and avoid escaping
-		// file name characters when calling system at the same time.
-		gr_make_sure_tmpdir_exists();
 		char tmp_filename[MAX_FILENAME_SIZE];
-		char tmp_filename_symlink[MAX_FILENAME_SIZE + 4] = {0};
 		gr_get_image_filename(img, tmp_filename, MAX_FILENAME_SIZE);
-		strcat(tmp_filename_symlink, tmp_filename);
-		strcat(tmp_filename_symlink, ".sym");
-		if (access(original_filename, R_OK) != 0 ||
-		    symlink(original_filename, tmp_filename_symlink)) {
+		if (access(original_filename, R_OK) != 0) {
 			gr_reporterror_cmd(cmd,
-					   "EBADF: could not create a symlink "
-					   "from %s to %s",
-					   original_filename,
-					   tmp_filename_symlink);
+					   "EBADF: cannot access the file");
+			fprintf(stderr, "Cannot access the file %s\n",
+				original_filename);
 			img->status = STATUS_UPLOADING_ERROR;
 			img->uploading_failure = ERROR_CANNOT_COPY_FILE;
 		} else {
-			// We've successfully created a symlink, now call cp.
+			// We will create a symlink to the original file, and
+			// then copy the file to the temporary cache dir. We do
+			// this symlink trick mostly to be able to use cp for
+			// copying, and avoid escaping file name characters when
+			// calling system at the same time.
+			gr_make_sure_tmpdir_exists();
+			char tmp_filename_symlink[MAX_FILENAME_SIZE + 4] = {0};
+			strcat(tmp_filename_symlink, tmp_filename);
+			strcat(tmp_filename_symlink, ".sym");
 			char command[MAX_FILENAME_SIZE + 256];
 			size_t len =
 				snprintf(command, MAX_FILENAME_SIZE + 255,
 					 "cp '%s' '%s'", tmp_filename_symlink,
 					 tmp_filename);
 			if (len > MAX_FILENAME_SIZE + 255 ||
+			    symlink(original_filename, tmp_filename_symlink) ||
 			    system(command) != 0) {
-				gr_reporterror_cmd(
-					cmd,
-					"EBADF: could not copy the image "
-					"from %s to %s",
-					tmp_filename_symlink, tmp_filename);
+				gr_reporterror_cmd(cmd,
+						   "EBADF: could not copy the "
+						   "image to the cache dir");
+				fprintf(stderr,
+					"Could not copy the image "
+					"%s (symlink %s) to %s",
+					original_filename, tmp_filename_symlink,
+					tmp_filename);
 				img->status = STATUS_UPLOADING_ERROR;
 				img->uploading_failure = ERROR_CANNOT_COPY_FILE;
 			} else {
