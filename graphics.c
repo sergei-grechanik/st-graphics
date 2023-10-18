@@ -190,6 +190,8 @@ static void gr_get_image_filename(Image *img, char *out, size_t max_len);
 static void gr_delete_image(Image *img);
 static void gr_check_limits();
 static char *gr_base64dec(const char *src, size_t *size);
+static void sanitize_str(char *str, size_t max_len);
+static const char *sanitized_filename(const char *str);
 
 /// The array of image rectangles to draw. It is reset each frame.
 static ImageRect image_rects[MAX_IMAGE_RECTS] = {{0}};
@@ -779,7 +781,7 @@ static Imlib_Image gr_load_raw_pixel_data(Image *img,
 	if (!file) {
 		fprintf(stderr,
 			"error: could not open image file: %s\n",
-			filename);
+			sanitized_filename(filename));
 		return NULL;
 	}
 
@@ -840,7 +842,8 @@ static void gr_load_image(Image *img) {
 	char filename[MAX_FILENAME_SIZE];
 	gr_get_image_filename(img, filename, MAX_FILENAME_SIZE);
 	if (graphics_debug_mode)
-		printf("Loading image: %s\n", filename);
+		fprintf(stderr, "Loading image: %s\n",
+			sanitized_filename(filename));
 	if (img->format == 100 || img->format == 0) {
 		img->original_image = imlib_load_image(filename);
 		if (img->original_image) {
@@ -858,7 +861,7 @@ static void gr_load_image(Image *img) {
 	if (!img->original_image) {
 		if (img->status != STATUS_RAM_LOADING_ERROR) {
 			fprintf(stderr, "error: could not load image: %s\n",
-				filename);
+				sanitized_filename(filename));
 		}
 		img->status = STATUS_RAM_LOADING_ERROR;
 		return;
@@ -883,8 +886,8 @@ static void gr_load_placement(ImagePlacement *placement, int cw, int ch) {
 
 	Image *img = placement->image;
 	if (graphics_debug_mode)
-		printf("Loading placement: %u/%u\n", img->image_id,
-		       placement->placement_id);
+		fprintf(stderr, "Loading placement: %u/%u\n", img->image_id,
+			placement->placement_id);
 
 	// Load the original image.
 	gr_load_image(img);
@@ -978,7 +981,7 @@ static int gr_create_temp_dir() {
 		fprintf(stderr,
 			"error: could not create temporary dir from template "
 			"%s\n",
-			temp_dir);
+			sanitized_filename(temp_dir));
 		return 0;
 	}
 	fprintf(stderr, "Graphics cache directory: %s\n", temp_dir);
@@ -993,7 +996,7 @@ static void gr_make_sure_tmpdir_exists() {
 	fprintf(stderr,
 		"error: %s is not a directory, will need to create a new "
 		"graphics cache directory\n",
-		temp_dir);
+		sanitized_filename(temp_dir));
 	gr_create_temp_dir();
 }
 
@@ -1049,9 +1052,10 @@ void gr_preview_image(uint32_t image_id, const char *exec) {
 			len = snprintf(command, 255,
 				       "xmessage 'Image with id=%u is not "
 				       "fully copied to %s'",
-				       image_id, filename);
+				       image_id, sanitized_filename(filename));
 		} else {
-			len = snprintf(command, 255, "%s %s &", exec, filename);
+			len = snprintf(command, 255, "%s %s &", exec,
+				       sanitized_filename(filename));
 		}
 	} else {
 		len = snprintf(command, 255,
@@ -1119,7 +1123,8 @@ void gr_dump_state() {
 		char filename[MAX_FILENAME_SIZE];
 		gr_get_image_filename(img, filename, MAX_FILENAME_SIZE);
 		if (access(filename, F_OK) != -1)
-			fprintf(stderr, "    file: %s\n", filename);
+			fprintf(stderr, "    file: %s\n",
+				sanitized_filename(filename));
 		else
 			fprintf(stderr, "    not on disk\n");
 		fprintf(stderr, "    disk size: %u KiB\n",
@@ -1441,6 +1446,32 @@ typedef struct {
 	/// (non-virtual placements only).
 	char do_not_move_cursor;
 } GraphicsCommand;
+
+/// Replaces all non-printed characters in `str` with '?' and truncates the
+/// string to `max_size`, maybe inserting ellipsis at the end.
+static void sanitize_str(char *str, size_t max_size) {
+	assert(max_size >= 4);
+	for (size_t i = 0; i < max_size; ++i) {
+		unsigned c = str[i];
+		if (c == '\0')
+			return;
+		if (c >= 128 || !isprint(c))
+			str[i] = '?';
+	}
+	str[max_size - 1] = '\0';
+	str[max_size - 2] = '.';
+	str[max_size - 3] = '.';
+	str[max_size - 4] = '.';
+}
+
+/// A non-destructive version of `sanitize_str`. Uses a static buffer, so be
+/// careful.
+static const char *sanitized_filename(const char *str) {
+	static char buf[MAX_FILENAME_SIZE];
+	strncpy(buf, str, sizeof(buf));
+	sanitize_str(buf, sizeof(buf));
+	return buf;
+}
 
 /// Creates a response to the current command in `graphics_command_result`.
 static void gr_createresponse(uint32_t image_id, uint32_t image_number,
@@ -1785,7 +1816,7 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 			gr_reporterror_cmd(cmd,
 					   "EBADF: cannot access the file");
 			fprintf(stderr, "Cannot access the file %s\n",
-				original_filename);
+				sanitized_filename(original_filename));
 			img->status = STATUS_UPLOADING_ERROR;
 			img->uploading_failure = ERROR_CANNOT_COPY_FILE;
 		} else {
@@ -1812,8 +1843,8 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 				fprintf(stderr,
 					"Could not copy the image "
 					"%s (symlink %s) to %s",
-					original_filename, tmp_filename_symlink,
-					tmp_filename);
+					sanitized_filename(original_filename),
+					tmp_filename_symlink, tmp_filename);
 				img->status = STATUS_UPLOADING_ERROR;
 				img->uploading_failure = ERROR_CANNOT_COPY_FILE;
 			} else {
