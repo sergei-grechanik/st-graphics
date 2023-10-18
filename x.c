@@ -1733,9 +1733,9 @@ xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 		if (cur_col == 0 && cur_row == last_row)
 			cur_col = last_col + 1;
 		// If the additional id byte is not specified and the
-		// coordinates are the same, assume the byte is also the same.
+		// coordinates are consecutive, assume the byte is also the same.
 		if (!cur_id_4thbyteplus1 && cur_row == last_row &&
-		    cur_col == last_col)
+		    cur_col == last_col + 1)
 			cur_id_4thbyteplus1 = last_id_4thbyteplus1;
 		// If we couldn't infer row and column, start from the top left corner.
 		if (cur_row == 0) cur_row = 1;

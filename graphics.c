@@ -1324,7 +1324,7 @@ void gr_finish_drawing(Drawable buf) {
 	}
 }
 
-// Add an image rectangle to a list if rectangles to draw.
+// Add an image rectangle to the list of rectangles to draw.
 void gr_append_imagerect(Drawable buf, uint32_t image_id, uint32_t placement_id,
 			 int start_col, int end_col, int start_row, int end_row,
 			 int x_pix, int y_pix, int cw, int ch, int reverse) {
