@@ -43,6 +43,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include "graphics.h"
 #include "khash.h"
@@ -1812,10 +1813,23 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 		char *original_filename = gr_base64dec(cmd->payload, NULL);
 		char tmp_filename[MAX_FILENAME_SIZE];
 		gr_get_image_filename(img, tmp_filename, MAX_FILENAME_SIZE);
-		if (access(original_filename, R_OK) != 0) {
+		// Stat the file and check that it's a regular file and not too
+		// big.
+		struct stat st;
+		int stat_res = stat(original_filename, &st);
+		const char *stat_error = NULL;
+		if (stat_res)
+			stat_error = strerror(errno);
+		else if (!S_ISREG(st.st_mode))
+			stat_error = "Not a regular file";
+		else if (st.st_size == 0)
+			stat_error = "The size of the file is zero";
+		else if (st.st_size > max_image_disk_size)
+			stat_error = "The file is too large";
+		if (stat_error) {
 			gr_reporterror_cmd(cmd,
-					   "EBADF: cannot access the file");
-			fprintf(stderr, "Cannot access the file %s\n",
+					   "EBADF: %s", stat_error);
+			fprintf(stderr, "Could not load the file %s\n",
 				sanitized_filename(original_filename));
 			img->status = STATUS_UPLOADING_ERROR;
 			img->uploading_failure = ERROR_CANNOT_COPY_FILE;
@@ -1849,22 +1863,11 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 				img->uploading_failure = ERROR_CANNOT_COPY_FILE;
 			} else {
 				// Get the file size of the copied file.
-				struct stat imgfile_stat;
-				stat(tmp_filename, &imgfile_stat);
 				img->status = STATUS_UPLOADING_SUCCESS;
-				img->disk_size = imgfile_stat.st_size;
+				img->disk_size = st.st_size;
 				images_disk_size += img->disk_size;
-				// Check whether the file is too large.
-				// TODO: Check it before copying.
-				if (img->disk_size > max_image_disk_size) {
-					// The file is too large.
-					gr_delete_imagefile(img);
-					img->uploading_failure =
-						ERROR_OVER_SIZE_LIMIT;
-					gr_reportuploaderror(img);
-				} else if (img->expected_size &&
-					   img->expected_size !=
-						   img->disk_size) {
+				if (img->expected_size &&
+				    img->expected_size != img->disk_size) {
 					// The file has unexpected size.
 					img->status = STATUS_UPLOADING_ERROR;
 					img->uploading_failure =
