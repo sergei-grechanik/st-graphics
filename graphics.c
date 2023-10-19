@@ -1813,6 +1813,9 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 		char *original_filename = gr_base64dec(cmd->payload, NULL);
 		char tmp_filename[MAX_FILENAME_SIZE];
 		gr_get_image_filename(img, tmp_filename, MAX_FILENAME_SIZE);
+		if (graphics_debug_mode)
+			fprintf(stderr, "Copying image %s\n",
+				sanitized_filename(original_filename));
 		// Stat the file and check that it's a regular file and not too
 		// big.
 		struct stat st;
