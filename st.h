@@ -133,21 +133,26 @@ extern unsigned int defaultbg;
 extern unsigned int defaultcs;
 
 // Some accessors to image placeholder properties. The row, column, and the most
-// significant byte of the image id are stored in `u`: 11 bits for the row, 12
-// bits for the column, 9 bits for the most significant byte of the image ID.
+// significant byte of the image id are stored in `u`: 9 bits for the row, 9
+// bits for the column, 9 bits for the most significant byte of the image ID, 2
+// bits for the original number of diacritics (0, 1, 2, or 3).
 // Everything is 1-base, 0 means "not specified", that's why we need 9 bits for
 // the most significant byte. Don't forget to add/subtract 1.
-static inline uint32_t tgetimgrow(Glyph *g) { return g->u & 0x7ff; }
-static inline uint32_t tgetimgcol(Glyph *g) { return (g->u >> 11) & 0xfff; }
-static inline uint32_t tgetimgid4thbyteplus1(Glyph *g) { return (g->u >> 23) & 0x1ff; }
+static inline uint32_t tgetimgrow(Glyph *g) { return g->u & 0x1ff; }
+static inline uint32_t tgetimgcol(Glyph *g) { return (g->u >> 9) & 0x1ff; }
+static inline uint32_t tgetimgid4thbyteplus1(Glyph *g) { return (g->u >> 18) & 0x1ff; }
+static inline uint32_t tgetimgdiacriticcount(Glyph *g) { return (g->u >> 27) & 0x3; }
 static inline void tsetimgrow(Glyph *g, uint32_t row) {
-	g->u = (g->u & ~0x7ff) | (row & 0x7ff);
+	g->u = (g->u & ~0x1ff) | (row & 0x1ff);
 }
 static inline void tsetimgcol(Glyph *g, uint32_t row) {
-	g->u = (g->u & ~(0xfff << 11)) | ((row & 0xfff) << 11);
+	g->u = (g->u & ~(0x1ff << 9)) | ((row & 0x1ff) << 9);
 }
 static inline void tsetimg4thbyteplus1(Glyph *g, uint32_t byteplus1) {
-	g->u = (g->u & ~(0x1ff << 23)) | ((byteplus1 & 0x1ff) << 23);
+	g->u = (g->u & ~(0x1ff << 18)) | ((byteplus1 & 0x1ff) << 18);
+}
+static inline void tsetimgdiacriticcount(Glyph *g, uint32_t count) {
+	g->u = (g->u & ~(0x3 << 27)) | ((count & 0x3) << 27);
 }
 
 /// Returns the full image id. This is a naive implementation, if the most

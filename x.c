@@ -363,9 +363,11 @@ showimageinfo(const Arg *arg)
 	size_t len = snprintf(command, 255,
 			      "xmessage 'image_id = %u = 0x%08X\n"
 			      "placement_id = %u = 0x%08X\n"
-			      "column = %d, row = %d'",
+			      "column = %d, row = %d\n"
+			      "original diacritic count = %d'",
 			      image_id, image_id, placement_id, placement_id,
-			      tgetimgcol(&g), tgetimgrow(&g));
+			      tgetimgcol(&g), tgetimgrow(&g),
+			      tgetimgdiacriticcount(&g));
 	if (len > 255) {
 		fprintf(stderr, "error: command too long: %s\n", command);
 		return;

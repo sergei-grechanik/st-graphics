@@ -2599,6 +2599,7 @@ check_control_code:
 			gp = &term.line[term.c.y][term.c.x-1];
 		uint16_t num = diacritic_to_num(u);
 		if (num && (gp->mode & ATTR_IMAGE)) {
+			tsetimgdiacriticcount(gp, tgetimgdiacriticcount(gp) + 1);
 			if (!tgetimgrow(gp))
 				tsetimgrow(gp, num);
 			else if (!tgetimgcol(gp))
