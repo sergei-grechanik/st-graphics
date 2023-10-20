@@ -214,7 +214,7 @@ static time_t last_uploading_time = 0;
 static clock_t drawing_start_time;
 
 /// The directory where the on-disk cache files are stored.
-static char temp_dir[MAX_FILENAME_SIZE];
+static char temp_dir[MAX_FILENAME_SIZE - 16];
 static const char temp_dir_template[] = "/tmp/st-images-XXXXXX";
 
 /// The max size of a single image file, in bytes.
