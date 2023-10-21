@@ -1230,21 +1230,22 @@ static void gr_showrect(Drawable buf, ImageRect *rect) {
 static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 	ImagePlacement *placement =
 		gr_find_image_and_placement(rect->image_id, rect->placement_id);
-	// If the image does not exist, display the bounding box and some info
-	// like the image id.
+	// If the image does not exist, display the bounding box.
 	if (!placement) {
 		gr_showrect(buf, rect);
-		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
+		if (graphics_debug_mode)
+			gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
 		return;
 	}
 
 	// Load the image.
 	gr_load_placement(placement, rect->cw, rect->ch);
 
-	// If the image couldn't be loaded, display the bounding box and info.
+	// If the image couldn't be loaded, display the bounding box.
 	if (!placement->scaled_image) {
 		gr_showrect(buf, rect);
-		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
+		if (graphics_debug_mode)
+			gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
 		return;
 	}
 
