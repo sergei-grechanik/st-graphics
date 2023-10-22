@@ -246,11 +246,11 @@ static Image *gr_find_image(uint32_t image_id) {
 	return res;
 }
 
-/// Finds the image corresponding to the image number. If `number` is zero,
-/// returns the last image. Returns NULL if cannot find.
+/// Finds the image corresponding to the image number. Returns NULL if cannot
+/// find.
 static Image *gr_find_image_by_number(uint32_t image_number) {
 	if (image_number == 0)
-		return gr_find_image(last_image_id);
+		return NULL;
 	Image *img = NULL;
 	kh_foreach_value(images, img, {
 		if (img->image_number == image_number)
@@ -564,6 +564,8 @@ static Image *gr_new_image(uint32_t id) {
 			// Avoid IDs that don't need full 32 bits.
 		} while ((id & 0xFF000000) == 0 || (id & 0x00FFFF00) == 0 ||
 			 gr_find_image(id));
+		if (graphics_debug_mode)
+			fprintf(stderr, "Generated random image id %u\n", id);
 	}
 	Image *img = gr_find_image(id);
 	gr_delete_image_keep_id(img);
@@ -1748,7 +1750,13 @@ static void gr_append_data(Image *img, const char *payload, int more) {
 static Image *gr_find_image_for_command(GraphicsCommand *cmd) {
 	if (cmd->image_id)
 		return gr_find_image(cmd->image_id);
-	Image *img = gr_find_image_by_number(cmd->image_number);
+	Image *img = NULL;
+	// If the image number is not specified, we can't find the image, unless
+	// it's a put command, in which case we will try the last image.
+	if (cmd->image_number == 0 && cmd->action == 'p')
+		img = gr_find_image(last_image_id);
+	else
+		img = gr_find_image_by_number(cmd->image_number);
 	if (img)
 		cmd->image_id = img->image_id;
 	return img;
@@ -1805,6 +1813,10 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 	if (current_upload_image_id != 0 && cmd->image_id == 0 &&
 	    cmd->image_number == 0 && cmd->transmission_medium == 'd') {
 		cmd->image_id = current_upload_image_id;
+		if (graphics_debug_mode)
+			fprintf(stderr,
+				"No images id is specified, continuing uploading %u\n",
+				cmd->image_id);
 	}
 
 	Image *img = NULL;
@@ -1909,6 +1921,8 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 		if (!img)
 			return NULL;
 		last_image_id = img->image_id;
+		// Need to populate it in case there is a placement part.
+		cmd->image_id = img->image_id;
 		img->status = STATUS_UPLOADING;
 		// Start appending data.
 		gr_append_data(img, cmd->payload, cmd->more);
