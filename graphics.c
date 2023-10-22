@@ -2135,9 +2135,13 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start,
 	case 'U':
 		cmd->virtual = num;
 		break;
+	case 'x':
+	case 'y':
 	case 'X':
 	case 'Y':
 	case 'z':
+	case 'w':
+	case 'h':
 		fprintf(stderr,
 			"WARNING: the key '%c' is not supported and will be ignored\n",
 			*key_start);
