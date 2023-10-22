@@ -1778,6 +1778,8 @@ static Image *gr_new_image_from_command(GraphicsCommand *cmd) {
 		return NULL;
 	if (cmd->action == 'q')
 		img->query_id = cmd->image_id;
+	else if (!cmd->image_id)
+		cmd->image_id = img->image_id;
 	// Set the image number.
 	if (cmd->image_number) {
 		// If there is an old image with this number, forget that it had
@@ -1921,8 +1923,6 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 		if (!img)
 			return NULL;
 		last_image_id = img->image_id;
-		// Need to populate it in case there is a placement part.
-		cmd->image_id = img->image_id;
 		img->status = STATUS_UPLOADING;
 		// Start appending data.
 		gr_append_data(img, cmd->payload, cmd->more);
