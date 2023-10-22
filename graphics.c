@@ -1640,8 +1640,16 @@ static void gr_display_nonvirtual_placement(ImagePlacement *placement) {
 /// transmission. Note that we report errors only for the final command
 /// (`!more`) to avoid spamming the client.
 static void gr_append_data(Image *img, const char *payload, int more) {
-	if (!img)
+	if (!img) {
 		img = gr_find_image(current_upload_image_id);
+		if (graphics_debug_mode) {
+			fprintf(stderr, "Appending data to image %u\n",
+				current_upload_image_id);
+			if (!img)
+				fprintf(stderr,
+					"ERROR: this image doesn't exist\n");
+		}
+	}
 	if (!more)
 		current_upload_image_id = 0;
 	if (!img) {
@@ -1964,8 +1972,9 @@ static void gr_handle_delete_command(GraphicsCommand *cmd) {
 		}
 		gr_reportsuccess_cmd(cmd);
 	} else {
-		gr_reporterror_cmd(
-			cmd, "EINVAL: unsupported values of the d key : '%c'",
+		fprintf(stderr,
+			"WARNING: unsupported value of the d key: '%c'. The "
+			"command is ignored.\n",
 			cmd->delete_specifier);
 	}
 }
@@ -1983,7 +1992,7 @@ static void gr_handle_command(GraphicsCommand *cmd) {
 		// If no action is specified, it may be a data transmission
 		// command if 'm=' is specified.
 		if (cmd->is_data_transmission) {
-			gr_append_data(NULL, cmd->payload, cmd->more);
+			gr_handle_transmit_command(cmd);
 			break;
 		}
 		gr_reporterror_cmd(cmd, "EINVAL: no action specified");
@@ -2114,9 +2123,9 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start,
 		break;
 	case 'X':
 	case 'Y':
+	case 'z':
 		fprintf(stderr,
-			"WARNING: the key '%c' is not supported but should be "
-			"safe to ignore\n",
+			"WARNING: the key '%c' is not supported and will be ignored\n",
 			*key_start);
 		break;
 	case 'C':
