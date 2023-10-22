@@ -1891,6 +1891,17 @@ csihandle(void)
 			goto unknown;
 		}
 		break;
+	case '>':
+		switch (csiescseq.mode[1]) {
+		case 'q': /* XTVERSION -- Print terminal name and version */
+			len = snprintf(buf, sizeof(buf),
+				       "\033P>|st-graphics(%s)\033\\", VERSION);
+			ttywrite(buf, len, 0);
+			break;
+		default:
+			goto unknown;
+		}
+		break;
 	case 't': /* XTWINOPS -- Window manipulation */
 		switch (csiescseq.arg[0]) {
 		case 14: /* Report text area size in pixels. */
