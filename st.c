@@ -1234,6 +1234,16 @@ tsetchar(Rune u, const Glyph *attr, int x, int y)
 		term.line[y][x-1].mode &= ~ATTR_WIDE;
 	}
 
+	if (u == ' ' && term.line[y][x].mode & ATTR_IMAGE &&
+	    tgetisclassicplaceholder(&term.line[y][x])) {
+		// This is a workaround: don't overwrite classic placement
+		// placeholders with space symbols (unlike Unicode placeholders
+		// which must be overwritten by anything).
+		term.line[y][x].bg = attr->bg;
+		term.dirty[y] = 1;
+		return;
+	}
+
 	term.dirty[y] = 1;
 	term.line[y][x] = *attr;
 	term.line[y][x].u = u;
@@ -1276,7 +1286,8 @@ tclearregion(int x1, int y1, int x2, int y2)
 }
 
 /// Fills a rectangle area with an image placeholder. The starting point is the
-/// cursor. Adds empty lines if needed.
+/// cursor. Adds empty lines if needed. The placeholder will be marked as
+/// classic.
 void
 tcreateimgplaceholder(uint32_t image_id, uint32_t placement_id,
 		      int cols, int rows, char do_not_move_cursor)
@@ -1297,6 +1308,8 @@ tcreateimgplaceholder(uint32_t image_id, uint32_t placement_id,
 			tsetimgcol(gp, col + 1);
 			tsetimgid(gp, image_id);
 			tsetimgplacementid(gp, placement_id);
+			tsetimgdiacriticcount(gp, 3);
+			tsetisclassicplaceholder(gp, 1);
 		}
 		// If moving the cursor is not allowed and this is the last line
 		// of the terminal, we are done.
