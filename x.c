@@ -5,6 +5,7 @@
 #include <locale.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/select.h>
 #include <time.h>
 #include <unistd.h>
@@ -62,6 +63,7 @@ static void zoomabs(const Arg *);
 static void zoomreset(const Arg *);
 static void ttysend(const Arg *);
 static void previewimage(const Arg *);
+static void showimageinfo(const Arg *);
 static void togglegrdebug(const Arg *);
 static void dumpgrstate(const Arg *);
 
@@ -351,6 +353,36 @@ previewimage(const Arg *arg)
 			image_id, tgetimgplacementid(&g), tgetimgcol(&g),
 			tgetimgrow(&g));
 		gr_preview_image(image_id, arg->s);
+	}
+}
+
+void
+showimageinfo(const Arg *arg)
+{
+	Glyph g = getglyphat(mouse_col, mouse_row);
+	if (!(g.mode & ATTR_IMAGE))
+		return;
+	uint32_t image_id = tgetimgid(&g);
+	uint32_t placement_id = tgetimgplacementid(&g);
+	char command[256];
+	size_t len =
+		snprintf(command, 255,
+			 "xmessage 'image_id = %u = 0x%08X\n"
+			 "placement_id = %u = 0x%08X\n"
+			 "column = %d, row = %d\n"
+			 "classic/unicode placeholder = %s\n"
+			 "original diacritic count = %d'",
+			 image_id, image_id, placement_id, placement_id,
+			 tgetimgcol(&g), tgetimgrow(&g),
+			 tgetisclassicplaceholder(&g) ? "classic" : "unicode",
+			 tgetimgdiacriticcount(&g));
+	if (len > 255) {
+		fprintf(stderr, "error: command too long: %s\n", command);
+		return;
+	}
+	if (system(command) != 0) {
+		fprintf(stderr, "error: could not execute command %s\n",
+			command);
 	}
 }
 
@@ -872,7 +904,7 @@ xloadcols(void)
 int
 xgetcolor(int x, unsigned char *r, unsigned char *g, unsigned char *b)
 {
-	if (!BETWEEN(x, 0, dc.collen))
+	if (!BETWEEN(x, 0, dc.collen - 1))
 		return 1;
 
 	*r = dc.col[x].color.red >> 8;
@@ -887,7 +919,7 @@ xsetcolorname(int x, const char *name)
 {
 	Color ncolor;
 
-	if (!BETWEEN(x, 0, dc.collen))
+	if (!BETWEEN(x, 0, dc.collen - 1))
 		return 1;
 
 	if (!xloadcolor(x, name, &ncolor))
@@ -1703,39 +1735,53 @@ xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 	int x_pix = x_pix_start;
 	int y_pix = win.vborderpx + y1 * win.ch;
 	uint32_t image_id_24bits = base.fg & 0xFFFFFF;
-	uint32_t placement_id = base.decor & 0xFFFFFF;
-	if (IS_DECOR_UNSET(base.decor))
-		placement_id = 0;
+	uint32_t placement_id = tgetimgplacementid(&base);
 	// Columns and rows are 1-based, 0 means unspecified.
 	int last_col = 0;
 	int last_row = 0;
 	int last_start_col = 0;
 	// The most significant byte is also 1-base, subtract 1 before use.
-	uint8_t last_id_4thbyteplus1 = 0;
+	uint32_t last_id_4thbyteplus1 = 0;
+	// We may need to inherit row/column/4th byte from the previous cell.
+	Glyph *prev = &line[x1 - 1];
+	if (x1 > 0 && (prev->mode & ATTR_IMAGE) &&
+	    (prev->fg & 0xFFFFFF) == image_id_24bits &&
+	    prev->decor == base.decor) {
+		last_row = tgetimgrow(prev);
+		last_col = tgetimgcol(prev);
+		last_id_4thbyteplus1 = tgetimgid4thbyteplus1(prev);
+		last_start_col = last_col + 1;
+	}
 	for (int i = 0; i < x2 - x1; ++i) {
 		Glyph *g = &line[x1 + i];
 		uint32_t cur_row = tgetimgrow(g);
 		uint32_t cur_col = tgetimgcol(g);
-		uint8_t cur_id_4thbyteplus1 = tgetimgid4thbyteplus1(g);
-		// If the row is not specified, assume it's the same as the row of the
-		// previous cell.
-		if (cur_row == 0) cur_row = last_row;
+		uint32_t cur_id_4thbyteplus1 = tgetimgid4thbyteplus1(g);
+		// If the row is not specified, assume it's the same as the row
+		// of the previous cell.
+		if (cur_row == 0)
+			cur_row = last_row;
 		// If the column is not specified and the row is the same as the
 		// row of the previous cell, then assume that the column is the
 		// next one.
 		if (cur_col == 0 && cur_row == last_row)
 			cur_col = last_col + 1;
 		// If the additional id byte is not specified and the
-		// coordinates are the same, assume the byte is also the same.
+		// coordinates are consecutive, assume the byte is also the
+		// same.
 		if (!cur_id_4thbyteplus1 && cur_row == last_row &&
-		    cur_col == last_col)
+		    cur_col == last_col + 1)
 			cur_id_4thbyteplus1 = last_id_4thbyteplus1;
-		// If we couldn't infer row and column, start from the top left corner.
-		if (cur_row == 0) cur_row = 1;
-		if (cur_col == 0) cur_col = 1;
-		// If this cell breaks a contiguous stripe of image cells, draw that
-		// line and start a new one.
-		if (cur_col != last_col + 1 || cur_row != last_row) {
+		// If we couldn't infer row and column, start from the top left
+		// corner.
+		if (cur_row == 0)
+			cur_row = 1;
+		if (cur_col == 0)
+			cur_col = 1;
+		// If this cell breaks a contiguous stripe of image cells, draw
+		// that line and start a new one.
+		if (cur_col != last_col + 1 || cur_row != last_row ||
+		    cur_id_4thbyteplus1 != last_id_4thbyteplus1) {
 			uint32_t image_id = image_id_24bits;
 			if (last_id_4thbyteplus1)
 				image_id |= (last_id_4thbyteplus1 - 1) << 24;
@@ -1747,14 +1793,17 @@ xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 					win.cw, win.ch,
 					base.mode & ATTR_REVERSE);
 			last_start_col = cur_col;
-			x_pix = x_pix_start + i*win.cw;
+			x_pix = x_pix_start + i * win.cw;
 		}
 		last_row = cur_row;
 		last_col = cur_col;
 		last_id_4thbyteplus1 = cur_id_4thbyteplus1;
-		// Set the additional byte for this glyph if it wasn't
-		// specified. This is to make the naive implementation of
-		// tgetimgid work.
+		// Populate the missing glyph data to enable inheritance between
+		// runs and support the naive implementation of tgetimgid.
+		if (!tgetimgrow(g))
+			tsetimgrow(g, cur_row);
+		if (!tgetimgcol(g))
+			tsetimgcol(g, cur_col);
 		if (!tgetimgid4thbyteplus1(g))
 			tsetimg4thbyteplus1(g, cur_id_4thbyteplus1);
 	}
@@ -2196,11 +2245,6 @@ run(void)
 				lastblink = now;
 				timeout = blinktimeout;
 			}
-		}
-
-		if (graphics_uploading) {
-			if (!gr_check_if_still_uploading())
-				redraw();
 		}
 
 		draw();

@@ -1119,7 +1119,7 @@ tscrollup(int orig, int n)
 void
 selscroll(int orig, int n)
 {
-	if (sel.ob.x == -1)
+	if (sel.ob.x == -1 || sel.alt != IS_SET(MODE_ALTSCREEN))
 		return;
 
 	if (BETWEEN(sel.nb.y, orig, term.bot) != BETWEEN(sel.ne.y, orig, term.bot)) {
@@ -1234,6 +1234,16 @@ tsetchar(Rune u, const Glyph *attr, int x, int y)
 		term.line[y][x-1].mode &= ~ATTR_WIDE;
 	}
 
+	if (u == ' ' && term.line[y][x].mode & ATTR_IMAGE &&
+	    tgetisclassicplaceholder(&term.line[y][x])) {
+		// This is a workaround: don't overwrite classic placement
+		// placeholders with space symbols (unlike Unicode placeholders
+		// which must be overwritten by anything).
+		term.line[y][x].bg = attr->bg;
+		term.dirty[y] = 1;
+		return;
+	}
+
 	term.dirty[y] = 1;
 	term.line[y][x] = *attr;
 	term.line[y][x].u = u;
@@ -1276,10 +1286,11 @@ tclearregion(int x1, int y1, int x2, int y2)
 }
 
 /// Fills a rectangle area with an image placeholder. The starting point is the
-/// cursor. Adds empty lines if needed.
+/// cursor. Adds empty lines if needed. The placeholder will be marked as
+/// classic.
 void
 tcreateimgplaceholder(uint32_t image_id, uint32_t placement_id,
-		      int cols, int rows)
+		      int cols, int rows, char do_not_move_cursor)
 {
 	for (int row = 0; row < rows; ++row) {
 		int y = term.c.y;
@@ -1297,10 +1308,29 @@ tcreateimgplaceholder(uint32_t image_id, uint32_t placement_id,
 			tsetimgcol(gp, col + 1);
 			tsetimgid(gp, image_id);
 			tsetimgplacementid(gp, placement_id);
+			tsetimgdiacriticcount(gp, 3);
+			tsetisclassicplaceholder(gp, 1);
 		}
+		// If moving the cursor is not allowed and this is the last line
+		// of the terminal, we are done.
+		if (do_not_move_cursor && y == term.row - 1)
+			break;
 		// Move the cursor down, maybe creating a new line. The x is
-		// preserved.
-		tnewline(0);
+		// preserved (we never change term.c.x in the loop above).
+		if (row != rows - 1)
+			tnewline(/*first_col=*/0);
+	}
+	if (do_not_move_cursor) {
+		// Return the cursor to the original position.
+		tmoveto(term.c.x, term.c.y - rows + 1);
+	} else {
+		// Move the cursor beyond the last column, as required by the
+		// protocol. If the cursor goes beyond the screen edge, insert a
+		// newline to match the behavior of kitty.
+		if (term.c.x + cols >= term.col)
+			tnewline(/*first_col=*/1);
+		else
+			tmoveto(term.c.x + cols, term.c.y);
 	}
 }
 
@@ -1834,11 +1864,18 @@ csihandle(void)
 	case 'm': /* SGR -- Terminal attribute (color) */
 		tsetattr(csiescseq.arg, csiescseq.narg);
 		break;
-	case 'n': /* DSR – Device Status Report (cursor position) */
-		if (csiescseq.arg[0] == 6) {
+	case 'n': /* DSR -- Device Status Report */
+		switch (csiescseq.arg[0]) {
+		case 5: /* Status Report "OK" `0n` */
+			ttywrite("\033[0n", sizeof("\033[0n") - 1, 0);
+			break;
+		case 6: /* Report Cursor Position (CPR) "<row>;<column>R" */
 			len = snprintf(buf, sizeof(buf), "\033[%i;%iR",
-					term.c.y+1, term.c.x+1);
+			               term.c.y+1, term.c.x+1);
 			ttywrite(buf, len, 0);
+			break;
+		default:
+			goto unknown;
 		}
 		break;
 	case 'r': /* DECSTBM -- Set Scrolling Region */
@@ -1862,6 +1899,17 @@ csihandle(void)
 		case 'q': /* DECSCUSR -- Set Cursor Style */
 			if (xsetcursor(csiescseq.arg[0]))
 				goto unknown;
+			break;
+		default:
+			goto unknown;
+		}
+		break;
+	case '>':
+		switch (csiescseq.mode[1]) {
+		case 'q': /* XTVERSION -- Print terminal name and version */
+			len = snprintf(buf, sizeof(buf),
+				       "\033P>|st-graphics(%s)\033\\", VERSION);
+			ttywrite(buf, len, 0);
 			break;
 		default:
 			goto unknown;
@@ -2019,8 +2067,10 @@ strhandle(void)
 			if (p && !strcmp(p, "?")) {
 				osc_color_response(j, 0, 1);
 			} else if (xsetcolorname(j, p)) {
-				if (par == 104 && narg <= 1)
+				if (par == 104 && narg <= 1) {
+					xloadcols();
 					return; /* color reset without parameter */
+				}
 				fprintf(stderr, "erresc: invalid color j=%d, p=%s\n",
 				        j, p ? p : "(null)");
 			} else {
@@ -2044,12 +2094,13 @@ strhandle(void)
 					res->placeholder.image_id,
 					res->placeholder.placement_id,
 					res->placeholder.columns,
-					res->placeholder.rows);
+					res->placeholder.rows,
+					res->placeholder.do_not_move_cursor);
 			}
 			if (res->response[0])
 				ttywriteraw(res->response, strlen(res->response));
 			if (res->redraw)
-				redraw();
+				tfulldirt();
 			return;
 		}
 		return;
@@ -2424,6 +2475,7 @@ eschandle(uchar ascii)
 		treset();
 		resettitle();
 		xloadcols();
+		xsetmode(0, MODE_HIDE);
 		break;
 	case '=': /* DECPAM -- Application keypad */
 		xsetmode(1, MODE_APPKEYPAD);
@@ -2516,6 +2568,9 @@ check_control_code:
 	 * they must not cause conflicts with sequences.
 	 */
 	if (control) {
+		/* in UTF-8 mode ignore handling C1 control characters */
+		if (IS_SET(MODE_UTF8) && ISCONTROLC1(u))
+			return;
 		tcontrolcode(u);
 		/*
 		 * control codes are not shown ever
@@ -2569,6 +2624,7 @@ check_control_code:
 			gp = &term.line[term.c.y][term.c.x-1];
 		uint16_t num = diacritic_to_num(u);
 		if (num && (gp->mode & ATTR_IMAGE)) {
+			tsetimgdiacriticcount(gp, tgetimgdiacriticcount(gp) + 1);
 			if (!tgetimgrow(gp))
 				tsetimgrow(gp, num);
 			else if (!tgetimgcol(gp))
@@ -2587,11 +2643,16 @@ check_control_code:
 		gp = &term.line[term.c.y][term.c.x];
 	}
 
-	if (IS_SET(MODE_INSERT) && term.c.x+width < term.col)
+	if (IS_SET(MODE_INSERT) && term.c.x+width < term.col) {
 		memmove(gp+width, gp, (term.col - term.c.x - width) * sizeof(Glyph));
+		gp->mode &= ~ATTR_WIDE;
+	}
 
 	if (term.c.x+width > term.col) {
-		tnewline(1);
+		if (IS_SET(MODE_WRAP))
+			tnewline(1);
+		else
+			tmoveto(term.col - width, term.c.y);
 		gp = &term.line[term.c.y][term.c.x];
 	}
 

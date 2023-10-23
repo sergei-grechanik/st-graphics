@@ -1,20 +1,3 @@
-My personal fork of st
-----------------------
-
-This is my personal fork of st (https://st.suckless.org/). It's so personal that
-I even keep my config.h here.
-
-st with graphics
-----------------
-This is a fork of st that implements a subset of kitty graphics protocol with
-the unicode placeholder extension (see
-https://github.com/sergei-grechanik/tupimage). Requires imlib2.
-
-Default graphics shortcuts:
-- Ctrl+Shift+RightClick to preview the clicked image in feh.
-- Ctrl+Shift+F1 to enter graphics debug mode
-
-
 st - simple terminal
 --------------------
 st is a simple terminal emulator for X which sucks less.

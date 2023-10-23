@@ -25,10 +25,7 @@
 
 ////////////////////////////////////////////////////////////////////////////////
 //
-// This file implements a subset of the kitty graphics protocol with the unicode
-// placeholder extension (placing images using a special unicode symbol with
-// diacritics to indicate rows and columns). Actually, unicode placeholder image
-// placement is the only supported image placement method right now.
+// This file implements a subset of the kitty graphics protocol.
 //
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -46,6 +43,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include "graphics.h"
 #include "khash.h"
@@ -64,8 +62,7 @@ enum ScaleMode {
 };
 
 /// The status of an image. Each image uploaded to the terminal is cached on
-/// disk. Then it is loaded to ram when needed in the ready to display form
-/// (scaled to the requested box given the current cell width and height).
+/// disk, then it is loaded to ram when needed.
 enum ImageStatus {
 	STATUS_UNINITIALIZED = 0,
 	STATUS_UPLOADING = 1,
@@ -113,6 +110,10 @@ typedef struct Image {
 	/// The client id specified in the query command (`a=q`). This one must
 	/// be used to create the response if it's non-zero.
 	uint32_t query_id;
+	/// The number specified in the transmission command (`I=`). If
+	/// non-zero, it may be used to identify the image instead of the
+	/// image_id, and it also should be mentioned in responses.
+	uint32_t image_number;
 	/// The last time when the image was displayed or otherwise touched.
 	time_t atime;
 	/// The size of the corresponding file cached on disk.
@@ -140,6 +141,9 @@ typedef struct Image {
 	khash_t(id2placement) *placements;
 	/// The default placement.
 	uint32_t default_placement;
+	/// The initial placement id, specified with the transmission command,
+	/// used to report success or failure.
+	uint32_t initial_placement_id;
 } Image;
 
 typedef struct ImagePlacement {
@@ -162,6 +166,9 @@ typedef struct ImagePlacement {
 	/// The dimensions of the cell used to scale the image. If cell
 	/// dimensions are changed (font change), the image will be rescaled.
 	uint16_t scaled_cw, scaled_ch;
+	/// If true, do not move the cursor when displaying this placement
+	/// (non-virtual placements only).
+	char do_not_move_cursor;
 } ImagePlacement;
 
 /// A rectangular piece of an image to be drawn.
@@ -184,6 +191,8 @@ static void gr_get_image_filename(Image *img, char *out, size_t max_len);
 static void gr_delete_image(Image *img);
 static void gr_check_limits();
 static char *gr_base64dec(const char *src, size_t *size);
+static void sanitize_str(char *str, size_t max_len);
+static const char *sanitized_filename(const char *str);
 
 /// The array of image rectangles to draw. It is reset each frame.
 static ImageRect image_rects[MAX_IMAGE_RECTS] = {{0}};
@@ -205,7 +214,7 @@ static time_t last_uploading_time = 0;
 static clock_t drawing_start_time;
 
 /// The directory where the on-disk cache files are stored.
-static char temp_dir[MAX_FILENAME_SIZE];
+static char temp_dir[MAX_FILENAME_SIZE - 16];
 static const char temp_dir_template[] = "/tmp/st-images-XXXXXX";
 
 /// The max size of a single image file, in bytes.
@@ -222,7 +231,6 @@ static unsigned char reverse_table[256];
 
 // Declared in the header.
 char graphics_debug_mode = 0;
-char graphics_uploading = 0;
 GraphicsCommandResult graphics_command_result = {0};
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -236,6 +244,19 @@ static Image *gr_find_image(uint32_t image_id) {
 		return NULL;
 	Image *res = kh_value(images, k);
 	return res;
+}
+
+/// Finds the image corresponding to the image number. Returns NULL if cannot
+/// find.
+static Image *gr_find_image_by_number(uint32_t image_number) {
+	if (image_number == 0)
+		return NULL;
+	Image *img = NULL;
+	kh_foreach_value(images, img, {
+		if (img->image_number == image_number)
+			return img;
+	});
+	return NULL;
 }
 
 /// Finds the placement corresponding to the id. If the placement id is 0,
@@ -543,6 +564,8 @@ static Image *gr_new_image(uint32_t id) {
 			// Avoid IDs that don't need full 32 bits.
 		} while ((id & 0xFF000000) == 0 || (id & 0x00FFFF00) == 0 ||
 			 gr_find_image(id));
+		if (graphics_debug_mode)
+			fprintf(stderr, "Generated random image id %u\n", id);
 	}
 	Image *img = gr_find_image(id);
 	gr_delete_image_keep_id(img);
@@ -761,7 +784,7 @@ static Imlib_Image gr_load_raw_pixel_data(Image *img,
 	if (!file) {
 		fprintf(stderr,
 			"error: could not open image file: %s\n",
-			filename);
+			sanitized_filename(filename));
 		return NULL;
 	}
 
@@ -822,7 +845,8 @@ static void gr_load_image(Image *img) {
 	char filename[MAX_FILENAME_SIZE];
 	gr_get_image_filename(img, filename, MAX_FILENAME_SIZE);
 	if (graphics_debug_mode)
-		printf("Loading image: %s\n", filename);
+		fprintf(stderr, "Loading image: %s\n",
+			sanitized_filename(filename));
 	if (img->format == 100 || img->format == 0) {
 		img->original_image = imlib_load_image(filename);
 		if (img->original_image) {
@@ -840,7 +864,7 @@ static void gr_load_image(Image *img) {
 	if (!img->original_image) {
 		if (img->status != STATUS_RAM_LOADING_ERROR) {
 			fprintf(stderr, "error: could not load image: %s\n",
-				filename);
+				sanitized_filename(filename));
 		}
 		img->status = STATUS_RAM_LOADING_ERROR;
 		return;
@@ -865,8 +889,8 @@ static void gr_load_placement(ImagePlacement *placement, int cw, int ch) {
 
 	Image *img = placement->image;
 	if (graphics_debug_mode)
-		printf("Loading placement: %u/%u\n", img->image_id,
-		       placement->placement_id);
+		fprintf(stderr, "Loading placement: %u/%u\n", img->image_id,
+			placement->placement_id);
 
 	// Load the original image.
 	gr_load_image(img);
@@ -960,7 +984,7 @@ static int gr_create_temp_dir() {
 		fprintf(stderr,
 			"error: could not create temporary dir from template "
 			"%s\n",
-			temp_dir);
+			sanitized_filename(temp_dir));
 		return 0;
 	}
 	fprintf(stderr, "Graphics cache directory: %s\n", temp_dir);
@@ -975,7 +999,7 @@ static void gr_make_sure_tmpdir_exists() {
 	fprintf(stderr,
 		"error: %s is not a directory, will need to create a new "
 		"graphics cache directory\n",
-		temp_dir);
+		sanitized_filename(temp_dir));
 	gr_create_temp_dir();
 }
 
@@ -1031,9 +1055,10 @@ void gr_preview_image(uint32_t image_id, const char *exec) {
 			len = snprintf(command, 255,
 				       "xmessage 'Image with id=%u is not "
 				       "fully copied to %s'",
-				       image_id, filename);
+				       image_id, sanitized_filename(filename));
 		} else {
-			len = snprintf(command, 255, "%s %s &", exec, filename);
+			len = snprintf(command, 255, "%s %s &", exec,
+				       sanitized_filename(filename));
 		}
 	} else {
 		len = snprintf(command, 255,
@@ -1101,7 +1126,8 @@ void gr_dump_state() {
 		char filename[MAX_FILENAME_SIZE];
 		gr_get_image_filename(img, filename, MAX_FILENAME_SIZE);
 		if (access(filename, F_OK) != -1)
-			fprintf(stderr, "    file: %s\n", filename);
+			fprintf(stderr, "    file: %s\n",
+				sanitized_filename(filename));
 		else
 			fprintf(stderr, "    not on disk\n");
 		fprintf(stderr, "    disk size: %u KiB\n",
@@ -1162,20 +1188,6 @@ void gr_dump_state() {
 	fprintf(stderr, "============================================\n");
 }
 
-/// Checks if we are still really uploading something. Returns 1 if we may be
-/// and 0 if we aren't. If certain amount of time has passed since the last data
-/// transmission command, we assume that all uploads have failed.
-int gr_check_if_still_uploading() {
-	if (!graphics_uploading)
-		return 0;
-	time_t cur_time;
-	time(&cur_time);
-	double dt = difftime(last_uploading_time, cur_time);
-	if (difftime(last_uploading_time, cur_time) < -1.0)
-		graphics_uploading = 0;
-	return graphics_uploading;
-}
-
 /// Displays debug information in the rectangle using colors col1 and col2.
 static void gr_displayinfo(Drawable buf, ImageRect *rect, int col1, int col2,
 			   const char *message) {
@@ -1218,29 +1230,24 @@ static void gr_showrect(Drawable buf, ImageRect *rect) {
 
 /// Draws the given part of an image.
 static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
-	// If we are uploading data then we shouldn't do heavy computation (like
-	// displaying graphics), mostly because some versions of tmux may drop
-	// pass-through commands if the terminal is too slow.
-	if (graphics_uploading)
-		return;
-
 	ImagePlacement *placement =
 		gr_find_image_and_placement(rect->image_id, rect->placement_id);
-	// If the image does not exist, display the bounding box and some info
-	// like the image id.
+	// If the image does not exist, display the bounding box.
 	if (!placement) {
 		gr_showrect(buf, rect);
-		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
+		if (graphics_debug_mode)
+			gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
 		return;
 	}
 
 	// Load the image.
 	gr_load_placement(placement, rect->cw, rect->ch);
 
-	// If the image couldn't be loaded, display the bounding box and info.
+	// If the image couldn't be loaded, display the bounding box.
 	if (!placement->scaled_image) {
 		gr_showrect(buf, rect);
-		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
+		if (graphics_debug_mode)
+			gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
 		return;
 	}
 
@@ -1323,7 +1330,7 @@ void gr_finish_drawing(Drawable buf) {
 	}
 }
 
-// Add an image rectangle to a list if rectangles to draw.
+// Add an image rectangle to the list of rectangles to draw.
 void gr_append_imagerect(Drawable buf, uint32_t image_id, uint32_t placement_id,
 			 int start_col, int end_col, int start_row, int end_row,
 			 int x_pix, int y_pix, int cw, int ch, int reverse) {
@@ -1439,37 +1446,92 @@ typedef struct {
 	int size;
 	/// 'U=', whether it's a virtual placement for Unicode placeholders.
 	int virtual;
+	/// 'C=', if true, do not move the cursor when displaying this placement
+	/// (non-virtual placements only).
+	char do_not_move_cursor;
 } GraphicsCommand;
+
+/// Replaces all non-printed characters in `str` with '?' and truncates the
+/// string to `max_size`, maybe inserting ellipsis at the end.
+static void sanitize_str(char *str, size_t max_size) {
+	assert(max_size >= 4);
+	for (size_t i = 0; i < max_size; ++i) {
+		unsigned c = str[i];
+		if (c == '\0')
+			return;
+		if (c >= 128 || !isprint(c))
+			str[i] = '?';
+	}
+	str[max_size - 1] = '\0';
+	str[max_size - 2] = '.';
+	str[max_size - 3] = '.';
+	str[max_size - 4] = '.';
+}
+
+/// A non-destructive version of `sanitize_str`. Uses a static buffer, so be
+/// careful.
+static const char *sanitized_filename(const char *str) {
+	static char buf[MAX_FILENAME_SIZE];
+	strncpy(buf, str, sizeof(buf));
+	sanitize_str(buf, sizeof(buf));
+	return buf;
+}
 
 /// Creates a response to the current command in `graphics_command_result`.
 static void gr_createresponse(uint32_t image_id, uint32_t image_number,
-			      const char *msg) {
-	if (image_id && image_number) {
-		snprintf(graphics_command_result.response,
-			 MAX_GRAPHICS_RESPONSE_LEN, "\033_Gi=%u,I=%u;%s\033\\",
-			 image_id, image_number, msg);
-	} else if (!image_id && image_number) {
-		snprintf(graphics_command_result.response,
-			 MAX_GRAPHICS_RESPONSE_LEN, "\033_GI=%u;%s\033\\",
-			 image_number, msg);
-	} else {
-		snprintf(graphics_command_result.response,
-			 MAX_GRAPHICS_RESPONSE_LEN, "\033_Gi=%u;%s\033\\",
-			 image_id, msg);
+			      uint32_t placement_id, const char *msg) {
+	if (!image_id && !image_number && !placement_id) {
+		// Nobody expects the response in this case, so just print it to
+		// stderr.
+		fprintf(stderr,
+			"error: No image id or image number or placement_id, "
+			"but still there is a response: %s\n",
+			msg);
+		return;
 	}
+	char *buf = graphics_command_result.response;
+	size_t maxlen = MAX_GRAPHICS_RESPONSE_LEN;
+	size_t written;
+	written = snprintf(buf, maxlen, "\033_G");
+	buf += written;
+	maxlen -= written;
+	if (image_id) {
+		written = snprintf(buf, maxlen, "i=%u,", image_id);
+		buf += written;
+		maxlen -= written;
+	}
+	if (image_number) {
+		written = snprintf(buf, maxlen, "I=%u,", image_number);
+		buf += written;
+		maxlen -= written;
+	}
+	if (placement_id) {
+		written = snprintf(buf, maxlen, "p=%u,", placement_id);
+		buf += written;
+		maxlen -= written;
+	}
+	buf[-1] = ';';
+	written = snprintf(buf, maxlen, "%s\033\\", msg);
+	buf += written;
+	maxlen -= written;
+	buf[-2] = '\033';
+	buf[-1] = '\\';
 }
 
-/// Creates the 'OK' response to the current command (unless suppressed).
+/// Creates the 'OK' response to the current command, unless suppressed or a
+/// non-final data transmission.
 static void gr_reportsuccess_cmd(GraphicsCommand *cmd) {
-	if (cmd->quiet < 1)
-		gr_createresponse(cmd->image_id, cmd->image_number, "OK");
+	if (cmd->quiet < 1 && !cmd->more)
+		gr_createresponse(cmd->image_id, cmd->image_number,
+				  cmd->placement_id, "OK");
 }
 
 /// Creates the 'OK' response to the current command (unless suppressed).
 static void gr_reportsuccess_img(Image *img) {
 	uint32_t id = img->query_id ? img->query_id : img->image_id;
 	if (img->quiet < 1)
-		gr_createresponse(id, 0, "OK");
+		gr_createresponse(id, img->image_number,
+				  img->initial_placement_id, "OK");
 }
 
 /// Creates an error response to the current command (unless suppressed).
@@ -1483,7 +1545,8 @@ static void gr_reporterror_cmd(GraphicsCommand *cmd, const char *format, ...) {
 
 	fprintf(stderr, "%s  in command: %s\n", errmsg, cmd->command);
 	if (cmd->quiet < 2)
-		gr_createresponse(cmd->image_id, cmd->image_number, errmsg);
+		gr_createresponse(cmd->image_id, cmd->image_number,
+				  cmd->placement_id, errmsg);
 }
 
 /// Creates an error response to the current command (unless suppressed).
@@ -1497,12 +1560,13 @@ static void gr_reporterror_img(Image *img, const char *format, ...) {
 
 	if (!img) {
 		fprintf(stderr, "%s\n", errmsg);
-		gr_createresponse(0, 0, errmsg);
+		gr_createresponse(0, 0, 0, errmsg);
 	} else {
 		uint32_t id = img->query_id ? img->query_id : img->image_id;
 		fprintf(stderr, "%s  id=%u\n", errmsg, id);
 		if (img->quiet < 2)
-			gr_createresponse(id, 0, errmsg);
+			gr_createresponse(id, img->image_number,
+					  img->initial_placement_id, errmsg);
 	}
 }
 
@@ -1565,6 +1629,8 @@ static void gr_display_nonvirtual_placement(ImagePlacement *placement) {
 	graphics_command_result.placeholder.placement_id = placement->placement_id;
 	graphics_command_result.placeholder.columns = placement->cols;
 	graphics_command_result.placeholder.rows = placement->rows;
+	graphics_command_result.placeholder.do_not_move_cursor =
+		placement->do_not_move_cursor;
 	if (graphics_debug_mode) {
 		fprintf(stderr, "Creating a placeholder for %u/%u  %d x %d\n",
 			placement->image->image_id, placement->placement_id,
@@ -1576,8 +1642,16 @@ static void gr_display_nonvirtual_placement(ImagePlacement *placement) {
 /// transmission. Note that we report errors only for the final command
 /// (`!more`) to avoid spamming the client.
 static void gr_append_data(Image *img, const char *payload, int more) {
-	if (!img)
+	if (!img) {
 		img = gr_find_image(current_upload_image_id);
+		if (graphics_debug_mode) {
+			fprintf(stderr, "Appending data to image %u\n",
+				current_upload_image_id);
+			if (!img)
+				fprintf(stderr,
+					"ERROR: this image doesn't exist\n");
+		}
+	}
 	if (!more)
 		current_upload_image_id = 0;
 	if (!img) {
@@ -1638,14 +1712,6 @@ static void gr_append_data(Image *img, const char *payload, int more) {
 		current_upload_image_id = img->image_id;
 		time(&last_uploading_time);
 	} else {
-		if (graphics_uploading) {
-			graphics_uploading--;
-			// Since direct uploading suppresses image
-			// drawing (as a workaround), we need to redraw
-			// the screen whenever we finish all uploads.
-			if (!graphics_uploading)
-				graphics_command_result.redraw = 1;
-		}
 		current_upload_image_id = 0;
 		// Close the file.
 		if (img->open_file) {
@@ -1653,6 +1719,7 @@ static void gr_append_data(Image *img, const char *payload, int more) {
 			img->open_file = NULL;
 		}
 		img->status = STATUS_UPLOADING_SUCCESS;
+		uint32_t placement_id = img->default_placement;
 		if (img->expected_size &&
 		    img->expected_size != img->disk_size) {
 			// Report failure if the uploaded image size doesn't
@@ -1678,6 +1745,23 @@ static void gr_append_data(Image *img, const char *payload, int more) {
 	gr_check_limits();
 }
 
+/// Finds the image either by id or by number specified in the command and sets
+/// the image_id of `cmd` if the image was found.
+static Image *gr_find_image_for_command(GraphicsCommand *cmd) {
+	if (cmd->image_id)
+		return gr_find_image(cmd->image_id);
+	Image *img = NULL;
+	// If the image number is not specified, we can't find the image, unless
+	// it's a put command, in which case we will try the last image.
+	if (cmd->image_number == 0 && cmd->action == 'p')
+		img = gr_find_image(last_image_id);
+	else
+		img = gr_find_image_by_number(cmd->image_number);
+	if (img)
+		cmd->image_id = img->image_id;
+	return img;
+}
+
 /// Create a new image and initialize its parameters from the command.
 static Image *gr_new_image_from_command(GraphicsCommand *cmd) {
 	if (cmd->format != 0 && cmd->format != 32 && cmd->format != 24 &&
@@ -1694,6 +1778,19 @@ static Image *gr_new_image_from_command(GraphicsCommand *cmd) {
 		return NULL;
 	if (cmd->action == 'q')
 		img->query_id = cmd->image_id;
+	else if (!cmd->image_id)
+		cmd->image_id = img->image_id;
+	// Set the image number.
+	if (cmd->image_number) {
+		// If there is an old image with this number, forget that it had
+		// this number.
+		Image *old_img_with_this_number =
+			gr_find_image_by_number(cmd->image_number);
+		if (old_img_with_this_number)
+			old_img_with_this_number->image_number = 0;
+		// The new image has this number now.
+		img->image_number = cmd->image_number;
+	}
 	// Set parameters.
 	img->expected_size = cmd->size;
 	img->format = cmd->format;
@@ -1708,12 +1805,6 @@ static Image *gr_new_image_from_command(GraphicsCommand *cmd) {
 
 /// Handles a data transmission command.
 static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
-	if (cmd->image_number != 0) {
-		gr_reporterror_cmd(
-			cmd, "EINVAL: image numbers (I) are not supported");
-		return NULL;
-	}
-
 	// The default is direct transmission.
 	if (!cmd->transmission_medium)
 		cmd->transmission_medium = 'd';
@@ -1724,6 +1815,10 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 	if (current_upload_image_id != 0 && cmd->image_id == 0 &&
 	    cmd->image_number == 0 && cmd->transmission_medium == 'd') {
 		cmd->image_id = current_upload_image_id;
+		if (graphics_debug_mode)
+			fprintf(stderr,
+				"No images id is specified, continuing uploading %u\n",
+				cmd->image_id);
 	}
 
 	Image *img = NULL;
@@ -1739,59 +1834,66 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 		last_image_id = img->image_id;
 		// Decode the filename.
 		char *original_filename = gr_base64dec(cmd->payload, NULL);
-		// We will create a symlink to the original file, and then copy
-		// the file to the temporary cache dir. We do this symlink trick
-		// mostly to be able to use cp for copying, and avoid escaping
-		// file name characters when calling system at the same time.
-		gr_make_sure_tmpdir_exists();
 		char tmp_filename[MAX_FILENAME_SIZE];
-		char tmp_filename_symlink[MAX_FILENAME_SIZE + 4] = {0};
 		gr_get_image_filename(img, tmp_filename, MAX_FILENAME_SIZE);
-		strcat(tmp_filename_symlink, tmp_filename);
-		strcat(tmp_filename_symlink, ".sym");
-		if (access(original_filename, R_OK) != 0 ||
-		    symlink(original_filename, tmp_filename_symlink)) {
+		if (graphics_debug_mode)
+			fprintf(stderr, "Copying image %s\n",
+				sanitized_filename(original_filename));
+		// Stat the file and check that it's a regular file and not too
+		// big.
+		struct stat st;
+		int stat_res = stat(original_filename, &st);
+		const char *stat_error = NULL;
+		if (stat_res)
+			stat_error = strerror(errno);
+		else if (!S_ISREG(st.st_mode))
+			stat_error = "Not a regular file";
+		else if (st.st_size == 0)
+			stat_error = "The size of the file is zero";
+		else if (st.st_size > max_image_disk_size)
+			stat_error = "The file is too large";
+		if (stat_error) {
 			gr_reporterror_cmd(cmd,
-					   "EBADF: could not create a symlink "
-					   "from %s to %s",
-					   original_filename,
-					   tmp_filename_symlink);
+					   "EBADF: %s", stat_error);
+			fprintf(stderr, "Could not load the file %s\n",
+				sanitized_filename(original_filename));
 			img->status = STATUS_UPLOADING_ERROR;
 			img->uploading_failure = ERROR_CANNOT_COPY_FILE;
 		} else {
-			// We've successfully created a symlink, now call cp.
+			// We will create a symlink to the original file, and
+			// then copy the file to the temporary cache dir. We do
+			// this symlink trick mostly to be able to use cp for
+			// copying, and avoid escaping file name characters when
+			// calling system at the same time.
+			gr_make_sure_tmpdir_exists();
+			char tmp_filename_symlink[MAX_FILENAME_SIZE + 4] = {0};
+			strcat(tmp_filename_symlink, tmp_filename);
+			strcat(tmp_filename_symlink, ".sym");
 			char command[MAX_FILENAME_SIZE + 256];
 			size_t len =
 				snprintf(command, MAX_FILENAME_SIZE + 255,
 					 "cp '%s' '%s'", tmp_filename_symlink,
 					 tmp_filename);
 			if (len > MAX_FILENAME_SIZE + 255 ||
+			    symlink(original_filename, tmp_filename_symlink) ||
 			    system(command) != 0) {
-				gr_reporterror_cmd(
-					cmd,
-					"EBADF: could not copy the image "
-					"from %s to %s",
+				gr_reporterror_cmd(cmd,
+						   "EBADF: could not copy the "
+						   "image to the cache dir");
+				fprintf(stderr,
+					"Could not copy the image "
+					"%s (symlink %s) to %s",
+					sanitized_filename(original_filename),
 					tmp_filename_symlink, tmp_filename);
 				img->status = STATUS_UPLOADING_ERROR;
 				img->uploading_failure = ERROR_CANNOT_COPY_FILE;
 			} else {
 				// Get the file size of the copied file.
-				struct stat imgfile_stat;
-				stat(tmp_filename, &imgfile_stat);
 				img->status = STATUS_UPLOADING_SUCCESS;
-				img->disk_size = imgfile_stat.st_size;
+				img->disk_size = st.st_size;
 				images_disk_size += img->disk_size;
-				// Check whether the file is too large.
-				// TODO: Check it before copying.
-				if (img->disk_size > max_image_disk_size) {
-					// The file is too large.
-					gr_delete_imagefile(img);
-					img->uploading_failure =
-						ERROR_OVER_SIZE_LIMIT;
-					gr_reportuploaderror(img);
-				} else if (img->expected_size &&
-					   img->expected_size !=
-						   img->disk_size) {
+				if (img->expected_size &&
+				    img->expected_size != img->disk_size) {
 					// The file has unexpected size.
 					img->status = STATUS_UPLOADING_ERROR;
 					img->uploading_failure =
@@ -1809,7 +1911,7 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 		gr_check_limits();
 	} else if (cmd->transmission_medium == 'd') {
 		// Direct transmission (default if 't' is not specified).
-		img = gr_find_image(cmd->image_id);
+		img = gr_find_image_for_command(cmd);
 		if (img && img->status == STATUS_UPLOADING) {
 			// This is a continuation of the previous transmission.
 			cmd->is_direct_transmission_continuation = 1;
@@ -1822,7 +1924,6 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 			return NULL;
 		last_image_id = img->image_id;
 		img->status = STATUS_UPLOADING;
-		graphics_uploading++;
 		// Start appending data.
 		gr_append_data(img, cmd->payload, cmd->more);
 	} else {
@@ -1838,23 +1939,15 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 
 /// Handles the 'put' command by creating a placement.
 static void gr_handle_put_command(GraphicsCommand *cmd) {
-	if (cmd->image_number != 0) {
-		gr_reporterror_cmd(
-			cmd, "EINVAL: image numbers (I) are not supported");
-		return;
-	}
-
-	// If image id is not specified, use last image id.
-	uint32_t image_id = cmd->image_id ? cmd->image_id : last_image_id;
-
-	if (image_id == 0) {
+	if (cmd->image_id == 0 && cmd->image_number == 0) {
 		gr_reporterror_cmd(cmd,
-				   "EINVAL: image id is not specified or zero");
+				   "EINVAL: neither image id nor image number "
+				   "are specified or both are zero");
 		return;
 	}
 
-	// Find the image with the id.
-	Image *img = gr_find_image(image_id);
+	// Find the image with the id or number.
+	Image *img = gr_find_image_for_command(cmd);
 	if (!img) {
 		gr_reporterror_cmd(cmd, "ENOENT: image not found");
 		return;
@@ -1866,9 +1959,13 @@ static void gr_handle_put_command(GraphicsCommand *cmd) {
 	placement->virtual = cmd->virtual;
 	placement->cols = cmd->columns;
 	placement->rows = cmd->rows;
+	placement->do_not_move_cursor = cmd->do_not_move_cursor;
 
 	// Display the placement unless it's virtual.
 	gr_display_nonvirtual_placement(placement);
+
+	// Report success.
+	gr_reportsuccess_cmd(cmd);
 }
 
 /// Handles the delete command.
@@ -1882,26 +1979,34 @@ static void gr_handle_delete_command(GraphicsCommand *cmd) {
 		if (cmd->image_id == 0)
 			gr_reporterror_cmd(cmd,
 					   "EINVAL: no image id to delete");
-		Image *img = gr_find_image(cmd->image_id);
-		if (img)
+		Image *img = gr_find_image_for_command(cmd);
+		if (img) {
 			gr_delete_image(img);
+			graphics_command_result.redraw = 1;
+		}
 		gr_reportsuccess_cmd(cmd);
 	} else {
-		gr_reporterror_cmd(
-			cmd, "EINVAL: unsupported values of the d key : '%c'",
+		fprintf(stderr,
+			"WARNING: unsupported value of the d key: '%c'. The "
+			"command is ignored.\n",
 			cmd->delete_specifier);
 	}
 }
 
 /// Handles a command.
 static void gr_handle_command(GraphicsCommand *cmd) {
+	if (!cmd->image_id && !cmd->image_number) {
+		// If there is no image id or image number, nobody expects a
+		// response, so set quiet to 2.
+		cmd->quiet = 2;
+	}
 	Image *img = NULL;
 	switch (cmd->action) {
 	case 0:
 		// If no action is specified, it may be a data transmission
 		// command if 'm=' is specified.
 		if (cmd->is_data_transmission) {
-			gr_append_data(NULL, cmd->payload, cmd->more);
+			gr_handle_transmit_command(cmd);
 			break;
 		}
 		gr_reporterror_cmd(cmd, "EINVAL: no action specified");
@@ -1918,9 +2023,11 @@ static void gr_handle_command(GraphicsCommand *cmd) {
 		break;
 	case 'T':
 		// Transmit and display.
-		if (gr_handle_transmit_command(cmd) &&
-		    !cmd->is_direct_transmission_continuation) {
+		img = gr_handle_transmit_command(cmd);
+		if (img && !cmd->is_direct_transmission_continuation) {
 			gr_handle_put_command(cmd);
+			if (cmd->placement_id)
+				img->initial_placement_id = cmd->placement_id;
 		}
 		break;
 	case 'd':
@@ -2028,16 +2135,19 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start,
 	case 'U':
 		cmd->virtual = num;
 		break;
+	case 'x':
+	case 'y':
 	case 'X':
 	case 'Y':
+	case 'z':
+	case 'w':
+	case 'h':
 		fprintf(stderr,
-			"WARNING: the key '%c' is not supported but should be "
-			"safe to ignore\n",
+			"WARNING: the key '%c' is not supported and will be ignored\n",
 			*key_start);
 		break;
 	case 'C':
-		// Cursor movement policy. Currently we never move the cursor,
-		// so we ignore this.
+		cmd->do_not_move_cursor = num;
 		break;
 	default:
 		gr_reporterror_cmd(cmd, "EINVAL: unsupported key: %s",
@@ -2116,6 +2226,9 @@ int gr_parse_command(char *buf, size_t len) {
 
 	if (!cmd.payload)
 		cmd.payload = buf + len;
+
+	if (graphics_debug_mode && cmd.payload && cmd.payload[0])
+		fprintf(stderr, "    payload size: %ld\n", strlen(cmd.payload));
 
 	if (!graphics_command_result.error)
 		gr_handle_command(&cmd);

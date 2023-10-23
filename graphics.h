@@ -35,17 +35,8 @@ void gr_preview_image(uint32_t image_id, const char *command);
 /// Dumps the internal state (images and placements) to stderr.
 void gr_dump_state();
 
-/// Checks if we are still really uploading something. Returns 1 if we may be
-/// and 0 if we aren't. This is more precise than `graphics_uploading` (and may
-/// actually change the value of `graphics_uploading`).
-int gr_check_if_still_uploading();
-
 /// Print additional information, draw bounding bounding boxes, etc.
 extern char graphics_debug_mode;
-
-/// The (approximate) number of active uploads. If there are active uploads then
-/// it is not recommended to do anything computationally heavy.
-extern char graphics_uploading;
 
 #define MAX_GRAPHICS_RESPONSE_LEN 256
 
@@ -66,6 +57,7 @@ typedef struct {
 	struct {
 		uint32_t rows, columns;
 		uint32_t image_id, placement_id;
+		char do_not_move_cursor;
 	} placeholder;
 } GraphicsCommandResult;
 
