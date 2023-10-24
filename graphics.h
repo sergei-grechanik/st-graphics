@@ -35,8 +35,14 @@ void gr_preview_image(uint32_t image_id, const char *command);
 /// Dumps the internal state (images and placements) to stderr.
 void gr_dump_state();
 
+/// Unloads images to reduce RAM usage.
+void gr_unload_images_to_reduce_ram();
+
 /// Print additional information, draw bounding bounding boxes, etc.
 extern char graphics_debug_mode;
+
+/// Whether to display images or just draw bounding boxes.
+extern char graphics_display_images;
 
 #define MAX_GRAPHICS_RESPONSE_LEN 256
 

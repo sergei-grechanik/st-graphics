@@ -206,6 +206,8 @@ static Shortcut shortcuts[] = {
 	{ TERMMOD,              XK_Num_Lock,    numlock,        {.i =  0} },
 	{ TERMMOD,              XK_F1,          togglegrdebug,  {.i =  0} },
 	{ TERMMOD,              XK_F6,          dumpgrstate,    {.i =  0} },
+	{ TERMMOD,              XK_F7,          unloadimages,   {.i =  0} },
+	{ TERMMOD,              XK_F8,          toggleimages,   {.i =  0} },
 };
 
 /*

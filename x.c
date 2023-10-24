@@ -66,6 +66,8 @@ static void previewimage(const Arg *);
 static void showimageinfo(const Arg *);
 static void togglegrdebug(const Arg *);
 static void dumpgrstate(const Arg *);
+static void unloadimages(const Arg *);
+static void toggleimages(const Arg *);
 
 /* config.h for applying patches and the configuration. */
 #include "config.h"
@@ -392,6 +394,19 @@ void
 dumpgrstate(const Arg *arg)
 {
 	gr_dump_state();
+}
+
+void
+unloadimages(const Arg *arg)
+{
+	gr_unload_images_to_reduce_ram();
+}
+
+void
+toggleimages(const Arg *arg)
+{
+	graphics_display_images = !graphics_display_images;
+	redraw();
 }
 
 int

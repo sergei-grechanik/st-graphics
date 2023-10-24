@@ -231,6 +231,7 @@ static unsigned char reverse_table[256];
 
 // Declared in the header.
 char graphics_debug_mode = 0;
+char graphics_display_images = 1;
 GraphicsCommandResult graphics_command_result = {0};
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -543,6 +544,20 @@ static void gr_check_limits() {
 			images_ram_size / 1024,
 			images_disk_size / 1024, kh_size(images));
 	}
+}
+
+/// Unloads all images by user request.
+void gr_unload_images_to_reduce_ram() {
+	Image *img = NULL;
+	ImagePlacement *placement = NULL;
+	kh_foreach_value(images, img, {
+		kh_foreach_value(img->placements, placement, {
+			if (placement->protected)
+				continue;
+			gr_unload_placement(placement);
+		});
+		gr_unload_image(img);
+	});
 }
 
 /// Update the atime of the image.
@@ -1232,8 +1247,9 @@ static void gr_showrect(Drawable buf, ImageRect *rect) {
 static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 	ImagePlacement *placement =
 		gr_find_image_and_placement(rect->image_id, rect->placement_id);
-	// If the image does not exist, display the bounding box.
-	if (!placement) {
+	// If the image does not exist or image display is switched off, draw
+	// the bounding box.
+	if (!placement || !graphics_display_images) {
 		gr_showrect(buf, rect);
 		if (graphics_debug_mode)
 			gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
