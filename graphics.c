@@ -626,20 +626,48 @@ static ImagePlacement *gr_new_placement(Image *img, uint32_t id) {
 	return placement;
 }
 
+static int64_t ceil_div(int64_t a, int64_t b) {
+	return (a + b - 1) / b;
+}
+
 /// Computes the best number of rows and columns for a placement if it's not
 /// specified.
 static void gr_infer_placement_size_maybe(ImagePlacement *placement) {
-	if (placement->cols != 0 || placement->rows != 0)
+	if (placement->cols != 0 && placement->rows != 0)
 		return;
 	if (placement->image->pix_width == 0 ||
 	    placement->image->pix_height == 0)
 		return;
 	if (current_cw == 0 || current_ch == 0)
 		return;
-	placement->cols =
-		(placement->image->pix_width + current_cw - 1) / current_cw;
-	placement->rows =
-		(placement->image->pix_height + current_ch - 1) / current_ch;
+	// If no size is specified, use the image size.
+	if (placement->cols == 0 && placement->rows == 0) {
+		placement->cols =
+			ceil_div(placement->image->pix_width,
+			current_cw);
+		placement->rows =
+			ceil_div(placement->image->pix_height + current_ch - 1,
+			current_ch);
+		return;
+	}
+	// It doesn't seem to be documented anywhere, but some applications
+	// specify only one of the dimensions. Since we always preserve aspect
+	// ratio, the most logical thing is to compute the minimum size of the
+	// other dimension to make the image fit the specified dimension.
+	if (placement->cols == 0) {
+		placement->cols =
+			ceil_div(placement->image->pix_width * placement->rows *
+					 current_ch,
+				 placement->image->pix_height * current_cw);
+		return;
+	}
+	if (placement->rows == 0) {
+		placement->rows =
+			ceil_div(placement->image->pix_height * placement->cols *
+					 current_cw,
+				 placement->image->pix_width * current_ch);
+		return;
+	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////
