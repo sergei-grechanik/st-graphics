@@ -1090,6 +1090,31 @@ void gr_preview_image(uint32_t image_id, const char *exec) {
 	}
 }
 
+/// Generates a human-readable description of the image placement.
+void gr_get_placement_description(uint32_t image_id, uint32_t placement_id,
+				  char *buf, size_t len) {
+	Image *img = gr_find_image(image_id);
+	if (!img) {
+		snprintf(buf, len, "Image with id=%u not found", image_id);
+		return;
+	}
+	ImagePlacement *placement = gr_find_placement(img, placement_id);
+	if (!placement) {
+		snprintf(buf, len, "Placement %u of image %u not found",
+			 placement_id, image_id);
+		return;
+	}
+	snprintf(buf, len,
+		 "Image %u, placement %u\n%u cols x %u rows\n"
+		 "image uploading status: %s\n"
+		 "placement is %s\n"
+		 "original image is %s\n",
+		 image_id, placement_id, placement->cols, placement->rows,
+		 image_uploading_failure_strings[img->uploading_failure],
+		 placement->scaled_image ? "loaded" : "not loaded",
+		 img->original_image ? "loaded" : "not loaded");
+}
+
 /// Prints the time difference between now and past in a human-readable format.
 static void gr_print_ago(time_t now, time_t past) {
 	double seconds = difftime(now, past);
