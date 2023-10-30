@@ -53,12 +53,18 @@
 #define MAX_IMAGE_RECTS 20
 
 enum ScaleMode {
-	/// Preserve aspect ratio and fit to width or to height so that the
-	/// whole image is visible.
-	SCALE_MODE_CONTAIN = 0,
+	SCALE_MODE_UNSET = 0,
 	/// Preserve aspect ratio and fit to width or to height so that the
 	/// whole rectangle is covered.
-	SCALE_MODE_FILL = 1
+	SCALE_MODE_FILL = 1,
+	/// Preserve aspect ratio and fit to width or to height so that the
+	/// whole image is visible.
+	SCALE_MODE_CONTAIN = 2,
+	/// Do not scale. The image may be cropped if the box is too small.
+	SCALE_MODE_NONE = 3,
+	/// Do not scale, unless the box is too small, in which case the image
+	/// will be shrunk like with `SCALE_MODE_CONTAIN`.
+	SCALE_MODE_NONE_OR_CONTAIN = 4,
 };
 
 /// The status of an image. Each image uploaded to the terminal is cached on
@@ -161,6 +167,10 @@ typedef struct ImagePlacement {
 	char scale_mode;
 	/// Height and width in cells.
 	uint16_t rows, cols;
+	/// Top-left corner of the source rectangle ('x=' and 'y=').
+	int src_pix_x, src_pix_y;
+	/// Height and width of the source rectangle (zero if full image).
+	int src_pix_width, src_pix_height;
 	/// The image appropriately scaled and loaded into RAM.
 	Imlib_Image scaled_image;
 	/// The dimensions of the cell used to scale the image. If cell
@@ -233,6 +243,9 @@ static unsigned char reverse_table[256];
 char graphics_debug_mode = 0;
 char graphics_display_images = 1;
 GraphicsCommandResult graphics_command_result = {0};
+
+#define MIN(a, b)		((a) < (b) ? (a) : (b))
+#define MAX(a, b)		((a) < (b) ? (b) : (a))
 
 ////////////////////////////////////////////////////////////////////////////////
 // Basic image management functions (create, delete, find, etc).
@@ -631,41 +644,46 @@ static int64_t ceil_div(int64_t a, int64_t b) {
 }
 
 /// Computes the best number of rows and columns for a placement if it's not
-/// specified.
+/// specified, and also adjusts the source rectangle size.
 static void gr_infer_placement_size_maybe(ImagePlacement *placement) {
+	if (placement->src_pix_width == 0)
+		placement->src_pix_width =
+			placement->image->pix_width - placement->src_pix_x;
+	if (placement->src_pix_height == 0)
+		placement->src_pix_height =
+			placement->image->pix_height - placement->src_pix_y;
+
 	if (placement->cols != 0 && placement->rows != 0)
 		return;
-	if (placement->image->pix_width == 0 ||
-	    placement->image->pix_height == 0)
+	if (placement->src_pix_width == 0 || placement->src_pix_height == 0)
 		return;
 	if (current_cw == 0 || current_ch == 0)
 		return;
+
 	// If no size is specified, use the image size.
 	if (placement->cols == 0 && placement->rows == 0) {
 		placement->cols =
-			ceil_div(placement->image->pix_width,
-			current_cw);
+			ceil_div(placement->src_pix_width, current_cw);
 		placement->rows =
-			ceil_div(placement->image->pix_height + current_ch - 1,
-			current_ch);
+			ceil_div(placement->src_pix_height, current_ch);
 		return;
 	}
+
 	// It doesn't seem to be documented anywhere, but some applications
 	// specify only one of the dimensions. Since we always preserve aspect
 	// ratio, the most logical thing is to compute the minimum size of the
 	// other dimension to make the image fit the specified dimension.
 	if (placement->cols == 0) {
-		placement->cols =
-			ceil_div(placement->image->pix_width * placement->rows *
-					 current_ch,
-				 placement->image->pix_height * current_cw);
+		placement->cols = ceil_div(
+			placement->src_pix_width * placement->rows * current_ch,
+			placement->src_pix_height * current_cw);
 		return;
 	}
 	if (placement->rows == 0) {
 		placement->rows =
-			ceil_div(placement->image->pix_height * placement->cols *
+			ceil_div(placement->src_pix_height * placement->cols *
 					 current_cw,
-				 placement->image->pix_width * current_ch);
+				 placement->src_pix_width * current_ch);
 		return;
 	}
 }
@@ -964,6 +982,7 @@ static void gr_load_placement(ImagePlacement *placement, int cw, int ch) {
 	}
 	imlib_context_set_image(placement->scaled_image);
 	imlib_image_set_has_alpha(1);
+
 	// First fill the scaled image with the transparent color.
 	imlib_context_set_blend(0);
 	imlib_context_set_color(0, 0, 0, 0);
@@ -971,37 +990,55 @@ static void gr_load_placement(ImagePlacement *placement, int cw, int ch) {
 				   (int)placement->rows * ch);
 	imlib_context_set_anti_alias(1);
 	imlib_context_set_blend(1);
+
+	// The source rectangle.
+	int src_x = placement->src_pix_x;
+	int src_y = placement->src_pix_y;
+	int src_w = placement->src_pix_width;
+	int src_h = placement->src_pix_height;
+	// Whether the box is too small to use the true size of the image.
+	char box_too_small = scaled_w < src_w || scaled_h < src_h;
+	char mode = placement->scale_mode;
+
 	// Then blend the original image onto the transparent background.
-	if (img->pix_width == 0 || img->pix_height == 0) {
+	if (src_w <= 0 || src_h <= 0) {
 		fprintf(stderr, "warning: image of zero size\n");
-	} else if (placement->scale_mode == SCALE_MODE_FILL) {
-		imlib_blend_image_onto_image(img->original_image, 1, 0, 0,
-					     img->pix_width, img->pix_height, 0,
-					     0, scaled_w, scaled_h);
+	} else if (mode == SCALE_MODE_FILL) {
+		imlib_blend_image_onto_image(img->original_image, 1, src_x,
+					     src_y, src_w, src_h, 0, 0,
+					     scaled_w, scaled_h);
+	} else if (mode == SCALE_MODE_NONE ||
+		   (mode == SCALE_MODE_NONE_OR_CONTAIN && !box_too_small)) {
+		imlib_blend_image_onto_image(img->original_image, 1, src_x,
+					     src_y, src_w, src_h, 0, 0, src_w,
+					     src_h);
 	} else {
-		if (placement->scale_mode != SCALE_MODE_CONTAIN) {
-			fprintf(stderr, "warning: unknown scale mode, using "
-					"'contain' instead\n");
+		if (mode != SCALE_MODE_CONTAIN &&
+		    mode != SCALE_MODE_NONE_OR_CONTAIN) {
+			fprintf(stderr,
+				"warning: unknown scale mode %u, using "
+				"'contain' instead\n",
+				mode);
 		}
 		int dest_x, dest_y;
 		int dest_w, dest_h;
-		if (scaled_w * img->pix_height > img->pix_width * scaled_h) {
+		if (scaled_w * src_h > src_w * scaled_h) {
 			// If the box is wider than the original image, fit to
 			// height.
 			dest_h = scaled_h;
 			dest_y = 0;
-			dest_w = img->pix_width * scaled_h / img->pix_height;
+			dest_w = src_w * scaled_h / src_h;
 			dest_x = (scaled_w - dest_w) / 2;
 		} else {
 			// Otherwise, fit to width.
 			dest_w = scaled_w;
 			dest_x = 0;
-			dest_h = img->pix_height * scaled_w / img->pix_width;
+			dest_h = src_h * scaled_w / src_w;
 			dest_y = (scaled_h - dest_h) / 2;
 		}
-		imlib_blend_image_onto_image(img->original_image, 1, 0, 0,
-					     img->pix_width, img->pix_height,
-					     dest_x, dest_y, dest_w, dest_h);
+		imlib_blend_image_onto_image(img->original_image, 1, src_x,
+					     src_y, src_w, src_h, dest_x,
+					     dest_y, dest_w, dest_h);
 	}
 
 	// Mark the placement as loaded.
@@ -1133,11 +1170,19 @@ void gr_get_placement_description(uint32_t image_id, uint32_t placement_id,
 		return;
 	}
 	snprintf(buf, len,
-		 "Image %u, placement %u\n%u cols x %u rows\n"
+		 "Image %u, placement %u\n"
+		 "%u cols x %u rows\n"
+		 "image size: %u x %u\n"
+		 "cell size: %u x %u\n"
+		 "src rect %u, %u  %u x %u\n"
 		 "image uploading status: %s\n"
 		 "placement is %s\n"
 		 "original image is %s\n",
 		 image_id, placement_id, placement->cols, placement->rows,
+		 img->pix_width, img->pix_height,
+		 placement->scaled_cw, placement->scaled_ch,
+		 placement->src_pix_x, placement->src_pix_y,
+		 placement->src_pix_width, placement->src_pix_height,
 		 image_uploading_failure_strings[img->uploading_failure],
 		 placement->scaled_image ? "loaded" : "not loaded",
 		 img->original_image ? "loaded" : "not loaded");
@@ -1388,9 +1433,10 @@ void gr_finish_drawing(Drawable buf) {
 		char info[MAX_INFO_LEN];
 		snprintf(info, MAX_INFO_LEN,
 			 "Frame rendering time: %d ms  Image storage ram: %ld "
-			 "KiB disk: %ld KiB  count: %d",
+			 "KiB disk: %ld KiB  count: %d   cell %dx%d",
 			 milliseconds, images_ram_size / 1024,
-			 images_disk_size / 1024, kh_size(images));
+			 images_disk_size / 1024, kh_size(images),
+			 current_cw, current_ch);
 		XSetForeground(disp, gc, 0x000000);
 		XFillRectangle(disp, buf, gc, 0, 0, 600, 16);
 		XSetForeground(disp, gc, 0xFFFFFF);
@@ -1495,6 +1541,10 @@ typedef struct {
 	char delete_specifier;
 	/// 's=', 'v=', used only when 'f=24' or 'f=32'.
 	int pix_width, pix_height;
+	/// 'x=', 'y=' - top-left corner of the source rectangle.
+	int src_pix_x, src_pix_y;
+	/// 'w=', 'h=' - width and height of the source rectangle.
+	int src_pix_width, src_pix_height;
 	/// 'r=', 'c='
 	int rows, columns;
 	/// 'i='
@@ -2026,9 +2076,15 @@ static void gr_handle_put_command(GraphicsCommand *cmd) {
 	// it will be deleted. If the id is zero, a random id will be generated.
 	ImagePlacement *placement = gr_new_placement(img, cmd->placement_id);
 	placement->virtual = cmd->virtual;
+	placement->src_pix_x = cmd->src_pix_x;
+	placement->src_pix_y = cmd->src_pix_y;
+	placement->src_pix_width = cmd->src_pix_width;
+	placement->src_pix_height = cmd->src_pix_height;
 	placement->cols = cmd->columns;
 	placement->rows = cmd->rows;
 	placement->do_not_move_cursor = cmd->do_not_move_cursor;
+
+	placement->scale_mode = SCALE_MODE_CONTAIN;
 
 	// Display the placement unless it's virtual.
 	gr_display_nonvirtual_placement(placement);
@@ -2188,6 +2244,18 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start,
 	case 'p':
 		cmd->placement_id = num;
 		break;
+	case 'x':
+		cmd->src_pix_x = num;
+		break;
+	case 'y':
+		cmd->src_pix_y = num;
+		break;
+	case 'w':
+		cmd->src_pix_width = num;
+		break;
+	case 'h':
+		cmd->src_pix_height = num;
+		break;
 	case 'c':
 		cmd->columns = num;
 		break;
@@ -2204,13 +2272,9 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start,
 	case 'U':
 		cmd->virtual = num;
 		break;
-	case 'x':
-	case 'y':
 	case 'X':
 	case 'Y':
 	case 'z':
-	case 'w':
-	case 'h':
 		fprintf(stderr,
 			"WARNING: the key '%c' is not supported and will be ignored\n",
 			*key_start);
