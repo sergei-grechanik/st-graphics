@@ -54,8 +54,7 @@
 
 enum ScaleMode {
 	SCALE_MODE_UNSET = 0,
-	/// Preserve aspect ratio and fit to width or to height so that the
-	/// whole rectangle is covered.
+	/// Stretch or shrink the image to fill the box, ignoring aspect ratio.
 	SCALE_MODE_FILL = 1,
 	/// Preserve aspect ratio and fit to width or to height so that the
 	/// whole image is visible.
@@ -687,21 +686,36 @@ static void gr_infer_placement_size_maybe(ImagePlacement *placement) {
 	}
 
 	// It doesn't seem to be documented anywhere, but some applications
-	// specify only one of the dimensions. Since we always preserve aspect
-	// ratio, the most logical thing is to compute the minimum size of the
-	// other dimension to make the image fit the specified dimension.
-	if (placement->cols == 0) {
-		placement->cols = ceil_div(
-			placement->src_pix_width * placement->rows * current_ch,
-			placement->src_pix_height * current_cw);
-		return;
-	}
-	if (placement->rows == 0) {
-		placement->rows =
-			ceil_div(placement->src_pix_height * placement->cols *
-					 current_cw,
-				 placement->src_pix_width * current_ch);
-		return;
+	// specify only one of the dimensions.
+	if (placement->scale_mode == SCALE_MODE_CONTAIN) {
+		// If we preserve aspect ratio and fit to width/height, the most
+		// logical thing is to find the minimum size of the
+		// non-specified dimension that allows the image to fit the
+		// specified dimension.
+		if (placement->cols == 0) {
+			placement->cols = ceil_div(
+				placement->src_pix_width * placement->rows *
+					current_ch,
+				placement->src_pix_height * current_cw);
+			return;
+		}
+		if (placement->rows == 0) {
+			placement->rows =
+				ceil_div(placement->src_pix_height *
+						 placement->cols * current_cw,
+					 placement->src_pix_width * current_ch);
+			return;
+		}
+	} else {
+		// Otherwise we stretch the image or preserve the original size.
+		// In both cases we compute the best number of columns from the
+		// pixel size and cell size to be compatible with kitty.
+		if (!placement->cols)
+			placement->cols =
+				ceil_div(placement->src_pix_width, current_cw);
+		if (!placement->rows)
+			placement->rows =
+				ceil_div(placement->src_pix_height, current_ch);
 	}
 }
 
@@ -2095,7 +2109,12 @@ static void gr_handle_put_command(GraphicsCommand *cmd) {
 	placement->rows = cmd->rows;
 	placement->do_not_move_cursor = cmd->do_not_move_cursor;
 
-	placement->scale_mode = SCALE_MODE_CONTAIN;
+	if (placement->virtual)
+		placement->scale_mode = SCALE_MODE_CONTAIN;
+	else if (placement->cols || placement->rows)
+		placement->scale_mode = SCALE_MODE_FILL;
+	else
+		placement->scale_mode = SCALE_MODE_NONE;
 
 	// Display the placement unless it's virtual.
 	gr_display_nonvirtual_placement(placement);
