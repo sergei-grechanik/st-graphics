@@ -42,6 +42,13 @@ void gr_dump_state();
 /// Unloads images to reduce RAM usage.
 void gr_unload_images_to_reduce_ram();
 
+/// Executes `callback` for each image cell. `callback` may return 1 to erase
+/// the cell or 0 to keep it. This function is implemented in `st.c`.
+void gr_for_each_image_cell(int (*callback)(void *data, uint32_t image_id,
+					    uint32_t placement_id, int col,
+					    int row, char is_classic),
+			    void *data);
+
 /// Print additional information, draw bounding bounding boxes, etc.
 extern char graphics_debug_mode;
 

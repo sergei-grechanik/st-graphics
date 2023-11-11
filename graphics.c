@@ -122,6 +122,9 @@ typedef struct Image {
 	uint32_t image_number;
 	/// The last time when the image was displayed or otherwise touched.
 	time_t atime;
+	/// The global index of the creation command. Used to decide which image
+	/// is newer if they have the same image number.
+	uint64_t global_command_index;
 	/// The size of the corresponding file cached on disk.
 	unsigned disk_size;
 	/// The expected size of the image file (specified with 'S='), used to
@@ -222,6 +225,8 @@ static uint32_t current_upload_image_id = 0;
 static time_t last_uploading_time = 0;
 /// The time when the current frame drawing started (used for debugging fps).
 static clock_t drawing_start_time;
+/// The global index of the current command.
+static uint64_t global_command_counter = 0;
 
 /// The directory where the on-disk cache files are stored.
 static char temp_dir[MAX_FILENAME_SIZE - 16];
@@ -260,17 +265,28 @@ static Image *gr_find_image(uint32_t image_id) {
 	return res;
 }
 
-/// Finds the image corresponding to the image number. Returns NULL if cannot
-/// find.
+/// Finds the newest image corresponding to the image number. Returns NULL if
+/// cannot find.
 static Image *gr_find_image_by_number(uint32_t image_number) {
 	if (image_number == 0)
 		return NULL;
+	Image *newest_img = NULL;
 	Image *img = NULL;
 	kh_foreach_value(images, img, {
-		if (img->image_number == image_number)
-			return img;
+		if (img->image_number == image_number &&
+		    (!newest_img || newest_img->global_command_index <
+					    img->global_command_index))
+			newest_img = img;
 	});
-	return NULL;
+	if (graphics_debug_mode) {
+		if (!newest_img)
+			fprintf(stderr, "Image number %u not found\n",
+				image_number);
+		else
+			fprintf(stderr, "Found image number %u, its id is %u\n",
+				image_number, img->image_id);
+	}
+	return newest_img;
 }
 
 /// Finds the placement corresponding to the id. If the placement id is 0,
@@ -607,6 +623,7 @@ static Image *gr_new_image(uint32_t id) {
 	kh_value(images, k) = img;
 	img->image_id = id;
 	gr_touch_image(img);
+	img->global_command_index = global_command_counter;
 	return img;
 }
 
@@ -1226,6 +1243,9 @@ void gr_dump_state() {
 	kh_foreach_value(images, img, {
 		fprintf(stderr, "----------------\n");
 		fprintf(stderr, "Image %u\n", img->image_id);
+		fprintf(stderr, "    number %u\n", img->image_number);
+		fprintf(stderr, "    global command index %lu\n",
+			img->global_command_index);
 		fprintf(stderr, "    accessed ");
 		gr_print_ago(now, img->atime);
 		fprintf(stderr, "    status: %s\n",
@@ -1900,16 +1920,7 @@ static Image *gr_new_image_from_command(GraphicsCommand *cmd) {
 	else if (!cmd->image_id)
 		cmd->image_id = img->image_id;
 	// Set the image number.
-	if (cmd->image_number) {
-		// If there is an old image with this number, forget that it had
-		// this number.
-		Image *old_img_with_this_number =
-			gr_find_image_by_number(cmd->image_number);
-		if (old_img_with_this_number)
-			old_img_with_this_number->image_number = 0;
-		// The new image has this number now.
-		img->image_number = cmd->image_number;
-	}
+	img->image_number = cmd->image_number;
 	// Set parameters.
 	img->expected_size = cmd->size;
 	img->format = cmd->format;
@@ -2093,23 +2104,76 @@ static void gr_handle_put_command(GraphicsCommand *cmd) {
 	gr_reportsuccess_cmd(cmd);
 }
 
+/// Information about what to delete.
+typedef struct DeletionData {
+	uint32_t image_id;
+	uint32_t placement_id;
+	/// If true, delete the image object if there are no more placements.
+	char delete_image_if_no_ref;
+} DeletionData;
+
+/// The callback called for each cell to perform deletion.
+static int gr_deletion_callback(void *data, uint32_t image_id,
+					    uint32_t placement_id, int col,
+					    int row, char is_classic) {
+	DeletionData *del_data = data;
+	// Leave unicode placeholders alone.
+	if (!is_classic)
+		return 0;
+	if (del_data->image_id && del_data->image_id != image_id)
+		return 0;
+	if (del_data->placement_id && del_data->placement_id != placement_id)
+		return 0;
+	Image *img = gr_find_image(image_id);
+	// If the image is already deleted, just erase the placeholder.
+	if (!img)
+		return 1;
+	// Delete the placement.
+	if (placement_id)
+		gr_delete_placement(gr_find_placement(img, placement_id));
+	// Delete the image if image deletion is requested (uppercase delete
+	// specifier) and there are no more placements.
+	if (del_data->delete_image_if_no_ref && kh_size(img->placements) == 0)
+		gr_delete_image(img);
+	return 1;
+}
+
 /// Handles the delete command.
 static void gr_handle_delete_command(GraphicsCommand *cmd) {
-	if (!cmd->delete_specifier) {
-		// With no delete specifier just delete everything.
-		gr_delete_all_images();
-	} else if (cmd->delete_specifier == 'I') {
-		// 'd=I' means delete the image with the given id, including the
-		// image data.
-		if (cmd->image_id == 0)
-			gr_reporterror_cmd(cmd,
-					   "EINVAL: no image id to delete");
-		Image *img = gr_find_image_for_command(cmd);
-		if (img) {
-			gr_delete_image(img);
-			graphics_command_result.redraw = 1;
+	DeletionData del_data = {0};
+	del_data.delete_image_if_no_ref = isupper(cmd->delete_specifier) != 0;
+	char d = tolower(cmd->delete_specifier);
+
+	if (d == 'n') {
+		d = 'i';
+		Image *img = gr_find_image_by_number(cmd->image_number);
+		if (!img)
+			return;
+		del_data.image_id = img->image_id;
+	}
+
+	if (!d || d == 'a') {
+		// Delete all visible placements.
+		gr_for_each_image_cell(gr_deletion_callback, &del_data);
+	} else if (d == 'i') {
+		// Delete the specified image by image id and maybe placement
+		// id.
+		if (!del_data.image_id)
+			del_data.image_id = cmd->image_id;
+		if (!del_data.image_id) {
+			fprintf(stderr,
+				"ERROR: image id is not specified in the "
+				"delete command\n");
+			return;
 		}
-		gr_reportsuccess_cmd(cmd);
+		del_data.placement_id = cmd->placement_id;
+		// NOTE: It's not very clear whether we should delete the image
+		// even if there are no _visible_ placements to delete. We do
+		// this because otherwise there is no way to delete an image
+		// with virtual placements in one command.
+		if (!del_data.placement_id && del_data.delete_image_if_no_ref)
+			gr_delete_image(gr_find_image(cmd->image_id));
+		gr_for_each_image_cell(gr_deletion_callback, &del_data);
 	} else {
 		fprintf(stderr,
 			"WARNING: unsupported value of the d key: '%c'. The "
@@ -2297,10 +2361,10 @@ int gr_parse_command(char *buf, size_t len) {
 
 	memset(&graphics_command_result, 0, sizeof(GraphicsCommandResult));
 
-	static int cmdnum = 0;
+	global_command_counter++;
 	if (graphics_debug_mode)
-		fprintf(stderr, "### Command %d: %.80s\n", cmdnum, buf);
-	cmdnum++;
+		fprintf(stderr, "### Command %lu: %.80s\n",
+			global_command_counter, buf);
 
 	// Eat the 'G'.
 	++buf;
