@@ -227,18 +227,8 @@ static clock_t drawing_start_time;
 /// The global index of the current command.
 static uint64_t global_command_counter = 0;
 
-/// The directory where the on-disk cache files are stored.
-static char temp_dir[MAX_FILENAME_SIZE - 16];
-static const char temp_dir_template[] = "/tmp/st-images-XXXXXX";
-
-/// The max size of a single image file, in bytes.
-static size_t max_image_disk_size = 20 * 1024 * 1024;
-/// The max size of the on-disk cache, in bytes.
-static int max_total_disk_size = 300 * 1024 * 1024;
-/// The max ram size of an image or placement, in bytes.
-static size_t max_image_ram_size = 100 * 1024 * 1024;
-/// The max total size of all images loaded into RAM.
-static int max_total_ram_size = 300 * 1024 * 1024;
+/// The directory where the cache files are stored.
+static char cache_dir[MAX_FILENAME_SIZE - 16];
 
 /// The table used for color inversion.
 static unsigned char reverse_table[256];
@@ -247,6 +237,14 @@ static unsigned char reverse_table[256];
 char graphics_debug_mode = 0;
 char graphics_display_images = 1;
 GraphicsCommandResult graphics_command_result = {0};
+
+// Defined in config.h
+extern const char graphics_cache_dir_template[];
+extern unsigned graphics_max_image_size;
+extern unsigned graphics_total_cache_size;
+extern unsigned graphics_max_image_ram_size;
+extern unsigned graphics_max_total_ram_size;
+
 
 #define MIN(a, b)		((a) < (b) ? (a) : (b))
 #define MAX(a, b)		((a) < (b) ? (b) : (a))
@@ -325,7 +323,7 @@ static ImagePlacement *gr_find_image_and_placement(uint32_t image_id,
 /// Writes the name of the on-disk cache file to `out`. `max_len` should be the
 /// size of `out`. The name will be something like "/tmp/st-images-xxx/img-ID".
 static void gr_get_image_filename(Image *img, char *out, size_t max_len) {
-	snprintf(out, max_len, "%s/img-%.3u", temp_dir, img->image_id);
+	snprintf(out, max_len, "%s/img-%.3u", cache_dir, img->image_id);
 }
 
 /// Returns the (estimation) of the RAM size used by the image when loaded.
@@ -546,14 +544,14 @@ static void gr_check_limits() {
 			images_disk_size / 1024, kh_size(images));
 	}
 	char changed = 0;
-	while (images_disk_size > max_total_disk_size) {
+	while (images_disk_size > graphics_total_cache_size) {
 		Image *img_to_delete = gr_get_image_to_delete();
 		if (!img_to_delete)
 			break;
 		gr_delete_imagefile(img_to_delete);
 		changed = 1;
 	}
-	while (images_ram_size > max_total_ram_size) {
+	while (images_ram_size > graphics_max_total_ram_size) {
 		Image *img_to_unload = NULL;
 		ImagePlacement *placement_to_unload = NULL;
 		gr_get_image_or_placement_to_unload(&img_to_unload,
@@ -865,10 +863,11 @@ static int gr_load_raw_pixel_data_compressed(DATA32 *data, FILE *file,
 static Imlib_Image gr_load_raw_pixel_data(Image *img,
 					  const char *filename) {
 	size_t total_pixels = img->pix_width * img->pix_height;
-	if (total_pixels > max_image_ram_size) {
+	if (total_pixels * 4 > graphics_max_image_ram_size) {
 		fprintf(stderr,
-			"error: image %u is too big too load: %zu > %zu\n",
-			img->image_id, total_pixels, max_image_ram_size);
+			"error: image %u is too big too load: %zu > %u\n",
+			img->image_id, total_pixels * 4,
+			graphics_max_image_ram_size);
 		return NULL;
 	}
 
@@ -995,12 +994,12 @@ static void gr_load_placement(ImagePlacement *placement, int cw, int ch) {
 	// Create the scaled image.
 	int scaled_w = (int)placement->cols * cw;
 	int scaled_h = (int)placement->rows * ch;
-	if (scaled_w * scaled_h * 4 > max_image_ram_size) {
+	if (scaled_w * scaled_h * 4 > graphics_max_image_ram_size) {
 		fprintf(stderr,
 			"error: placement %u/%u would be too big to load: %d x "
-			"%d x 4 > %zu\n",
+			"%d x 4 > %u\n",
 			img->image_id, placement->placement_id, scaled_w,
-			scaled_h, max_image_ram_size);
+			scaled_h, graphics_max_image_ram_size);
 		return;
 	}
 	placement->scaled_image = imlib_create_image(scaled_w, scaled_h);
@@ -1089,35 +1088,35 @@ static void gr_load_placement(ImagePlacement *placement, int cw, int ch) {
 ////////////////////////////////////////////////////////////////////////////////
 
 /// Creates a temporary directory.
-static int gr_create_temp_dir() {
-	strncpy(temp_dir, temp_dir_template, sizeof(temp_dir));
-	if (!mkdtemp(temp_dir)) {
+static int gr_create_cache_dir() {
+	strncpy(cache_dir, graphics_cache_dir_template, sizeof(cache_dir));
+	if (!mkdtemp(cache_dir)) {
 		fprintf(stderr,
 			"error: could not create temporary dir from template "
 			"%s\n",
-			sanitized_filename(temp_dir));
+			sanitized_filename(cache_dir));
 		return 0;
 	}
-	fprintf(stderr, "Graphics cache directory: %s\n", temp_dir);
+	fprintf(stderr, "Graphics cache directory: %s\n", cache_dir);
 	return 1;
 }
 
 /// Checks whether `tmp_dir` exists and recreates it if it doesn't.
 static void gr_make_sure_tmpdir_exists() {
 	struct stat st;
-	if (stat(temp_dir, &st) == 0 && S_ISDIR(st.st_mode))
+	if (stat(cache_dir, &st) == 0 && S_ISDIR(st.st_mode))
 		return;
 	fprintf(stderr,
 		"error: %s is not a directory, will need to create a new "
 		"graphics cache directory\n",
-		sanitized_filename(temp_dir));
-	gr_create_temp_dir();
+		sanitized_filename(cache_dir));
+	gr_create_cache_dir();
 }
 
 /// Initialize the graphics module.
 void gr_init(Display *disp, Visual *vis, Colormap cm) {
 	// Create the temporary dir.
-	if (!gr_create_temp_dir())
+	if (!gr_create_cache_dir())
 		abort();
 
 	// Initialize imlib.
@@ -1147,7 +1146,7 @@ void gr_deinit() {
 	// Delete all images.
 	gr_delete_all_images();
 	// Remove the cache dir.
-	remove(temp_dir);
+	remove(cache_dir);
 	// Destroy the data structures.
 	kh_destroy(id2image, images);
 	images = NULL;
@@ -1754,7 +1753,7 @@ static void gr_reportuploaderror(Image *img) {
 			img,
 			"EFBIG: the size of the uploaded image exceeded "
 			"the image size limit %u",
-			max_image_disk_size);
+			graphics_max_image_size);
 		break;
 	case ERROR_UNEXPECTED_SIZE:
 		gr_reporterror_img(img,
@@ -1828,8 +1827,8 @@ static void gr_append_data(Image *img, const char *payload, int more) {
 			img->disk_size, data_size, img->disk_size + data_size);
 
 	// Do not append this data if the image exceeds the size limit.
-	if (img->disk_size + data_size > max_image_disk_size ||
-	    img->expected_size > max_image_disk_size) {
+	if (img->disk_size + data_size > graphics_max_image_size ||
+	    img->expected_size > graphics_max_image_size) {
 		free(data);
 		gr_delete_imagefile(img);
 		img->uploading_failure = ERROR_OVER_SIZE_LIMIT;
@@ -1994,7 +1993,7 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 			stat_error = "Not a regular file";
 		else if (st.st_size == 0)
 			stat_error = "The size of the file is zero";
-		else if (st.st_size > max_image_disk_size)
+		else if (st.st_size > graphics_max_image_size)
 			stat_error = "The file is too large";
 		if (stat_error) {
 			gr_reporterror_cmd(cmd,
