@@ -1334,6 +1334,31 @@ tcreateimgplaceholder(uint32_t image_id, uint32_t placement_id,
 	}
 }
 
+void gr_for_each_image_cell(int (*callback)(void *data, uint32_t image_id,
+					    uint32_t placement_id, int col,
+					    int row, char is_classic),
+			    void *data) {
+	for (int row = 0; row < term.row; ++row) {
+		for (int col = 0; col < term.col; ++col) {
+			Glyph *gp = &term.line[row][col];
+			if (gp->mode & ATTR_IMAGE) {
+				uint32_t image_id = tgetimgid(gp);
+				uint32_t placement_id = tgetimgplacementid(gp);
+				int ret =
+					callback(data, tgetimgid(gp),
+						 tgetimgplacementid(gp),
+						 tgetimgcol(gp), tgetimgrow(gp),
+						 tgetisclassicplaceholder(gp));
+				if (ret == 1) {
+					term.dirty[row] = 1;
+					gp->mode = 0;
+					gp->u = ' ';
+				}
+			}
+		}
+	}
+}
+
 void
 tdeletechar(int n)
 {

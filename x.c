@@ -66,6 +66,8 @@ static void previewimage(const Arg *);
 static void showimageinfo(const Arg *);
 static void togglegrdebug(const Arg *);
 static void dumpgrstate(const Arg *);
+static void unloadimages(const Arg *);
+static void toggleimages(const Arg *);
 
 /* config.h for applying patches and the configuration. */
 #include "config.h"
@@ -364,19 +366,23 @@ showimageinfo(const Arg *arg)
 		return;
 	uint32_t image_id = tgetimgid(&g);
 	uint32_t placement_id = tgetimgplacementid(&g);
-	char command[256];
+	char placement_descr[256];
+	gr_get_placement_description(image_id, placement_id, placement_descr,
+				     sizeof(placement_descr));
+	char command[512];
 	size_t len =
-		snprintf(command, 255,
+		snprintf(command, 511,
 			 "xmessage 'image_id = %u = 0x%08X\n"
 			 "placement_id = %u = 0x%08X\n"
 			 "column = %d, row = %d\n"
 			 "classic/unicode placeholder = %s\n"
-			 "original diacritic count = %d'",
+			 "original diacritic count = %d\n"
+			 "\n%s'",
 			 image_id, image_id, placement_id, placement_id,
 			 tgetimgcol(&g), tgetimgrow(&g),
 			 tgetisclassicplaceholder(&g) ? "classic" : "unicode",
-			 tgetimgdiacriticcount(&g));
-	if (len > 255) {
+			 tgetimgdiacriticcount(&g), placement_descr);
+	if (len > 511) {
 		fprintf(stderr, "error: command too long: %s\n", command);
 		return;
 	}
@@ -397,6 +403,19 @@ void
 dumpgrstate(const Arg *arg)
 {
 	gr_dump_state();
+}
+
+void
+unloadimages(const Arg *arg)
+{
+	gr_unload_images_to_reduce_ram();
+}
+
+void
+toggleimages(const Arg *arg)
+{
+	graphics_display_images = !graphics_display_images;
+	redraw();
 }
 
 int
