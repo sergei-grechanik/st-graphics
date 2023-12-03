@@ -750,10 +750,10 @@ static inline void gr_copy_pixels(DATA32 *to, unsigned char *from, int format,
 static void gr_load_raw_pixel_data_uncompressed(DATA32 *data, FILE *file,
 						int format,
 						size_t total_pixels) {
+	unsigned char chunk[BUFSIZ];
 	size_t pixel_size = format == 24 ? 3 : 4;
 	size_t chunk_size_pix = BUFSIZ / 4;
 	size_t chunk_size_bytes = chunk_size_pix * pixel_size;
-	unsigned char chunk[chunk_size_bytes];
 	size_t bytes = total_pixels * pixel_size;
 	for (size_t chunk_start_pix = 0; chunk_start_pix < total_pixels;
 	     chunk_start_pix += chunk_size_pix) {
@@ -766,12 +766,13 @@ static void gr_load_raw_pixel_data_uncompressed(DATA32 *data, FILE *file,
 	}
 }
 
+#define COMPRESSED_CHUNK_SIZE BUFSIZ
+#define DECOMPRESSED_CHUNK_SIZE (BUFSIZ * 4)
+
 /// Loads compressed RGB or RGBA image data from a file.
 static int gr_load_raw_pixel_data_compressed(DATA32 *data, FILE *file,
 					     int format, size_t total_pixels) {
 	size_t pixel_size = format == 24 ? 3 : 4;
-	const size_t COMPRESSED_CHUNK_SIZE = BUFSIZ;
-	const size_t DECOMPRESSED_CHUNK_SIZE = BUFSIZ * 4;
 	unsigned char compressed_chunk[COMPRESSED_CHUNK_SIZE];
 	unsigned char decompressed_chunk[DECOMPRESSED_CHUNK_SIZE];
 
@@ -857,6 +858,9 @@ static int gr_load_raw_pixel_data_compressed(DATA32 *data, FILE *file,
 	inflateEnd(&strm);
 	return error;
 }
+
+#undef COMPRESSED_CHUNK_SIZE
+#undef DECOMPRESSED_CHUNK_SIZE
 
 /// Load the image from a file containing raw pixel data (RGB or RGBA), the data
 /// may be compressed.
