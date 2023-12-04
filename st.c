@@ -2649,13 +2649,14 @@ check_control_code:
 			gp = &term.line[term.c.y][term.c.x-1];
 		uint16_t num = diacritic_to_num(u);
 		if (num && (gp->mode & ATTR_IMAGE)) {
-			tsetimgdiacriticcount(gp, tgetimgdiacriticcount(gp) + 1);
-			if (!tgetimgrow(gp))
+			unsigned diaccount = tgetimgdiacriticcount(gp);
+			if (diaccount == 0)
 				tsetimgrow(gp, num);
-			else if (!tgetimgcol(gp))
+			else if (diaccount == 1)
 				tsetimgcol(gp, num);
-			else if (!tgetimgid4thbyteplus1(gp))
+			else if (diaccount == 2)
 				tsetimg4thbyteplus1(gp, num);
+			tsetimgdiacriticcount(gp, diaccount + 1);
 		}
 		term.lastc = u;
 		return;

@@ -1210,6 +1210,7 @@ void gr_get_placement_description(uint32_t image_id, uint32_t placement_id,
 		 "cell size: %u x %u\n"
 		 "src rect %u, %u  %u x %u\n"
 		 "image uploading status: %s\n"
+		 "disk size: %u KiB\n"
 		 "placement is %s\n"
 		 "original image is %s\n",
 		 image_id, placement_id, placement->cols, placement->rows,
@@ -1218,6 +1219,7 @@ void gr_get_placement_description(uint32_t image_id, uint32_t placement_id,
 		 placement->src_pix_x, placement->src_pix_y,
 		 placement->src_pix_width, placement->src_pix_height,
 		 image_uploading_failure_strings[img->uploading_failure],
+		 img->disk_size / 1024,
 		 placement->scaled_image ? "loaded" : "not loaded",
 		 img->original_image ? "loaded" : "not loaded");
 }
