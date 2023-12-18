@@ -835,7 +835,11 @@ ttyread(void)
 {
 	static char buf[BUFSIZ];
 	static int buflen = 0;
+	static int already_processing = 0;
 	int ret, written;
+
+	if (buflen >= LEN(buf))
+		return 0;
 
 	/* append read bytes to unprocessed bytes */
 	ret = read(cmdfd, buf+buflen, LEN(buf)-buflen);
@@ -847,7 +851,13 @@ ttyread(void)
 		die("couldn't read from shell: %s\n", strerror(errno));
 	default:
 		buflen += ret;
+		if (already_processing) {
+			/* Avoid recursive call to twrite() */
+			return ret;
+		}
+		already_processing = 1;
 		written = twrite(buf, buflen, 0);
+		already_processing = 0;
 		buflen -= written;
 		/* keep any incomplete UTF-8 byte sequence for the next call */
 		if (buflen > 0)
@@ -890,6 +900,7 @@ ttywriteraw(const char *s, size_t n)
 	fd_set wfd, rfd;
 	ssize_t r;
 	size_t lim = 256;
+	int retries_left = 100;
 
 	/*
 	 * Remember that we are using a pty, which might be a modem line.
@@ -934,11 +945,17 @@ ttywriteraw(const char *s, size_t n)
 		}
 		if (FD_ISSET(cmdfd, &rfd))
 			lim = ttyread();
+		if (n > 0) {
+			if (--retries_left <= 0)
+				goto too_many_retries;
+		}
 	}
 	return;
 
 write_error:
 	die("write error on tty: %s\n", strerror(errno));
+too_many_retries:
+	fprintf(stderr, "Could not write %zu bytes to tty\n", n);
 }
 
 void
@@ -2123,7 +2140,8 @@ strhandle(void)
 					res->placeholder.do_not_move_cursor);
 			}
 			if (res->response[0])
-				ttywriteraw(res->response, strlen(res->response));
+				ttywrite(res->response, strlen(res->response),
+					 0);
 			if (res->redraw)
 				tfulldirt();
 			return;
