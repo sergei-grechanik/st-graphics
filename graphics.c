@@ -241,7 +241,7 @@ GraphicsCommandResult graphics_command_result = {0};
 // Defined in config.h
 extern const char graphics_cache_dir_template[];
 extern unsigned graphics_max_single_image_file_size;
-extern unsigned graphics_total_cache_size;
+extern unsigned graphics_total_file_cache_size;
 extern unsigned graphics_max_single_image_ram_size;
 extern unsigned graphics_max_total_ram_size;
 extern unsigned graphics_max_total_placements;
@@ -586,12 +586,15 @@ static void gr_check_limits() {
 		int to_delete = total_placement_count -
 				graphics_max_total_placements;
 		for (int i = 0; i < to_delete; i++) {
+			if (placements_sorted[placements_begin]->protected)
+				break;
 			gr_delete_placement(placements_sorted[placements_begin]);
 			placements_begin++;
 		}
 	}
 	// Then reduce the size of the image file cache.
-	if (images_disk_size > apply_tolerance(graphics_total_cache_size)) {
+	if (images_disk_size >
+	    apply_tolerance(graphics_total_file_cache_size)) {
 		if (graphics_debug_mode)
 			fprintf(stderr, "Too big disk cache: %ld KiB\n",
 				images_disk_size / 1024);
@@ -599,7 +602,7 @@ static void gr_check_limits() {
 			images_sorted = gr_get_images_sorted_by_atime();
 		int i = 0;
 		int total_images = kh_size(images);
-		while (images_disk_size > graphics_total_cache_size &&
+		while (images_disk_size > graphics_total_file_cache_size &&
 		       i < total_images) {
 			gr_delete_imagefile(images_sorted[images_begin + i]);
 			i++;
@@ -630,8 +633,10 @@ static void gr_check_limits() {
 		int i = 0;
 		while (images_ram_size > graphics_max_total_ram_size &&
 		       i < total_placement_count) {
-			gr_unload_placement(
-				placements_sorted[placements_begin + i]);
+			if (!placements_sorted[placements_begin + i]->protected)
+				gr_unload_placement(
+					placements_sorted[placements_begin +
+							  i]);
 			i++;
 		}
 	}
@@ -1052,10 +1057,14 @@ static void gr_load_image(Image *img) {
 /// placement is already loaded, it will be reloaded only if the cell dimensions
 /// have changed.
 static void gr_load_placement(ImagePlacement *placement, int cw, int ch) {
+	// Update the atime uncoditionally.
+	gr_touch_placement(placement);
+
 	// If it's already loaded with the same cw and ch, do nothing.
 	if (placement->scaled_image && placement->scaled_ch == ch &&
 	    placement->scaled_cw == cw)
 		return;
+
 	// Unload the placement first.
 	gr_unload_placement(placement);
 
@@ -1324,6 +1333,7 @@ static void gr_print_ago(struct timespec *now, struct timespec *past) {
 void gr_dump_state() {
 	fprintf(stderr, "======== Graphics module state dump ========\n");
 	fprintf(stderr, "Image count: %u\n", kh_size(images));
+	fprintf(stderr, "Placement count: %u\n", total_placement_count);
 	fprintf(stderr, "Estimated RAM usage: %ld KiB\n",
 		images_ram_size / 1024);
 	fprintf(stderr, "Estimated Disk usage: %ld KiB\n",
@@ -1481,8 +1491,6 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 			gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
 		return;
 	}
-
-	gr_touch_placement(placement);
 
 	// Display the image.
 	imlib_context_set_anti_alias(0);
