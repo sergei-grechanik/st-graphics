@@ -171,13 +171,18 @@ static unsigned int defaultattr = 11;
 /// The template for the cache directory.
 const char graphics_cache_dir_template[] = "/tmp/st-images-XXXXXX";
 /// The max size of a single image file, in bytes.
-unsigned graphics_max_image_size = 20 * 1024 * 1024;
+unsigned graphics_max_single_image_file_size = 20 * 1024 * 1024;
 /// The max size of the cache, in bytes.
 unsigned graphics_total_cache_size = 300 * 1024 * 1024;
 /// The max ram size of an image or placement, in bytes.
-unsigned graphics_max_image_ram_size = 100 * 1024 * 1024;
+unsigned graphics_max_single_image_ram_size = 100 * 1024 * 1024;
 /// The max total size of all images loaded into RAM.
 unsigned graphics_max_total_ram_size = 300 * 1024 * 1024;
+/// The max total number of image placements and images.
+unsigned graphics_max_total_placements = 4096;
+/// The ratio by which limits can be exceeded. This is to reduce the frequency
+/// of image removal.
+double graphics_excess_tolerance_ratio = 0.05;
 
 /*
  * Force mouse select/shortcuts while mask is active (when MODE_MOUSE is set).
