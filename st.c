@@ -2150,7 +2150,8 @@ strhandle(void)
 					res->placeholder.do_not_move_cursor);
 			}
 			if (res->response[0])
-				ttywriteraw(res->response, strlen(res->response));
+				ttywrite(res->response, strlen(res->response),
+					 0);
 			if (res->redraw)
 				tfulldirt();
 			return;
