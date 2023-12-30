@@ -2014,7 +2014,7 @@ static Image *gr_new_image_from_command(GraphicsCommand *cmd) {
 	    cmd->compression != 0) {
 		gr_reporterror_cmd(cmd, "EINVAL: compression is supported only "
 					"for raw pixel data (f=32 or f=24)");
-		return NULL;
+		// Even though we report an error, we still create an image.
 	}
 	// Create an image object. If the action is `q`, we'll use random id
 	// instead of the one specified in the command.
@@ -2155,6 +2155,11 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 			gr_append_data(img, cmd->payload, cmd->more);
 			return img;
 		}
+		// If no action is specified, it's not the first transmission
+		// command. If we couldn't find the image, something went wrong
+		// and we should just drop this command.
+		if (cmd->action == 0)
+			return NULL;
 		// Otherwise create a new image structure.
 		img = gr_new_image_from_command(cmd);
 		if (!img)
