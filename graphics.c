@@ -120,7 +120,7 @@ typedef struct Image {
 	/// image_id, and it also should be mentioned in responses.
 	uint32_t image_number;
 	/// The last time when the image was displayed or otherwise touched.
-	time_t atime;
+	struct timespec atime;
 	/// The global index of the creation command. Used to decide which image
 	/// is newer if they have the same image number.
 	uint64_t global_command_index;
@@ -160,7 +160,7 @@ typedef struct ImagePlacement {
 	/// The id of the placement. Must be nonzero.
 	uint32_t placement_id;
 	/// The last time when the placement was displayed or otherwise touched.
-	time_t atime;
+	struct timespec atime;
 	/// Whether the placement shouldn't be unloaded from RAM.
 	char protected;
 	/// Whether the placement is used only for Unicode placeholders.
@@ -210,9 +210,11 @@ static const char *sanitized_filename(const char *str);
 static ImageRect image_rects[MAX_IMAGE_RECTS] = {{0}};
 /// The known images (including the ones being uploaded).
 static khash_t(id2image) *images = NULL;
+/// The total number of placements in all images.
+static unsigned total_placement_count = 0;
 /// The total size of all image files stored in the on-disk cache.
 static int64_t images_disk_size = 0;
-/// The total size of all images loaded into ram.
+/// The total size of all images and placements loaded into ram.
 static int64_t images_ram_size = 0;
 /// The id of the last loaded image.
 static uint32_t last_image_id = 0;
@@ -220,8 +222,6 @@ static uint32_t last_image_id = 0;
 static int current_cw = 0, current_ch = 0;
 /// The id of the currently uploaded image (when using direct uploading).
 static uint32_t current_upload_image_id = 0;
-/// The time when the latest chunk of data was appended to an image.
-static time_t last_uploading_time = 0;
 /// The time when the current frame drawing started (used for debugging fps).
 static clock_t drawing_start_time;
 /// The global index of the current command.
@@ -240,10 +240,12 @@ GraphicsCommandResult graphics_command_result = {0};
 
 // Defined in config.h
 extern const char graphics_cache_dir_template[];
-extern unsigned graphics_max_image_size;
-extern unsigned graphics_total_cache_size;
-extern unsigned graphics_max_image_ram_size;
+extern unsigned graphics_max_single_image_file_size;
+extern unsigned graphics_total_file_cache_size;
+extern unsigned graphics_max_single_image_ram_size;
 extern unsigned graphics_max_total_ram_size;
+extern unsigned graphics_max_total_placements;
+extern double graphics_excess_tolerance_ratio;
 
 
 #define MIN(a, b)		((a) < (b) ? (a) : (b))
@@ -414,6 +416,7 @@ static void gr_delete_placement_keep_id(ImagePlacement *placement) {
 			placement->image->image_id, placement->placement_id);
 	gr_unload_placement(placement);
 	free(placement);
+	total_placement_count--;
 }
 
 /// Deletes all placements of `img`.
@@ -471,105 +474,181 @@ static void gr_delete_all_images() {
 	kh_clear(id2image, images);
 }
 
-/// Returns the oldest image that is profitable to delete to free up disk space.
-static Image *gr_get_image_to_delete() {
-	Image *oldest_image = NULL;
-	Image *img = NULL;
-	kh_foreach_value(images, img, {
-		if (img->disk_size == 0)
-			continue;
-		if (!oldest_image ||
-		    difftime(img->atime, oldest_image->atime) < 0)
-			oldest_image = img;
-	});
-	if (graphics_debug_mode && oldest_image) {
-		fprintf(stderr, "Oldest image id %u\n", oldest_image->image_id);
-	}
-	return oldest_image;
+/// A helper to compare timespecs.
+int gr_cmp_timespec(const struct timespec *t1, const struct timespec *t2) {
+	if (t1->tv_sec < t2->tv_sec)
+		return -1;
+	if (t1->tv_sec > t2->tv_sec)
+		return 1;
+	if (t1->tv_nsec < t2->tv_nsec)
+		return -1;
+	if (t1->tv_nsec > t2->tv_nsec)
+		return 1;
+	return 0;
 }
 
-/// Returns the oldest placement or image that is profitable to unload to free
-/// up ram.
-static void
-gr_get_image_or_placement_to_unload(Image **img_to_unload,
-				    ImagePlacement **placement_to_unload) {
-	*img_to_unload = NULL;
-	*placement_to_unload = NULL;
+/// A helper to compare images by atime for qsort.
+static int gr_cmp_images_by_atime(const void *a, const void *b) {
+	Image *img_a = *(Image *const *)a;
+	Image *img_b = *(Image *const *)b;
+	return gr_cmp_timespec(&img_a->atime, &img_b->atime);
+}
 
-	time_t oldest_atime;
+/// A helper to compare placements by atime for qsort.
+static int gr_cmp_placements_by_atime(const void *a, const void *b) {
+	ImagePlacement *p_a = *(ImagePlacement **)a;
+	ImagePlacement *p_b = *(ImagePlacement **)b;
+	return gr_cmp_timespec(&p_a->atime, &p_b->atime);
+}
 
-	Image *oldest_image = NULL;
-	ImagePlacement *oldest_placement = NULL;
+/// Returns an array of pointers to all images sorted by atime. The size of the
+/// array is `kh_size(images)`. Returns NULL if there are no images.
+static Image **gr_get_images_sorted_by_atime() {
+	if (kh_size(images) == 0)
+		return NULL;
+	Image **images_sorted = malloc(sizeof(Image *) * kh_size(images));
+	Image *img = NULL;
+	int i = 0;
+	kh_foreach_value(images, img, {
+		images_sorted[i] = img;
+		i++;
+	});
+	qsort(images_sorted, kh_size(images), sizeof(Image *),
+	      gr_cmp_images_by_atime);
+	return images_sorted;
+}
+
+/// Returns an array of pointers to all placements sorted by atime. The size of
+/// the array is `total_placement_count`. Returns NULL if there are no
+/// placements. The array must be freed with `free()` by the caller.
+static ImagePlacement **gr_get_placements_sorted_by_atime() {
+	if (total_placement_count == 0)
+		return NULL;
+	ImagePlacement **placements_sorted =
+		malloc(sizeof(ImagePlacement *) * total_placement_count);
 	Image *img = NULL;
 	ImagePlacement *placement = NULL;
+	int i = 0;
 	kh_foreach_value(images, img, {
 		kh_foreach_value(img->placements, placement, {
-			if (!placement->scaled_image || placement->protected)
-				continue;
-			if (!oldest_placement ||
-			    difftime(placement->atime, oldest_atime) < 0) {
-				oldest_placement = placement;
-				oldest_atime = placement->atime;
-			}
+			if (i < total_placement_count)
+				placements_sorted[i] = placement;
+			i++;
 		});
-		if (!img->original_image)
-			continue;
-		if (!oldest_image ||
-		    difftime(img->atime, oldest_atime) < 0) {
-			oldest_image = img;
-			oldest_atime = img->atime;
-		}
 	});
-
-	if (oldest_image && oldest_image->atime == oldest_atime) {
-		*img_to_unload = oldest_image;
-		if (graphics_debug_mode)
-			fprintf(stderr, "Oldest image %u\n",
-				oldest_image->image_id);
-	} else if (oldest_placement) {
-		*placement_to_unload = oldest_placement;
-		if (graphics_debug_mode)
-			fprintf(stderr, "Oldest placement %u/%u\n",
-				oldest_placement->image->image_id,
-				oldest_placement->placement_id);
+	if (i != total_placement_count) {
+		// This should never happen, but if it does, report an error,
+		// set the correct count, and redo the sorting.
+		fprintf(stderr,
+			"error: total_placement_count (%d) is wrong, the "
+			"correct value is %d\n",
+			total_placement_count, i);
+		free(placements_sorted);
+		total_placement_count = i;
+		return gr_get_placements_sorted_by_atime();
 	}
+	qsort(placements_sorted, total_placement_count,
+	      sizeof(ImagePlacement *), gr_cmp_placements_by_atime);
+	return placements_sorted;
+}
+
+/// Returns the limit adjusted by the excess tolerance ratio.
+static inline unsigned apply_tolerance(unsigned limit) {
+	return limit + (unsigned)(limit * graphics_excess_tolerance_ratio);
 }
 
 /// Checks RAM and disk cache limits and deletes/unloads some images.
 static void gr_check_limits() {
-	if (graphics_debug_mode) {
+	Image **images_sorted = NULL;
+	ImagePlacement **placements_sorted = NULL;
+	int images_begin = 0;
+	int placements_begin = 0;
+	// First reduce the number of images if there are too many.
+	if (kh_size(images) > apply_tolerance(graphics_max_total_placements)) {
+		if (graphics_debug_mode)
+			fprintf(stderr, "Too many images: %d\n",
+				kh_size(images));
+		images_sorted = gr_get_images_sorted_by_atime();
+		int to_delete = kh_size(images) -
+				graphics_max_total_placements;
+		for (int i = 0; i < to_delete; i++) {
+			gr_delete_image(images_sorted[images_begin]);
+			images_begin++;
+		}
+	}
+	// Then reduce the number of placements if there are too many.
+	if (total_placement_count >
+	    apply_tolerance(graphics_max_total_placements)) {
+		if (graphics_debug_mode)
+			fprintf(stderr, "Too many placements: %d\n",
+				total_placement_count);
+		placements_sorted = gr_get_placements_sorted_by_atime();
+		int to_delete = total_placement_count -
+				graphics_max_total_placements;
+		for (int i = 0; i < to_delete; i++) {
+			if (placements_sorted[placements_begin]->protected)
+				break;
+			gr_delete_placement(placements_sorted[placements_begin]);
+			placements_begin++;
+		}
+	}
+	// Then reduce the size of the image file cache.
+	if (images_disk_size >
+	    apply_tolerance(graphics_total_file_cache_size)) {
+		if (graphics_debug_mode)
+			fprintf(stderr, "Too big disk cache: %ld KiB\n",
+				images_disk_size / 1024);
+		if (!images_sorted)
+			images_sorted = gr_get_images_sorted_by_atime();
+		int i = 0;
+		int total_images = kh_size(images);
+		while (images_disk_size > graphics_total_file_cache_size &&
+		       i < total_images) {
+			gr_delete_imagefile(images_sorted[images_begin + i]);
+			i++;
+		}
+	}
+	// Then unload images from RAM.
+	if (images_ram_size > apply_tolerance(graphics_max_total_ram_size)) {
+		if (graphics_debug_mode)
+			fprintf(stderr, "Too much ram: %ld KiB\n",
+				images_ram_size / 1024);
+		if (!images_sorted)
+			images_sorted = gr_get_images_sorted_by_atime();
+		int i = 0;
+		unsigned total_images = kh_size(images);
+		while (images_ram_size > graphics_max_total_ram_size &&
+		       i < total_images) {
+			gr_unload_image(images_sorted[images_begin + i]);
+			i++;
+		}
+	}
+	// Then unload placements from RAM.
+	if (images_ram_size > apply_tolerance(graphics_max_total_ram_size)) {
+		if (graphics_debug_mode)
+			fprintf(stderr, "Still too much ram: %ld KiB\n",
+				images_ram_size / 1024);
+		if (!placements_sorted)
+			placements_sorted = gr_get_placements_sorted_by_atime();
+		int i = 0;
+		while (images_ram_size > graphics_max_total_ram_size &&
+		       i < total_placement_count) {
+			if (!placements_sorted[placements_begin + i]->protected)
+				gr_unload_placement(
+					placements_sorted[placements_begin +
+							  i]);
+			i++;
+		}
+	}
+	if (graphics_debug_mode && (images_sorted || placements_sorted)) {
 		fprintf(stderr,
-			"Checking limits ram: %ld KiB disk: %ld KiB count: %d\n",
-			images_ram_size / 1024,
-			images_disk_size / 1024, kh_size(images));
+			"After cleaning:  ram: %ld KiB  disk: %ld KiB  "
+			"img count: %d  placement count: %d\n",
+			images_ram_size / 1024, images_disk_size / 1024,
+			kh_size(images), total_placement_count);
 	}
-	char changed = 0;
-	while (images_disk_size > graphics_total_cache_size) {
-		Image *img_to_delete = gr_get_image_to_delete();
-		if (!img_to_delete)
-			break;
-		gr_delete_imagefile(img_to_delete);
-		changed = 1;
-	}
-	while (images_ram_size > graphics_max_total_ram_size) {
-		Image *img_to_unload = NULL;
-		ImagePlacement *placement_to_unload = NULL;
-		gr_get_image_or_placement_to_unload(&img_to_unload,
-						    &placement_to_unload);
-		if (img_to_unload)
-			gr_unload_image(img_to_unload);
-		else if (placement_to_unload)
-			gr_unload_placement(placement_to_unload);
-		else
-			break;
-		changed = 1;
-	}
-	if (graphics_debug_mode && changed) {
-		fprintf(stderr,
-			"After cleaning ram: %ld KiB disk: %ld KiB count: %d\n",
-			images_ram_size / 1024,
-			images_disk_size / 1024, kh_size(images));
-	}
+	free(images_sorted);
+	free(placements_sorted);
 }
 
 /// Unloads all images by user request.
@@ -587,12 +666,14 @@ void gr_unload_images_to_reduce_ram() {
 }
 
 /// Update the atime of the image.
-static void gr_touch_image(Image *img) { time(&img->atime); }
+static void gr_touch_image(Image *img) {
+	clock_gettime(CLOCK_MONOTONIC, &img->atime);
+}
 
 /// Update the atime of the placement. Touches the images too.
 static void gr_touch_placement(ImagePlacement *placement) {
-	gr_touch_image(placement->image);
-	time(&placement->atime);
+	clock_gettime(CLOCK_MONOTONIC, &placement->atime);
+	placement->image->atime = placement->atime;
 }
 
 /// Creates a new image with the given id. If an image with that id already
@@ -642,6 +723,7 @@ static ImagePlacement *gr_new_placement(Image *img, uint32_t id) {
 			id);
 	placement = malloc(sizeof(ImagePlacement));
 	memset(placement, 0, sizeof(ImagePlacement));
+	total_placement_count++;
 	int ret;
 	khiter_t k = kh_put(id2placement, img->placements, id, &ret);
 	kh_value(img->placements, k) = placement;
@@ -750,10 +832,10 @@ static inline void gr_copy_pixels(DATA32 *to, unsigned char *from, int format,
 static void gr_load_raw_pixel_data_uncompressed(DATA32 *data, FILE *file,
 						int format,
 						size_t total_pixels) {
+	unsigned char chunk[BUFSIZ];
 	size_t pixel_size = format == 24 ? 3 : 4;
 	size_t chunk_size_pix = BUFSIZ / 4;
 	size_t chunk_size_bytes = chunk_size_pix * pixel_size;
-	unsigned char chunk[chunk_size_bytes];
 	size_t bytes = total_pixels * pixel_size;
 	for (size_t chunk_start_pix = 0; chunk_start_pix < total_pixels;
 	     chunk_start_pix += chunk_size_pix) {
@@ -766,12 +848,13 @@ static void gr_load_raw_pixel_data_uncompressed(DATA32 *data, FILE *file,
 	}
 }
 
+#define COMPRESSED_CHUNK_SIZE BUFSIZ
+#define DECOMPRESSED_CHUNK_SIZE (BUFSIZ * 4)
+
 /// Loads compressed RGB or RGBA image data from a file.
 static int gr_load_raw_pixel_data_compressed(DATA32 *data, FILE *file,
 					     int format, size_t total_pixels) {
 	size_t pixel_size = format == 24 ? 3 : 4;
-	const size_t COMPRESSED_CHUNK_SIZE = BUFSIZ;
-	const size_t DECOMPRESSED_CHUNK_SIZE = BUFSIZ * 4;
 	unsigned char compressed_chunk[COMPRESSED_CHUNK_SIZE];
 	unsigned char decompressed_chunk[DECOMPRESSED_CHUNK_SIZE];
 
@@ -858,16 +941,19 @@ static int gr_load_raw_pixel_data_compressed(DATA32 *data, FILE *file,
 	return error;
 }
 
+#undef COMPRESSED_CHUNK_SIZE
+#undef DECOMPRESSED_CHUNK_SIZE
+
 /// Load the image from a file containing raw pixel data (RGB or RGBA), the data
 /// may be compressed.
 static Imlib_Image gr_load_raw_pixel_data(Image *img,
 					  const char *filename) {
 	size_t total_pixels = img->pix_width * img->pix_height;
-	if (total_pixels * 4 > graphics_max_image_ram_size) {
+	if (total_pixels * 4 > graphics_max_single_image_ram_size) {
 		fprintf(stderr,
 			"error: image %u is too big too load: %zu > %u\n",
 			img->image_id, total_pixels * 4,
-			graphics_max_image_ram_size);
+			graphics_max_single_image_ram_size);
 		return NULL;
 	}
 
@@ -971,10 +1057,14 @@ static void gr_load_image(Image *img) {
 /// placement is already loaded, it will be reloaded only if the cell dimensions
 /// have changed.
 static void gr_load_placement(ImagePlacement *placement, int cw, int ch) {
+	// Update the atime uncoditionally.
+	gr_touch_placement(placement);
+
 	// If it's already loaded with the same cw and ch, do nothing.
 	if (placement->scaled_image && placement->scaled_ch == ch &&
 	    placement->scaled_cw == cw)
 		return;
+
 	// Unload the placement first.
 	gr_unload_placement(placement);
 
@@ -994,12 +1084,12 @@ static void gr_load_placement(ImagePlacement *placement, int cw, int ch) {
 	// Create the scaled image.
 	int scaled_w = (int)placement->cols * cw;
 	int scaled_h = (int)placement->rows * ch;
-	if (scaled_w * scaled_h * 4 > graphics_max_image_ram_size) {
+	if (scaled_w * scaled_h * 4 > graphics_max_single_image_ram_size) {
 		fprintf(stderr,
 			"error: placement %u/%u would be too big to load: %d x "
 			"%d x 4 > %u\n",
 			img->image_id, placement->placement_id, scaled_w,
-			scaled_h, graphics_max_image_ram_size);
+			scaled_h, graphics_max_single_image_ram_size);
 		return;
 	}
 	placement->scaled_image = imlib_create_image(scaled_w, scaled_h);
@@ -1206,6 +1296,7 @@ void gr_get_placement_description(uint32_t image_id, uint32_t placement_id,
 		 "cell size: %u x %u\n"
 		 "src rect %u, %u  %u x %u\n"
 		 "image uploading status: %s\n"
+		 "disk size: %u KiB\n"
 		 "placement is %s\n"
 		 "original image is %s\n",
 		 image_id, placement_id, placement->cols, placement->rows,
@@ -1214,13 +1305,15 @@ void gr_get_placement_description(uint32_t image_id, uint32_t placement_id,
 		 placement->src_pix_x, placement->src_pix_y,
 		 placement->src_pix_width, placement->src_pix_height,
 		 image_uploading_failure_strings[img->uploading_failure],
+		 img->disk_size / 1024,
 		 placement->scaled_image ? "loaded" : "not loaded",
 		 img->original_image ? "loaded" : "not loaded");
 }
 
 /// Prints the time difference between now and past in a human-readable format.
-static void gr_print_ago(time_t now, time_t past) {
-	double seconds = difftime(now, past);
+static void gr_print_ago(struct timespec *now, struct timespec *past) {
+	double seconds = difftime(now->tv_sec, past->tv_sec) +
+			 (now->tv_nsec - past->tv_nsec) / 1e9;
 
 	if (seconds < 1)
 		fprintf(stderr, "%.2f sec ago\n", seconds);
@@ -1240,13 +1333,14 @@ static void gr_print_ago(time_t now, time_t past) {
 void gr_dump_state() {
 	fprintf(stderr, "======== Graphics module state dump ========\n");
 	fprintf(stderr, "Image count: %u\n", kh_size(images));
+	fprintf(stderr, "Placement count: %u\n", total_placement_count);
 	fprintf(stderr, "Estimated RAM usage: %ld KiB\n",
 		images_ram_size / 1024);
 	fprintf(stderr, "Estimated Disk usage: %ld KiB\n",
 		images_disk_size / 1024);
 
-	time_t now;
-	time(&now);
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
 
 	int64_t images_ram_size_computed = 0;
 	int64_t images_disk_size_computed = 0;
@@ -1260,7 +1354,7 @@ void gr_dump_state() {
 		fprintf(stderr, "    global command index %lu\n",
 			img->global_command_index);
 		fprintf(stderr, "    accessed ");
-		gr_print_ago(now, img->atime);
+		gr_print_ago(&now, &img->atime);
 		fprintf(stderr, "    status: %s\n",
 			image_status_strings[img->status]);
 		if (img->uploading_failure)
@@ -1296,7 +1390,7 @@ void gr_dump_state() {
 				fprintf(stderr,
 					"        ERROR: WRONG IMAGE POINTER\n");
 			fprintf(stderr, "        accessed ");
-			gr_print_ago(now, placement->atime);
+			gr_print_ago(&now, &placement->atime);
 			fprintf(stderr, "        scale_mode = %u\n",
 				placement->scale_mode);
 			fprintf(stderr,
@@ -1398,8 +1492,6 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 		return;
 	}
 
-	gr_touch_placement(placement);
-
 	// Display the image.
 	imlib_context_set_anti_alias(0);
 	imlib_context_set_image(placement->scaled_image);
@@ -1476,6 +1568,9 @@ void gr_finish_drawing(Drawable buf) {
 		XDrawString(disp, buf, gc, 0, 14, info, strlen(info));
 		XFreeGC(disp, gc);
 	}
+
+	// Check the limits in case we have used too much ram for placements.
+	gr_check_limits();
 }
 
 // Add an image rectangle to the list of rectangles to draw.
@@ -1753,7 +1848,7 @@ static void gr_reportuploaderror(Image *img) {
 			img,
 			"EFBIG: the size of the uploaded image exceeded "
 			"the image size limit %u",
-			graphics_max_image_size);
+			graphics_max_single_image_file_size);
 		break;
 	case ERROR_UNEXPECTED_SIZE:
 		gr_reporterror_img(img,
@@ -1827,8 +1922,8 @@ static void gr_append_data(Image *img, const char *payload, int more) {
 			img->disk_size, data_size, img->disk_size + data_size);
 
 	// Do not append this data if the image exceeds the size limit.
-	if (img->disk_size + data_size > graphics_max_image_size ||
-	    img->expected_size > graphics_max_image_size) {
+	if (img->disk_size + data_size > graphics_max_single_image_file_size ||
+	    img->expected_size > graphics_max_single_image_file_size) {
 		free(data);
 		gr_delete_imagefile(img);
 		img->uploading_failure = ERROR_OVER_SIZE_LIMIT;
@@ -1862,7 +1957,6 @@ static void gr_append_data(Image *img, const char *payload, int more) {
 
 	if (more) {
 		current_upload_image_id = img->image_id;
-		time(&last_uploading_time);
 	} else {
 		current_upload_image_id = 0;
 		// Close the file.
@@ -1920,7 +2014,7 @@ static Image *gr_new_image_from_command(GraphicsCommand *cmd) {
 	    cmd->compression != 0) {
 		gr_reporterror_cmd(cmd, "EINVAL: compression is supported only "
 					"for raw pixel data (f=32 or f=24)");
-		return NULL;
+		// Even though we report an error, we still create an image.
 	}
 	// Create an image object. If the action is `q`, we'll use random id
 	// instead of the one specified in the command.
@@ -1993,7 +2087,7 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 			stat_error = "Not a regular file";
 		else if (st.st_size == 0)
 			stat_error = "The size of the file is zero";
-		else if (st.st_size > graphics_max_image_size)
+		else if (st.st_size > graphics_max_single_image_file_size)
 			stat_error = "The file is too large";
 		if (stat_error) {
 			gr_reporterror_cmd(cmd,
@@ -2061,6 +2155,11 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 			gr_append_data(img, cmd->payload, cmd->more);
 			return img;
 		}
+		// If no action is specified, it's not the first transmission
+		// command. If we couldn't find the image, something went wrong
+		// and we should just drop this command.
+		if (cmd->action == 0)
+			return NULL;
 		// Otherwise create a new image structure.
 		img = gr_new_image_from_command(cmd);
 		if (!img)

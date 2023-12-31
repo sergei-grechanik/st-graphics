@@ -835,7 +835,11 @@ ttyread(void)
 {
 	static char buf[BUFSIZ];
 	static int buflen = 0;
-	int ret, written;
+	static int already_processing = 0;
+	int ret, written = 0;
+
+	if (buflen >= LEN(buf))
+		return 0;
 
 	/* append read bytes to unprocessed bytes */
 	ret = read(cmdfd, buf+buflen, LEN(buf)-buflen);
@@ -847,7 +851,24 @@ ttyread(void)
 		die("couldn't read from shell: %s\n", strerror(errno));
 	default:
 		buflen += ret;
-		written = twrite(buf, buflen, 0);
+		if (already_processing) {
+			/* Avoid recursive call to twrite() */
+			return ret;
+		}
+		already_processing = 1;
+		while (1) {
+			int buflen_before_processing = buflen;
+			written += twrite(buf + written, buflen - written, 0);
+			// If buflen changed during the call to twrite, there is
+			// new data, and we need to keep processing, otherwise
+			// we can exit. This will not loop forever because the
+			// buffer is limited, and we don't clean it in this
+			// loop, so at some point ttywrite will have to drop
+			// some data.
+			if (buflen_before_processing == buflen)
+				break;
+		}
+		already_processing = 0;
 		buflen -= written;
 		/* keep any incomplete UTF-8 byte sequence for the next call */
 		if (buflen > 0)
@@ -890,6 +911,7 @@ ttywriteraw(const char *s, size_t n)
 	fd_set wfd, rfd;
 	ssize_t r;
 	size_t lim = 256;
+	int retries_left = 100;
 
 	/*
 	 * Remember that we are using a pty, which might be a modem line.
@@ -898,6 +920,9 @@ ttywriteraw(const char *s, size_t n)
 	 * FIXME: Migrate the world to Plan 9.
 	 */
 	while (n > 0) {
+		if (retries_left-- <= 0)
+			goto too_many_retries;
+
 		FD_ZERO(&wfd);
 		FD_ZERO(&rfd);
 		FD_SET(cmdfd, &wfd);
@@ -939,6 +964,8 @@ ttywriteraw(const char *s, size_t n)
 
 write_error:
 	die("write error on tty: %s\n", strerror(errno));
+too_many_retries:
+	fprintf(stderr, "Could not write %zu bytes to tty\n", n);
 }
 
 void
@@ -2123,7 +2150,8 @@ strhandle(void)
 					res->placeholder.do_not_move_cursor);
 			}
 			if (res->response[0])
-				ttywriteraw(res->response, strlen(res->response));
+				ttywrite(res->response, strlen(res->response),
+					 0);
 			if (res->redraw)
 				tfulldirt();
 			return;
@@ -2649,13 +2677,14 @@ check_control_code:
 			gp = &term.line[term.c.y][term.c.x-1];
 		uint16_t num = diacritic_to_num(u);
 		if (num && (gp->mode & ATTR_IMAGE)) {
-			tsetimgdiacriticcount(gp, tgetimgdiacriticcount(gp) + 1);
-			if (!tgetimgrow(gp))
+			unsigned diaccount = tgetimgdiacriticcount(gp);
+			if (diaccount == 0)
 				tsetimgrow(gp, num);
-			else if (!tgetimgcol(gp))
+			else if (diaccount == 1)
 				tsetimgcol(gp, num);
-			else if (!tgetimgid4thbyteplus1(gp))
+			else if (diaccount == 2)
 				tsetimg4thbyteplus1(gp, num);
+			tsetimgdiacriticcount(gp, diaccount + 1);
 		}
 		term.lastc = u;
 		return;
