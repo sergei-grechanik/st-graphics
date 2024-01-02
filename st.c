@@ -14,6 +14,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 #include <wchar.h>
 
@@ -114,6 +115,28 @@ typedef struct {
 	int alt;
 } Selection;
 
+#define MAX_SPECULATION_ACTIONS 64
+#define SPECULATION_ACTION_UP 1
+#define SPECULATION_ACTION_DOWN 2
+#define SPECULATION_ACTION_LEFT 3
+#define SPECULATION_ACTION_RIGHT 4
+
+typedef struct {
+	int ring[MAX_SPECULATION_ACTIONS]; /* ring buffer containing actions */
+	int ring_begin, ring_size;         /* ring buffer state */
+	int text_actions;   /* number of text actions in the ring buffer */
+	int dx, dy;         /* speculative cursor position delta */
+	int base_x, base_y; /* the last confirmed cursor position */
+	int stable_x;       /* horizontally stable speculated cursor position */
+	struct timespec last_cursor_movement;
+	Line unmodified_line;
+	char invisible; /* temporarily hide speculative cursor and echo */
+	char disabled;  /* whether speculation is disabled */
+	char lag_cursor_on_spec_glyph; /* whether cursor on speculated glyph */
+	int cx, cy;     /* speculative cursor position (populated on drawing) */
+	int ocx, ocy;   /* old speculative cursor position */
+} SpeculationState;
+
 /* Internal representation of the screen */
 typedef struct {
 	int row;      /* nb row */
@@ -135,6 +158,7 @@ typedef struct {
 	int icharset; /* selected charset for sequence */
 	int *tabs;
 	Rune lastc;   /* last printed char outside of sequence, 0 if control */
+	SpeculationState spec; /* speculative echo state */
 } Term;
 
 /* CSI Escape sequence structs */
@@ -241,6 +265,338 @@ static const Rune utfmax[UTF_SIZ + 1] = {0x10FFFF, 0x7F, 0x7FF, 0xFFFF, 0x10FFFF
 /* Converts a diacritic to a row/column/etc number. The result is 1-base, 0
  * means "couldn't convert". Defined in rowcolumn_diacritics_helpers.c */
 uint16_t diacritic_to_num(uint32_t code);
+
+////////////////////////////////////////////////////////////////////////////////
+
+void speculation_toggle() {
+	term.spec.ring_size = 0;
+	term.spec.disabled = !term.spec.disabled;
+}
+
+// Returns true if there is an active speculation.
+int speculation_is_active() { return term.spec.ring_size > 0; }
+
+// Appends an action to the speculation ring buffer and updates the delta.
+static void speculation_append(int action) {
+	if (term.spec.ring_size >= MAX_SPECULATION_ACTIONS)
+		return;
+	term.spec.ring[(term.spec.ring_begin + term.spec.ring_size) %
+		       MAX_SPECULATION_ACTIONS] = action;
+	term.spec.ring_size++;
+	switch (action) {
+	case SPECULATION_ACTION_UP:
+		term.spec.dy--;
+		break;
+	case SPECULATION_ACTION_DOWN:
+		term.spec.dy++;
+		break;
+	case SPECULATION_ACTION_LEFT:
+		term.spec.dx--;
+		term.spec.stable_x--;
+		break;
+	case SPECULATION_ACTION_RIGHT:
+		term.spec.dx++;
+		term.spec.stable_x++;
+		break;
+	default:
+		// This is a text input, similar to a right arrow.
+		term.spec.dx++;
+		term.spec.stable_x++;
+		term.spec.text_actions++;
+		break;
+	}
+}
+
+// Removes the first action from the speculation ring buffer and updates the
+// delta.
+static void speculation_remove() {
+	if (term.spec.ring_size <= 0)
+		return;
+	term.spec.ring_size--;
+	int action = term.spec.ring[term.spec.ring_begin];
+	term.spec.ring_begin =
+		(term.spec.ring_begin + 1) % MAX_SPECULATION_ACTIONS;
+	switch (action) {
+	case SPECULATION_ACTION_UP:
+		term.spec.dy++;
+		break;
+	case SPECULATION_ACTION_DOWN:
+		term.spec.dy--;
+		break;
+	case SPECULATION_ACTION_LEFT:
+		term.spec.dx++;
+		break;
+	case SPECULATION_ACTION_RIGHT:
+		term.spec.dx--;
+		break;
+	default:
+		term.spec.dx--;
+		term.spec.text_actions--;
+		break;
+	}
+}
+
+// Returns true if the current line looks like a password prompt.
+static int speculation_is_password_line() {
+	if (term.c.x < 2)
+		return 0;
+	int cx = term.c.x;
+	int cy = term.c.y;
+	LIMIT(cx, 0, term.col - 1);
+	LIMIT(cy, 0, term.row - 1);
+	// Search for the substring 'pass' and then the symbol ':' in the line:
+	int i;
+	for (i = 0; i < cx - 4; i++) {
+		Rune c0 = term.line[cy][i].u;
+		Rune c1 = term.line[cy][i + 1].u;
+		Rune c2 = term.line[cy][i + 2].u;
+		Rune c3 = term.line[cy][i + 3].u;
+		if ((c0 == 'p' || c0 == 'P') && (c1 == 'a' || c1 == 'A') &&
+		    (c2 == 's' || c2 == 'S') && (c3 == 's' || c3 == 'S'))
+			break;
+	}
+	if (i >= cx - 4)
+		return 0;
+	for (; i < cx; i++) {
+		if (term.line[cy][i].u == ':')
+			return 1;
+	}
+	return 0;
+}
+
+// Returns true if speculation can be started and resets the speculation state
+// if speculation is not already active.
+static int speculation_start() {
+	if (IS_SET(MODE_ECHO) || IS_SET(MODE_HIDE))
+		return 0;
+	if (term.spec.ring_size == 0) {
+		if (speculation_is_password_line())
+			return 0;
+		term.spec.dx = 0;
+		term.spec.dy = 0;
+		term.spec.base_x = term.c.x;
+		term.spec.stable_x = term.c.x;
+		term.spec.base_y = term.c.y;
+		term.spec.text_actions = 0;
+		term.spec.invisible = 0;
+		clock_gettime(CLOCK_MONOTONIC, &term.spec.last_cursor_movement);
+	}
+	return 1;
+}
+
+// Appends a cursor movement to the speculation ring buffer.
+void speculation_arrow(int dx, int dy) {
+	if (term.spec.disabled || !speculation_start())
+		return;
+	if (dx < 0)
+		speculation_append(SPECULATION_ACTION_LEFT);
+	if (dx > 0)
+		speculation_append(SPECULATION_ACTION_RIGHT);
+	if (dy < 0)
+		speculation_append(SPECULATION_ACTION_UP);
+	if (dy > 0)
+		speculation_append(SPECULATION_ACTION_DOWN);
+	draw();
+}
+
+// Appends a text input to the speculation ring buffer (just one symbol).
+void speculation_text(const char *text, size_t len) {
+	if (term.spec.disabled)
+		return;
+	Rune u;
+	if (!utf8decode(text, &u, len))
+		return;
+	if (!speculation_start())
+		return;
+	speculation_append(u);
+}
+
+// Checks whether the true cursor movement is consistent with the speculation
+// and removes actions from the ring buffer accordingly or stops the
+// speculation.
+static void speculation_check() {
+	if (IS_SET(MODE_HIDE) || term.spec.ring_size == 0)
+		return;
+	if (term.spec.base_x != term.c.x && term.spec.base_y == term.c.y) {
+		// This is a horizontal cursor movement, and the true row is the
+		// same as the speculated row. Remove horizontal actions until
+		// the base of the speculation matches the current cursor
+		// position. Stop at any vertical action.
+		int dx = term.c.x - term.spec.base_x;
+		while (dx != 0 && term.spec.ring_size > 0) {
+			int act = term.spec.ring[term.spec.ring_begin];
+			if (act == SPECULATION_ACTION_LEFT) {
+				speculation_remove();
+				dx++;
+			} else if (act >= SPECULATION_ACTION_RIGHT) {
+				speculation_remove();
+				dx--;
+			} else {
+				break;
+			}
+		}
+		term.spec.base_x = term.c.x;
+		term.spec.base_y = term.c.y;
+		clock_gettime(CLOCK_MONOTONIC, &term.spec.last_cursor_movement);
+	} else if (term.spec.base_y != term.c.y &&
+		   abs(term.spec.base_y - term.c.y) <= 3) {
+		// This is a vertical cursor movement, and the true row is not
+		// too far from the speculated row. Remove vertical actions
+		// until we reach the true row. We assume that there cannot be
+		// any horizontal movements together with vertical movements
+		int dy = term.c.y - term.spec.base_y;
+		while (dy != 0 && term.spec.ring_size > 0) {
+			int act = term.spec.ring[term.spec.ring_begin];
+			if (act == SPECULATION_ACTION_UP) {
+				speculation_remove();
+				dy++;
+			} else if (act == SPECULATION_ACTION_DOWN) {
+				speculation_remove();
+				dy--;
+			} else if (act > SPECULATION_ACTION_RIGHT) {
+				// Remove all text actions until we get to the
+				// true row. This text is probably already
+				// displayed.
+				speculation_remove();
+			} else {
+				// If there is a horizontal action, assume that
+				// we have crossed a line boundary, which caused
+				// the cursor to move vertically. Stop removing
+				// actions after that.
+				speculation_remove();
+				break;
+			}
+		}
+		term.spec.base_x = term.c.x;
+		term.spec.base_y = term.c.y;
+		clock_gettime(CLOCK_MONOTONIC, &term.spec.last_cursor_movement);
+	} else {
+		// Ether cursor didn't move at all, or it moved too far, which
+		// could be caused by things like status line updates.
+		if (term.spec.base_x != term.c.x ||
+		    term.spec.base_y != term.c.y) {
+			// Cursor moved too far, make speculation temprorarily
+			// invisible.
+			term.spec.invisible = 1;
+		}
+		// We don't update speculation here. If we don't update it for
+		// too long, it will be reset.
+		struct timespec now;
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		if (TIMEDIFF(now, term.spec.last_cursor_movement) >
+		    maxspeculationidle)
+			term.spec.ring_size = 0;
+	}
+}
+
+// Inserts a speculated glyph into the line at position x. The line will be
+// shifted to the right, double spaces with the same bg are merged.
+static void speculation_insert_glyph(Line line, int x, Rune u) {
+	if (x >= term.col)
+		return;
+	// Try to get the bg color from the glyph to the left.
+	Glyph prev;
+	if (x <= 0) {
+		x = 0;
+		prev = line[0];
+	} else {
+		prev = line[x - 1];
+	}
+	prev.mode = ATTR_NULL;
+	prev.u = u;
+	prev.fg = defaultspeculativefg;
+	// Shift the line to the right, merging double spaces.
+	for (int i = x; i < term.col; i++) {
+		Glyph tmp = line[i];
+		if (i != x && (tmp.u == ' ' || tmp.u == 0) &&
+		    (prev.u == ' ' || prev.u == 0) && tmp.mode == prev.mode &&
+		    tmp.bg == prev.bg)
+			break;
+		line[i] = prev;
+		prev = tmp;
+	}
+}
+
+// Updates the speculation state before drawing.
+static void speculation_before_draw() {
+	speculation_check();
+
+	term.spec.lag_cursor_on_spec_glyph = 0;
+
+	// Update the x coordinate of the speculated cursor only if we are on
+	// the correct row. This makes the speculated cursor more horizontally
+	// stable during vertical movement.
+	if (term.spec.dy == 0)
+		term.spec.stable_x = term.spec.base_x + term.spec.dx;
+
+	// Compute the speculated cursor position.
+	term.spec.cx = term.spec.stable_x;
+	term.spec.cy = term.spec.base_y + term.spec.dy;
+	LIMIT(term.spec.ocx, 0, term.col - 1);
+	LIMIT(term.spec.ocy, 0, term.row - 1);
+	LIMIT(term.spec.cx, 0, term.col - 1);
+	LIMIT(term.spec.cy, 0, term.row - 1);
+
+	// Insert text speculation into the line of the speculated cursor.
+	if (!term.spec.invisible && term.spec.text_actions && term.col > 0) {
+		term.spec.unmodified_line = NULL;
+		// First find the start of the speculated text by going back in
+		// the action buffer until we encounter a vertical action.
+		int x = term.spec.cx;
+		int i;
+		for (i = term.spec.ring_size - 1; i >= 0; i--) {
+			int act = term.spec.ring[(term.spec.ring_begin + i) %
+						 MAX_SPECULATION_ACTIONS];
+			if (act == SPECULATION_ACTION_LEFT) {
+				x++;
+			} else if (act >= SPECULATION_ACTION_RIGHT) {
+				x--;
+			} else {
+				break;
+			}
+		}
+		i++;
+		if (i >= term.spec.ring_size)
+			return;
+		// Now i is the index of the first action in the buffer we are
+		// going to display and x is the x coordinate of this action.
+		term.spec.unmodified_line = term.line[term.spec.cy];
+		Line specline = xmalloc(term.col * sizeof(Glyph));
+		term.line[term.spec.cy] = specline;
+		memcpy(term.line[term.spec.cy], term.spec.unmodified_line,
+		       term.col * sizeof(Glyph));
+		// Replay all actions starting from i.
+		for (; i < term.spec.ring_size; i++) {
+			int act = term.spec.ring[(term.spec.ring_begin + i) %
+						 MAX_SPECULATION_ACTIONS];
+			if (act == SPECULATION_ACTION_LEFT) {
+				x--;
+			} else if (act == SPECULATION_ACTION_RIGHT) {
+				x++;
+			} else if (act > SPECULATION_ACTION_RIGHT) {
+				speculation_insert_glyph(specline, x, act);
+				if (x == term.c.x && term.spec.cy == term.c.y)
+					term.spec.lag_cursor_on_spec_glyph = 1;
+				x++;
+			}
+		}
+		term.dirty[term.spec.cy] = 1;
+	}
+}
+
+void speculation_after_draw() {
+	term.spec.invisible = 0;
+	if (term.spec.text_actions && term.col > 0 &&
+	    term.spec.unmodified_line) {
+		Line specline = term.line[term.spec.cy];
+		term.line[term.spec.cy] = term.spec.unmodified_line;
+		term.spec.unmodified_line = NULL;
+		free(specline);
+		term.dirty[term.spec.cy] = 1;
+	}
+}
+
+////////////////////////////////////////////////////////////////////////////////
 
 ssize_t
 xwrite(int fd, const char *s, size_t len)
@@ -2885,14 +3241,37 @@ draw(void)
 	if (term.line[term.c.y][cx].mode & ATTR_WDUMMY)
 		cx--;
 
+	speculation_before_draw();
+
 	drawregion(0, 0, term.col, term.row);
-	xdrawcursor(cx, term.c.y, term.line[term.c.y][cx],
-			term.ocx, term.ocy, term.line[term.ocy][term.ocx]);
+	xerasecursor(term.spec.ocx, term.spec.ocy,
+		     term.line[term.spec.ocy][term.spec.ocx]);
+	xerasecursor(term.ocx, term.ocy, term.line[term.ocy][term.ocx]);
+	if (!IS_SET(MODE_HIDE)) {
+		if (term.spec.ring_size && !term.spec.invisible &&
+		    (term.spec.cx != term.c.x || term.spec.cy != term.c.y)) {
+			if (!term.spec.lag_cursor_on_spec_glyph)
+				xdrawcursor(cx, term.c.y,
+					    term.line[term.c.y][cx],
+					    defaultlaggingcs);
+			if (term.spec.ring_size)
+				xdrawcursor(
+					term.spec.cx, term.spec.cy,
+					term.line[term.spec.cy][term.spec.cx],
+					defaultspeculativecs);
+		} else {
+			xdrawcursor(cx, term.c.y, term.line[term.c.y][cx], -1);
+		}
+	}
 	term.ocx = cx;
 	term.ocy = term.c.y;
+	term.spec.ocx = term.spec.cx;
+	term.spec.ocy = term.spec.cy;
 	xfinishdraw();
 	if (ocx != term.ocx || ocy != term.ocy)
 		xximspot(term.ocx, term.ocy);
+
+	speculation_after_draw();
 }
 
 void

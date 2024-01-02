@@ -65,6 +65,12 @@ static double minlatency = 4;
 static double maxlatency = 40;
 
 /*
+ * Speculation timeout: if there is no confirmation of a speculation within this
+ * time, it is cancelled.
+ */
+double maxspeculationidle = 500;
+
+/*
  * blinking timeout (set to 0 to disable blinking) for the terminal blinking
  * attribute.
  */
@@ -156,6 +162,9 @@ unsigned int defaultfg = 0;
 unsigned int defaultbg = 15;
 unsigned int defaultcs = 0;
 static unsigned int defaultrcs = 15;
+unsigned int defaultspeculativecs = 234;
+unsigned int defaultlaggingcs = 247;
+unsigned int defaultspeculativefg = 9;
 
 /*
  * Default shape of cursor
@@ -252,6 +261,7 @@ static Shortcut shortcuts[] = {
 	{ TERMMOD,              XK_F6,          dumpgrstate,    {.i =  0} },
 	{ TERMMOD,              XK_F7,          unloadimages,   {.i =  0} },
 	{ TERMMOD,              XK_F8,          toggleimages,   {.i =  0} },
+	{ TERMMOD,              XK_F9,          togglespeculation, {.i =  0} },
 };
 
 /*

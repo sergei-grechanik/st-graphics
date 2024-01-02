@@ -118,6 +118,11 @@ void *xmalloc(size_t);
 void *xrealloc(void *, size_t);
 char *xstrdup(const char *);
 
+void speculation_arrow(int dx, int dy);
+void speculation_text(const char *text, size_t len);
+int speculation_is_active();
+void speculation_toggle();
+
 /* config.h globals */
 extern char *utmp;
 extern char *scroll;
@@ -131,6 +136,10 @@ extern unsigned int tabspaces;
 extern unsigned int defaultfg;
 extern unsigned int defaultbg;
 extern unsigned int defaultcs;
+extern unsigned int defaultspeculativecs;
+extern unsigned int defaultlaggingcs;
+extern unsigned int defaultspeculativefg;
+extern double maxspeculationidle;
 
 // Some accessors to image placeholder properties stored in `u`:
 // - row (1-base) - 9 bits

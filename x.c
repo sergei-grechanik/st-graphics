@@ -68,6 +68,7 @@ static void togglegrdebug(const Arg *);
 static void dumpgrstate(const Arg *);
 static void unloadimages(const Arg *);
 static void toggleimages(const Arg *);
+static void togglespeculation(const Arg *);
 
 /* config.h for applying patches and the configuration. */
 #include "config.h"
@@ -272,6 +273,8 @@ static char *opt_title = NULL;
 
 static uint buttons; /* bit field of pressed buttons */
 
+static char inside_vim = 0;
+
 void
 clipcopy(const Arg *dummy)
 {
@@ -417,6 +420,12 @@ toggleimages(const Arg *arg)
 {
 	graphics_display_images = !graphics_display_images;
 	redraw();
+}
+
+void
+togglespeculation(const Arg *arg)
+{
+	speculation_toggle();
 }
 
 int
@@ -1656,17 +1665,17 @@ xdrawglyph(Glyph g, int x, int y)
 }
 
 void
-xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
+xerasecursor(int ox, int oy, Glyph og)
 {
-	Color drawcol;
-
-	/* remove the old cursor */
 	if (selected(ox, oy))
 		og.mode ^= ATTR_REVERSE;
 	xdrawglyph(og, ox, oy);
+}
 
-	if (IS_SET(MODE_HIDE))
-		return;
+void
+xdrawcursor(int cx, int cy, Glyph g, int color)
+{
+	Color drawcol;
 
 	// If it's an image, just draw a ballot box for simplicity.
 	if (g.mode & ATTR_IMAGE)
@@ -1677,7 +1686,11 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 	 */
 	g.mode &= ATTR_BOLD|ATTR_ITALIC|ATTR_UNDERLINE|ATTR_STRUCK|ATTR_WIDE;
 
-	if (IS_SET(MODE_REVERSE)) {
+	if (color != -1) {
+		g.bg = color;
+		g.fg = defaultbg;
+		drawcol = dc.col[g.bg];
+	} else if (IS_SET(MODE_REVERSE)) {
 		g.mode |= ATTR_REVERSE;
 		g.bg = defaultfg;
 		if (selected(cx, cy)) {
@@ -1897,6 +1910,8 @@ xsettitle(char *p)
 	XTextProperty prop;
 	DEFAULT(p, opt_title);
 
+	inside_vim = strstr(p, "vim") ? 1 : 0;
+
 	if (Xutf8TextListToTextProperty(xw.dpy, &p, 1, XUTF8StringStyle,
 	                                &prop) != Success)
 		return;
@@ -2101,6 +2116,29 @@ kmap(KeySym k, uint state)
 	return NULL;
 }
 
+static void
+speculation_keypress(KeySym ksym, uint state, const char *s, size_t len) {
+	if (ksym == XK_Up) {
+		if (inside_vim)
+			speculation_arrow(0, -1);
+	}
+	else if (ksym == XK_Down) {
+		if (inside_vim)
+			speculation_arrow(0, 1);
+	}
+	else if (ksym == XK_Left || ksym == XK_BackSpace) {
+		speculation_arrow(-1, 0);
+	}
+	else if (ksym == XK_Right) {
+		speculation_arrow(1, 0);
+	}
+	else if (len > 0 && !BETWEEN(s[0], 0, 0x1f)) {
+		if (inside_vim && win.cursor != 5 && win.cursor != 6)
+			return;
+		speculation_text(s, len);
+	}
+}
+
 void
 kpress(XEvent *ev)
 {
@@ -2138,6 +2176,7 @@ kpress(XEvent *ev)
 
 	/* 2. custom keys from config.h */
 	if ((customkey = kmap(ksym, e->state))) {
+		speculation_keypress(ksym, e->state, customkey, len);
 		ttywrite(customkey, strlen(customkey), 1);
 		return;
 	}
@@ -2157,6 +2196,7 @@ kpress(XEvent *ev)
 			len = 2;
 		}
 	}
+	speculation_keypress(ksym, e->state, buf, len);
 	ttywrite(buf, len, 1);
 }
 
@@ -2290,6 +2330,13 @@ run(void)
 		draw();
 		XFlush(xw.dpy);
 		drawing = 0;
+
+		if (speculation_is_active()) {
+			if (timeout < 0)
+				timeout = maxlatency;
+			else
+				timeout = MIN(timeout, maxlatency);
+		}
 	}
 }
 
