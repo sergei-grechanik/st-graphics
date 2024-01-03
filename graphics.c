@@ -2040,6 +2040,19 @@ static Image *gr_new_image_from_command(GraphicsCommand *cmd) {
 	return img;
 }
 
+/// Removes a file if it actually looks like a temporary file.
+static void gr_delete_tmp_file(const char *filename) {
+	if (strstr(filename, "tty-graphics-protocol") == NULL)
+		return;
+	if (strstr(filename, "/tmp/") != filename) {
+		const char *tmpdir = getenv("TMPDIR");
+		if (!tmpdir || !tmpdir[0] ||
+		    strstr(filename, tmpdir) != filename)
+			return;
+	}
+	unlink(filename);
+}
+
 /// Handles a data transmission command.
 static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 	// The default is direct transmission.
@@ -2062,8 +2075,6 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 	if (cmd->transmission_medium == 'f' ||
 	    cmd->transmission_medium == 't') {
 		// File transmission.
-		// TODO: Delete the file if the medium is 't' and the file is in
-		//       a known temporary directory.
 		// Create a new image structure.
 		img = gr_new_image_from_command(cmd);
 		if (!img)
@@ -2143,6 +2154,9 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 			}
 			// Delete the symlink.
 			unlink(tmp_filename_symlink);
+			// Delete the original file if it's temporary.
+			if (cmd->transmission_medium == 't')
+				gr_delete_tmp_file(original_filename);
 		}
 		free(original_filename);
 		gr_check_limits();
