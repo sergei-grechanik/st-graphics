@@ -2885,11 +2885,6 @@ draw(void)
 	if (term.line[term.c.y][cx].mode & ATTR_WDUMMY)
 		cx--;
 
-	// If the old cursor is on the image cell, redraw the whole line, otherwise
-	// image cells with relative positioning will be drawn incorrectly.
-	if (term.line[term.ocy][term.ocx].mode & ATTR_IMAGE)
-		term.dirty[term.ocy] = 1;
-
 	drawregion(0, 0, term.col, term.row);
 	xdrawcursor(cx, term.c.y, term.line[term.c.y][cx],
 			term.ocx, term.ocy, term.line[term.ocy][term.ocx]);

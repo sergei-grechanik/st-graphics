@@ -155,6 +155,7 @@ static int xmakeglyphfontspecs(XftGlyphFontSpec *, const Glyph *, int, int, int)
 static void xdrawglyphfontspecs(const XftGlyphFontSpec *, Glyph, int, int, int);
 static void xdrawglyph(Glyph, int, int);
 static void xdrawimages(Glyph, Line, int x1, int y1, int x2);
+static void xdrawoneimagecell(Glyph, int x, int y);
 static void xclear(int, int, int, int);
 static int xgeommasktogravity(int);
 static int ximopen(Display *);
@@ -1630,7 +1631,9 @@ xdrawglyph(Glyph g, int x, int y)
 	numspecs = xmakeglyphfontspecs(&spec, &g, 1, x, y);
 	xdrawglyphfontspecs(&spec, g, numspecs, x, y);
 	if (g.mode & ATTR_IMAGE) {
-		xdrawimages(g, &g - x, x, y, x + 1);
+		xstartimagedraw();
+		xdrawoneimagecell(g, x, y);
+		xfinishimagedraw();
 	}
 }
 
@@ -1642,10 +1645,7 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 	/* remove the old cursor */
 	if (selected(ox, oy))
 		og.mode ^= ATTR_REVERSE;
-	// If the old cursor was on the image cell, the whole line has already been
-	// redrawn.
-	if (!(og.mode & ATTR_IMAGE))
-		xdrawglyph(og, ox, oy);
+	xdrawglyph(og, ox, oy);
 
 	if (IS_SET(MODE_HIDE))
 		return;
@@ -1817,6 +1817,21 @@ xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 				    last_start_col - 1, last_col, last_row - 1,
 				    last_row, x_pix, y_pix, win.cw, win.ch,
 				    base.mode & ATTR_REVERSE);
+}
+
+/* Draw just one image cell without inheriting attributes from the left. */
+void xdrawoneimagecell(Glyph g, int x, int y) {
+	if (!(g.mode & ATTR_IMAGE))
+		return;
+	int x_pix = win.hborderpx + x * win.cw;
+	int y_pix = win.vborderpx + y * win.ch;
+	uint32_t row = tgetimgrow(&g) - 1;
+	uint32_t col = tgetimgcol(&g) - 1;
+	uint32_t placement_id = tgetimgplacementid(&g);
+	uint32_t image_id = tgetimgid(&g);
+	gr_append_imagerect(xw.buf, image_id, placement_id, col, col + 1, row,
+			    row + 1, x_pix, y_pix, win.cw, win.ch,
+			    g.mode & ATTR_REVERSE);
 }
 
 /* Prepare for image drawing. */
