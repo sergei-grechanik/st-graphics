@@ -49,8 +49,14 @@ void gr_for_each_image_cell(int (*callback)(void *data, uint32_t image_id,
 					    int row, char is_classic),
 			    void *data);
 
+typedef enum {
+	GRAPHICS_DEBUG_NONE = 0,
+	GRAPHICS_DEBUG_LOG = 1,
+	GRAPHICS_DEBUG_LOG_AND_BOXES = 2,
+} GraphicsDebugMode;
+
 /// Print additional information, draw bounding bounding boxes, etc.
-extern char graphics_debug_mode;
+extern GraphicsDebugMode graphics_debug_mode;
 
 /// Whether to display images or just draw bounding boxes.
 extern char graphics_display_images;

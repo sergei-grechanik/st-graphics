@@ -234,7 +234,7 @@ static char cache_dir[MAX_FILENAME_SIZE - 16];
 static unsigned char reverse_table[256];
 
 // Declared in the header.
-char graphics_debug_mode = 0;
+GraphicsDebugMode graphics_debug_mode = GRAPHICS_DEBUG_NONE;
 char graphics_display_images = 1;
 GraphicsCommandResult graphics_command_result = {0};
 
@@ -250,6 +250,13 @@ extern double graphics_excess_tolerance_ratio;
 
 #define MIN(a, b)		((a) < (b) ? (a) : (b))
 #define MAX(a, b)		((a) < (b) ? (b) : (a))
+
+////////////////////////////////////////////////////////////////////////////////
+// Logging.
+////////////////////////////////////////////////////////////////////////////////
+
+#define GR_LOG(...) \
+	do { if(graphics_debug_mode) fprintf(stderr, __VA_ARGS__); } while(0)
 
 ////////////////////////////////////////////////////////////////////////////////
 // Basic image management functions (create, delete, find, etc).
@@ -277,14 +284,11 @@ static Image *gr_find_image_by_number(uint32_t image_number) {
 					    img->global_command_index))
 			newest_img = img;
 	});
-	if (graphics_debug_mode) {
-		if (!newest_img)
-			fprintf(stderr, "Image number %u not found\n",
-				image_number);
-		else
-			fprintf(stderr, "Found image number %u, its id is %u\n",
-				image_number, img->image_id);
-	}
+	if (!newest_img)
+		GR_LOG("Image number %u not found\n", image_number);
+	else
+		GR_LOG("Found image number %u, its id is %u\n", image_number,
+		       img->image_id);
 	return newest_img;
 }
 
@@ -352,10 +356,8 @@ static void gr_unload_image(Image *img) {
 
 	img->original_image = NULL;
 
-	if (graphics_debug_mode) {
-		fprintf(stderr, "After unloading image %u ram: %ld KiB\n",
-			img->image_id, images_ram_size / 1024);
-	}
+	GR_LOG("After unloading image %u ram: %ld KiB\n", img->image_id,
+	       images_ram_size / 1024);
 }
 
 /// Unload the placement from RAM (i.e. delete the corresponding imlib object).
@@ -373,11 +375,9 @@ static void gr_unload_placement(ImagePlacement *placement) {
 	placement->scaled_image = NULL;
 	placement->scaled_ch = placement->scaled_cw = 0;
 
-	if (graphics_debug_mode) {
-		fprintf(stderr, "After unloading placement %u/%u ram: %ld KiB\n",
-			placement->image->image_id, placement->placement_id,
-			images_ram_size / 1024);
-	}
+	GR_LOG("After unloading placement %u/%u ram: %ld KiB\n",
+	       placement->image->image_id, placement->placement_id,
+	       images_ram_size / 1024);
 }
 
 /// Delete the on-disk cache file corresponding to the image. The in-ram image
@@ -400,10 +400,8 @@ static void gr_delete_imagefile(Image *img) {
 	images_disk_size -= img->disk_size;
 	img->disk_size = 0;
 
-	if (graphics_debug_mode) {
-		fprintf(stderr, "After deleting image file %u disk: %ld KiB\n",
-			img->image_id, images_disk_size / 1024);
-	}
+	GR_LOG("After deleting image file %u disk: %ld KiB\n", img->image_id,
+	       images_disk_size / 1024);
 }
 
 /// Deletes the given placement: unloads, frees the object, but doesn't change
@@ -411,9 +409,8 @@ static void gr_delete_imagefile(Image *img) {
 static void gr_delete_placement_keep_id(ImagePlacement *placement) {
 	if (!placement)
 		return;
-	if (graphics_debug_mode)
-		fprintf(stderr, "Deleting placement %u/%u\n",
-			placement->image->image_id, placement->placement_id);
+	GR_LOG("Deleting placement %u/%u\n", placement->image->image_id,
+	       placement->placement_id);
 	gr_unload_placement(placement);
 	free(placement);
 	total_placement_count--;
@@ -433,8 +430,7 @@ static void gr_delete_all_placements(Image *img) {
 static void gr_delete_image_keep_id(Image *img) {
 	if (!img)
 		return;
-	if (graphics_debug_mode)
-		fprintf(stderr, "Deleting image %u\n", img->image_id);
+	GR_LOG("Deleting image %u\n", img->image_id);
 	gr_unload_image(img);
 	gr_delete_imagefile(img);
 	gr_delete_all_placements(img);
@@ -565,9 +561,7 @@ static void gr_check_limits() {
 	int placements_begin = 0;
 	// First reduce the number of images if there are too many.
 	if (kh_size(images) > apply_tolerance(graphics_max_total_placements)) {
-		if (graphics_debug_mode)
-			fprintf(stderr, "Too many images: %d\n",
-				kh_size(images));
+		GR_LOG("Too many images: %d\n", kh_size(images));
 		images_sorted = gr_get_images_sorted_by_atime();
 		int to_delete = kh_size(images) -
 				graphics_max_total_placements;
@@ -579,9 +573,7 @@ static void gr_check_limits() {
 	// Then reduce the number of placements if there are too many.
 	if (total_placement_count >
 	    apply_tolerance(graphics_max_total_placements)) {
-		if (graphics_debug_mode)
-			fprintf(stderr, "Too many placements: %d\n",
-				total_placement_count);
+		GR_LOG("Too many placements: %d\n", total_placement_count);
 		placements_sorted = gr_get_placements_sorted_by_atime();
 		int to_delete = total_placement_count -
 				graphics_max_total_placements;
@@ -595,9 +587,8 @@ static void gr_check_limits() {
 	// Then reduce the size of the image file cache.
 	if (images_disk_size >
 	    apply_tolerance(graphics_total_file_cache_size)) {
-		if (graphics_debug_mode)
-			fprintf(stderr, "Too big disk cache: %ld KiB\n",
-				images_disk_size / 1024);
+		GR_LOG("Too big disk cache: %ld KiB\n",
+		       images_disk_size / 1024);
 		if (!images_sorted)
 			images_sorted = gr_get_images_sorted_by_atime();
 		int i = 0;
@@ -610,9 +601,7 @@ static void gr_check_limits() {
 	}
 	// Then unload images from RAM.
 	if (images_ram_size > apply_tolerance(graphics_max_total_ram_size)) {
-		if (graphics_debug_mode)
-			fprintf(stderr, "Too much ram: %ld KiB\n",
-				images_ram_size / 1024);
+		GR_LOG("Too much ram: %ld KiB\n", images_ram_size / 1024);
 		if (!images_sorted)
 			images_sorted = gr_get_images_sorted_by_atime();
 		int i = 0;
@@ -625,9 +614,7 @@ static void gr_check_limits() {
 	}
 	// Then unload placements from RAM.
 	if (images_ram_size > apply_tolerance(graphics_max_total_ram_size)) {
-		if (graphics_debug_mode)
-			fprintf(stderr, "Still too much ram: %ld KiB\n",
-				images_ram_size / 1024);
+		GR_LOG("Still too much ram: %ld KiB\n", images_ram_size / 1024);
 		if (!placements_sorted)
 			placements_sorted = gr_get_placements_sorted_by_atime();
 		int i = 0;
@@ -640,12 +627,11 @@ static void gr_check_limits() {
 			i++;
 		}
 	}
-	if (graphics_debug_mode && (images_sorted || placements_sorted)) {
-		fprintf(stderr,
-			"After cleaning:  ram: %ld KiB  disk: %ld KiB  "
-			"img count: %d  placement count: %d\n",
-			images_ram_size / 1024, images_disk_size / 1024,
-			kh_size(images), total_placement_count);
+	if (images_sorted || placements_sorted) {
+		GR_LOG("After cleaning:  ram: %ld KiB  disk: %ld KiB  "
+		       "img count: %d  placement count: %d\n",
+		       images_ram_size / 1024, images_disk_size / 1024,
+		       kh_size(images), total_placement_count);
 	}
 	free(images_sorted);
 	free(placements_sorted);
@@ -686,13 +672,11 @@ static Image *gr_new_image(uint32_t id) {
 			// Avoid IDs that don't need full 32 bits.
 		} while ((id & 0xFF000000) == 0 || (id & 0x00FFFF00) == 0 ||
 			 gr_find_image(id));
-		if (graphics_debug_mode)
-			fprintf(stderr, "Generated random image id %u\n", id);
+		GR_LOG("Generated random image id %u\n", id);
 	}
 	Image *img = gr_find_image(id);
 	gr_delete_image_keep_id(img);
-	if (graphics_debug_mode)
-		fprintf(stderr, "Creating image %u\n", id);
+	GR_LOG("Creating image %u\n", id);
 	img = malloc(sizeof(Image));
 	memset(img, 0, sizeof(Image));
 	img->placements = kh_init(id2placement);
@@ -718,9 +702,7 @@ static ImagePlacement *gr_new_placement(Image *img, uint32_t id) {
 	}
 	ImagePlacement *placement = gr_find_placement(img, id);
 	gr_delete_placement_keep_id(placement);
-	if (graphics_debug_mode)
-		fprintf(stderr, "Creating placement %u/%u\n", img->image_id,
-			id);
+	GR_LOG("Creating placement %u/%u\n", img->image_id, id);
 	placement = malloc(sizeof(ImagePlacement));
 	memset(placement, 0, sizeof(ImagePlacement));
 	total_placement_count++;
@@ -1021,9 +1003,7 @@ static void gr_load_image(Image *img) {
 	// Load the original image.
 	char filename[MAX_FILENAME_SIZE];
 	gr_get_image_filename(img, filename, MAX_FILENAME_SIZE);
-	if (graphics_debug_mode)
-		fprintf(stderr, "Loading image: %s\n",
-			sanitized_filename(filename));
+	GR_LOG("Loading image: %s\n", sanitized_filename(filename));
 	if (img->format == 100 || img->format == 0) {
 		img->original_image = imlib_load_image(filename);
 		if (img->original_image) {
@@ -1069,9 +1049,8 @@ static void gr_load_placement(ImagePlacement *placement, int cw, int ch) {
 	gr_unload_placement(placement);
 
 	Image *img = placement->image;
-	if (graphics_debug_mode)
-		fprintf(stderr, "Loading placement: %u/%u\n", img->image_id,
-			placement->placement_id);
+	GR_LOG("Loading placement: %u/%u\n", img->image_id,
+	       placement->placement_id);
 
 	// Load the original image.
 	gr_load_image(img);
@@ -1476,7 +1455,7 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 	// the bounding box.
 	if (!placement || !graphics_display_images) {
 		gr_showrect(buf, rect);
-		if (graphics_debug_mode)
+		if (graphics_debug_mode == GRAPHICS_DEBUG_LOG_AND_BOXES)
 			gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
 		return;
 	}
@@ -1487,7 +1466,7 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 	// If the image couldn't be loaded, display the bounding box.
 	if (!placement->scaled_image) {
 		gr_showrect(buf, rect);
-		if (graphics_debug_mode)
+		if (graphics_debug_mode == GRAPHICS_DEBUG_LOG_AND_BOXES)
 			gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
 		return;
 	}
@@ -1513,7 +1492,7 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 	}
 
 	// In debug mode always draw bounding boxes and print info.
-	if (graphics_debug_mode) {
+	if (graphics_debug_mode == GRAPHICS_DEBUG_LOG_AND_BOXES) {
 		gr_showrect(buf, rect);
 		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
 	}
@@ -1594,7 +1573,7 @@ void gr_append_imagerect(Drawable buf, uint32_t image_id, uint32_t placement_id,
 	new_rect.reverse = reverse;
 
 	// Display some red text in debug mode.
-	if (graphics_debug_mode)
+	if (graphics_debug_mode == GRAPHICS_DEBUG_LOG_AND_BOXES)
 		gr_displayinfo(buf, &new_rect, 0x000000, 0xFF0000, "? ");
 
 	// If it's the empty image (image_id=0) or an empty rectangle, do
@@ -1878,11 +1857,9 @@ static void gr_display_nonvirtual_placement(ImagePlacement *placement) {
 	graphics_command_result.placeholder.rows = placement->rows;
 	graphics_command_result.placeholder.do_not_move_cursor =
 		placement->do_not_move_cursor;
-	if (graphics_debug_mode) {
-		fprintf(stderr, "Creating a placeholder for %u/%u  %d x %d\n",
-			placement->image->image_id, placement->placement_id,
-			placement->cols, placement->rows);
-	}
+	GR_LOG("Creating a placeholder for %u/%u  %d x %d\n",
+	       placement->image->image_id, placement->placement_id,
+	       placement->cols, placement->rows);
 }
 
 /// Appends data from `payload` to the image `img` when using direct
@@ -1891,13 +1868,9 @@ static void gr_display_nonvirtual_placement(ImagePlacement *placement) {
 static void gr_append_data(Image *img, const char *payload, int more) {
 	if (!img) {
 		img = gr_find_image(current_upload_image_id);
-		if (graphics_debug_mode) {
-			fprintf(stderr, "Appending data to image %u\n",
-				current_upload_image_id);
-			if (!img)
-				fprintf(stderr,
-					"ERROR: this image doesn't exist\n");
-		}
+		GR_LOG("Appending data to image %u\n", current_upload_image_id);
+		if (!img)
+			GR_LOG("ERROR: this image doesn't exist\n");
 	}
 	if (!more)
 		current_upload_image_id = 0;
@@ -1917,9 +1890,8 @@ static void gr_append_data(Image *img, const char *payload, int more) {
 	size_t data_size = 0;
 	char *data = gr_base64dec(payload, &data_size);
 
-	if (graphics_debug_mode)
-		fprintf(stderr, "appending %u + %zu = %zu bytes\n",
-			img->disk_size, data_size, img->disk_size + data_size);
+	GR_LOG("appending %u + %zu = %zu bytes\n", img->disk_size, data_size,
+	       img->disk_size + data_size);
 
 	// Do not append this data if the image exceeds the size limit.
 	if (img->disk_size + data_size > graphics_max_single_image_file_size ||
@@ -2040,6 +2012,19 @@ static Image *gr_new_image_from_command(GraphicsCommand *cmd) {
 	return img;
 }
 
+/// Removes a file if it actually looks like a temporary file.
+static void gr_delete_tmp_file(const char *filename) {
+	if (strstr(filename, "tty-graphics-protocol") == NULL)
+		return;
+	if (strstr(filename, "/tmp/") != filename) {
+		const char *tmpdir = getenv("TMPDIR");
+		if (!tmpdir || !tmpdir[0] ||
+		    strstr(filename, tmpdir) != filename)
+			return;
+	}
+	unlink(filename);
+}
+
 /// Handles a data transmission command.
 static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 	// The default is direct transmission.
@@ -2052,18 +2037,14 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 	if (current_upload_image_id != 0 && cmd->image_id == 0 &&
 	    cmd->image_number == 0 && cmd->transmission_medium == 'd') {
 		cmd->image_id = current_upload_image_id;
-		if (graphics_debug_mode)
-			fprintf(stderr,
-				"No images id is specified, continuing uploading %u\n",
-				cmd->image_id);
+		GR_LOG("No images id is specified, continuing uploading %u\n",
+		       cmd->image_id);
 	}
 
 	Image *img = NULL;
 	if (cmd->transmission_medium == 'f' ||
 	    cmd->transmission_medium == 't') {
 		// File transmission.
-		// TODO: Delete the file if the medium is 't' and the file is in
-		//       a known temporary directory.
 		// Create a new image structure.
 		img = gr_new_image_from_command(cmd);
 		if (!img)
@@ -2073,9 +2054,8 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 		char *original_filename = gr_base64dec(cmd->payload, NULL);
 		char tmp_filename[MAX_FILENAME_SIZE];
 		gr_get_image_filename(img, tmp_filename, MAX_FILENAME_SIZE);
-		if (graphics_debug_mode)
-			fprintf(stderr, "Copying image %s\n",
-				sanitized_filename(original_filename));
+		GR_LOG("Copying image %s\n",
+		       sanitized_filename(original_filename));
 		// Stat the file and check that it's a regular file and not too
 		// big.
 		struct stat st;
@@ -2143,6 +2123,9 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 			}
 			// Delete the symlink.
 			unlink(tmp_filename_symlink);
+			// Delete the original file if it's temporary.
+			if (cmd->transmission_medium == 't')
+				gr_delete_tmp_file(original_filename);
 		}
 		free(original_filename);
 		gr_check_limits();
@@ -2479,9 +2462,7 @@ int gr_parse_command(char *buf, size_t len) {
 	memset(&graphics_command_result, 0, sizeof(GraphicsCommandResult));
 
 	global_command_counter++;
-	if (graphics_debug_mode)
-		fprintf(stderr, "### Command %lu: %.80s\n",
-			global_command_counter, buf);
+	GR_LOG("### Command %lu: %.80s\n", global_command_counter, buf);
 
 	// Eat the 'G'.
 	++buf;
@@ -2541,8 +2522,8 @@ int gr_parse_command(char *buf, size_t len) {
 	if (!cmd.payload)
 		cmd.payload = buf + len;
 
-	if (graphics_debug_mode && cmd.payload && cmd.payload[0])
-		fprintf(stderr, "    payload size: %ld\n", strlen(cmd.payload));
+	if (cmd.payload && cmd.payload[0])
+		GR_LOG("    payload size: %ld\n", strlen(cmd.payload));
 
 	if (!graphics_command_result.error)
 		gr_handle_command(&cmd);
