@@ -391,7 +391,7 @@ showimageinfo(const Arg *arg)
 void
 togglegrdebug(const Arg *arg)
 {
-	graphics_debug_mode = !graphics_debug_mode;
+	graphics_debug_mode = (graphics_debug_mode + 1) % 3;
 	redraw();
 }
 
