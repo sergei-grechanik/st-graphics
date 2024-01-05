@@ -147,8 +147,8 @@ static inline uint32_t tgetisclassicplaceholder(Glyph *g) { return (g->u >> 29) 
 static inline void tsetimgrow(Glyph *g, uint32_t row) {
 	g->u = (g->u & ~0x1ff) | (row & 0x1ff);
 }
-static inline void tsetimgcol(Glyph *g, uint32_t row) {
-	g->u = (g->u & ~(0x1ff << 9)) | ((row & 0x1ff) << 9);
+static inline void tsetimgcol(Glyph *g, uint32_t col) {
+	g->u = (g->u & ~(0x1ff << 9)) | ((col & 0x1ff) << 9);
 }
 static inline void tsetimg4thbyteplus1(Glyph *g, uint32_t byteplus1) {
 	g->u = (g->u & ~(0x1ff << 18)) | ((byteplus1 & 0x1ff) << 18);
