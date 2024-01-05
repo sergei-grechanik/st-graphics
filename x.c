@@ -1758,20 +1758,25 @@ xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 		uint32_t cur_row = tgetimgrow(g);
 		uint32_t cur_col = tgetimgcol(g);
 		uint32_t cur_id_4thbyteplus1 = tgetimgid4thbyteplus1(g);
+		uint32_t num_diacritics = tgetimgdiacriticcount(g);
 		// If the row is not specified, assume it's the same as the row
-		// of the previous cell.
-		if (cur_row == 0)
+		// of the previous cell. Note that `cur_row` may contain a
+		// value imputed earlier, which will be preserved if `last_row`
+		// is zero (i.e. we don't know the row of the previous cell).
+		if (last_row && (num_diacritics == 0 || !cur_row))
 			cur_row = last_row;
 		// If the column is not specified and the row is the same as the
 		// row of the previous cell, then assume that the column is the
 		// next one.
-		if (cur_col == 0 && cur_row == last_row)
+		if (last_col && (num_diacritics <= 1 || !cur_col) &&
+		    cur_row == last_row)
 			cur_col = last_col + 1;
 		// If the additional id byte is not specified and the
 		// coordinates are consecutive, assume the byte is also the
 		// same.
-		if (!cur_id_4thbyteplus1 && cur_row == last_row &&
-		    cur_col == last_col + 1)
+		if (last_id_4thbyteplus1 &&
+		    (num_diacritics <= 2 || !cur_id_4thbyteplus1) &&
+		    cur_row == last_row && cur_col == last_col + 1)
 			cur_id_4thbyteplus1 = last_id_4thbyteplus1;
 		// If we couldn't infer row and column, start from the top left
 		// corner.
@@ -1803,7 +1808,8 @@ xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 		// runs and support the naive implementation of tgetimgid.
 		if (!tgetimgrow(g))
 			tsetimgrow(g, cur_row);
-		if (!tgetimgcol(g))
+		// We cannot save this information if there are > 511 cols.
+		if (!tgetimgcol(g) && (cur_col & ~0x1ff) == 0)
 			tsetimgcol(g, cur_col);
 		if (!tgetimgid4thbyteplus1(g))
 			tsetimg4thbyteplus1(g, cur_id_4thbyteplus1);
