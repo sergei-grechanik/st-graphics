@@ -6,6 +6,10 @@ This is a fork of [st](https://st.suckless.org/) that implements a subset of
 ![Viewing images with icat-mini.sh in tmux in st](https://github.com/sergei-grechanik/st-graphics/assets/1084979/54a639ec-afea-45d8-ac18-4f26844e6678)
 
 This repository also includes a simple script to display images `icat-mini.sh`.
+Note: to make it work in tmux you need to enable pass-through sequences, i.e.
+add something like this to your `.tmux.conf`:
+
+    set -gq allow-passthrough all
 
 ## Installation
 
