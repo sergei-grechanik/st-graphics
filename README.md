@@ -51,10 +51,10 @@ features.
         - ⚡ jpeg. Actually any format supported by imlib2 should work. The key
           value is the same as for png (`f=100`).
     - Transmission mediums:
-        - ✅ Direct (`m=d`)
-        - ✅ File (`m=f`)
-        - ✅ Temporary file (`m=t`)
-        - ❌ Shared memory object (`m=s`)
+        - ✅ Direct (`t=d`)
+        - ✅ File (`t=f`)
+        - ✅ Temporary file (`t=t`)
+        - ❌ Shared memory object (`t=s`)
     - ❌ Size and offset specification (`S` and `O` keys)
     - ✅ Image numbers
     - ✅ Responses
