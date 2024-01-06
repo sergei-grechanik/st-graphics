@@ -1,14 +1,19 @@
-# st with graphics
+# st-graphics
 
 This is a fork of [st](https://st.suckless.org/) that implements a subset of
 [kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/).
+
+![Viewing images with icat-mini.sh in tmux in st](https://github.com/sergei-grechanik/st-graphics/assets/1084979/54a639ec-afea-45d8-ac18-4f26844e6678)
+
+This repository also includes a simple script to display images `icat-mini.sh`.
 
 ## Installation
 
 As usual, copy `config.def.h` to `config.h`, modify it according to your needs,
 run `make install`.
 
-Additional dependencies required for the graphics module: imlib2, zlib
+In addition to the standard st dependencies (X11, fontconfig, freetype2),
+you will need imlib2 and zlib for the graphics module.
 
 ## Configuration
 
@@ -18,8 +23,9 @@ You may want to change the graphics-related shortcuts and image size limits (see
 Default shortcuts:
 - `Ctrl+Shift+RightClick` to preview the clicked image in feh.
 - `Ctrl+Shift+MiddleClick` to see debug info (image id, placement id, etc).
-- `Ctrl+Shift+F1` to enter graphics debug mode. It will show bounding boxes,
-  general info, and will also print logs to stderr.
+- `Ctrl+Shift+F1` to toggle graphics debug mode. It has three states: 1) no
+  debugging; 2) show general info and print logs to stderr; 3) print logs and
+  show bounding boxes.
 - `Ctrl+Shift+F6` to dump the state of all images to stderr.
 - `Ctrl+Shift+F7` to unload all images from ram (but the cache in `/tmp` will be
   preserved).
@@ -47,8 +53,7 @@ features.
     - Transmission mediums:
         - ✅ Direct (`m=d`)
         - ✅ File (`m=f`)
-        - ❌ Temporary file (`m=t`) - the image gets uploaded, but the original
-          file is not deleted.
+        - ✅ Temporary file (`m=t`)
         - ❌ Shared memory object (`m=s`)
     - ❌ Size and offset specification (`S` and `O` keys)
     - ✅ Image numbers
