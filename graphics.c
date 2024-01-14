@@ -724,10 +724,30 @@ static int64_t ceil_div(int64_t a, int64_t b) {
 /// Computes the best number of rows and columns for a placement if it's not
 /// specified, and also adjusts the source rectangle size.
 static void gr_infer_placement_size_maybe(ImagePlacement *placement) {
-	if (placement->src_pix_width == 0)
+	// Negative values are not allowed. Quietly set them to 0.
+	if (placement->src_pix_x < 0)
+		placement->src_pix_x = 0;
+	if (placement->src_pix_y < 0)
+		placement->src_pix_y = 0;
+	if (placement->src_pix_width < 0)
+		placement->src_pix_width = 0;
+	if (placement->src_pix_height < 0)
+		placement->src_pix_height = 0;
+	// If the source rectangle is outside the image, truncate it.
+	if (placement->src_pix_x > placement->image->pix_width)
+		placement->src_pix_x = placement->image->pix_width;
+	if (placement->src_pix_y > placement->image->pix_height)
+		placement->src_pix_y = placement->image->pix_height;
+	// If the source rectangle is not specified, use the whole image. If
+	// it's partially outside the image, truncate it.
+	if (placement->src_pix_width == 0 ||
+	    placement->src_pix_x + placement->src_pix_width >
+		    placement->image->pix_width)
 		placement->src_pix_width =
 			placement->image->pix_width - placement->src_pix_x;
-	if (placement->src_pix_height == 0)
+	if (placement->src_pix_height == 0 ||
+	    placement->src_pix_y + placement->src_pix_height >
+		    placement->image->pix_height)
 		placement->src_pix_height =
 			placement->image->pix_height - placement->src_pix_y;
 
