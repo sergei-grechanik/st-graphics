@@ -3,6 +3,9 @@
 This is a fork of [st](https://st.suckless.org/) that implements a subset of
 [kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/).
 
+If you want this formatted as a single patch, take the last commit from this
+branch: [graphics-squashed](https://github.com/sergei-grechanik/st-graphics/tree/graphics-squashed).
+
 ![Viewing images with icat-mini.sh in tmux in st](https://github.com/sergei-grechanik/st-graphics/assets/1084979/54a639ec-afea-45d8-ac18-4f26844e6678)
 
 This repository also includes a simple script to display images `icat-mini.sh`.
@@ -10,6 +13,10 @@ Note: to make it work in tmux you need to enable pass-through sequences, i.e.
 add something like this to your `.tmux.conf`:
 
     set -gq allow-passthrough all
+
+You also need to make sure that tmux supports 24-bit colors and that it knows
+that the client terminal supports 24-bit colors (you may need to install the st
+terminfo entry on all systems that you use, including remote ones).
 
 ## Installation
 
