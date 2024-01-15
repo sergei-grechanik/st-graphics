@@ -2072,8 +2072,6 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 		last_image_id = img->image_id;
 		// Decode the filename.
 		char *original_filename = gr_base64dec(cmd->payload, NULL);
-		char tmp_filename[MAX_FILENAME_SIZE];
-		gr_get_image_filename(img, tmp_filename, MAX_FILENAME_SIZE);
 		GR_LOG("Copying image %s\n",
 		       sanitized_filename(original_filename));
 		// Stat the file and check that it's a regular file and not too
@@ -2097,20 +2095,24 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 			img->status = STATUS_UPLOADING_ERROR;
 			img->uploading_failure = ERROR_CANNOT_COPY_FILE;
 		} else {
+			gr_make_sure_tmpdir_exists();
+			// Build the filename for the cached copy of the file.
+			char cache_filename[MAX_FILENAME_SIZE];
+			gr_get_image_filename(img, cache_filename,
+					      MAX_FILENAME_SIZE);
 			// We will create a symlink to the original file, and
 			// then copy the file to the temporary cache dir. We do
 			// this symlink trick mostly to be able to use cp for
 			// copying, and avoid escaping file name characters when
 			// calling system at the same time.
-			gr_make_sure_tmpdir_exists();
 			char tmp_filename_symlink[MAX_FILENAME_SIZE + 4] = {0};
-			strcat(tmp_filename_symlink, tmp_filename);
+			strcat(tmp_filename_symlink, cache_filename);
 			strcat(tmp_filename_symlink, ".sym");
 			char command[MAX_FILENAME_SIZE + 256];
 			size_t len =
 				snprintf(command, MAX_FILENAME_SIZE + 255,
 					 "cp '%s' '%s'", tmp_filename_symlink,
-					 tmp_filename);
+					 cache_filename);
 			if (len > MAX_FILENAME_SIZE + 255 ||
 			    symlink(original_filename, tmp_filename_symlink) ||
 			    system(command) != 0) {
@@ -2121,7 +2123,7 @@ static Image *gr_handle_transmit_command(GraphicsCommand *cmd) {
 					"Could not copy the image "
 					"%s (symlink %s) to %s",
 					sanitized_filename(original_filename),
-					tmp_filename_symlink, tmp_filename);
+					tmp_filename_symlink, cache_filename);
 				img->status = STATUS_UPLOADING_ERROR;
 				img->uploading_failure = ERROR_CANNOT_COPY_FILE;
 			} else {
