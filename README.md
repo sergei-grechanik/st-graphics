@@ -109,3 +109,11 @@ features.
   on classic placements because they aren't attached to cells, but in
   st-graphics classic placements are implemented on top of Unicode placements,
   so they get erased.
+
+## Patches and additional features
+
+This fork includes some patches and features that are not graphics-related
+per se, but are hard to disentangle from the graphics implementation:
+- [Anysize](https://st.suckless.org/patches/anysize/) - this patch is applied
+  and on by default. If you want the expected anysize behavior (no centering),
+  set `anysize_halign` and `anysize_valign` to zero in `config.h`.

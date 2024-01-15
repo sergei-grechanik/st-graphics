@@ -828,8 +828,8 @@ cresize(int width, int height)
 	col = MAX(1, col);
 	row = MAX(1, row);
 
-	win.hborderpx = (win.w - col * win.cw) / 2;
-	win.vborderpx = (win.h - row * win.ch) / 2;
+	win.hborderpx = (win.w - col * win.cw) * anysize_halign / 100;
+	win.vborderpx = (win.h - row * win.ch) * anysize_valign / 100;
 
 	tresize(col, row);
 	xresize(col, row);
