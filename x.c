@@ -62,6 +62,8 @@ static void zoom(const Arg *);
 static void zoomabs(const Arg *);
 static void zoomreset(const Arg *);
 static void ttysend(const Arg *);
+void kscrollup(const Arg *);
+void kscrolldown(const Arg *);
 static void previewimage(const Arg *);
 static void showimageinfo(const Arg *);
 static void togglegrdebug(const Arg *);
