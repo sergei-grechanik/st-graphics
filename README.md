@@ -1,14 +1,30 @@
-# st with graphics
+# st-graphics
 
 This is a fork of [st](https://st.suckless.org/) that implements a subset of
 [kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/).
+
+If you want this formatted as a single patch, take the last commit from this
+branch: [graphics-squashed](https://github.com/sergei-grechanik/st-graphics/tree/graphics-squashed).
+
+![Viewing images with icat-mini.sh in tmux in st](https://github.com/sergei-grechanik/st-graphics/assets/1084979/54a639ec-afea-45d8-ac18-4f26844e6678)
+
+This repository also includes a simple script to display images `icat-mini.sh`.
+Note: to make it work in tmux you need to enable pass-through sequences, i.e.
+add something like this to your `.tmux.conf`:
+
+    set -gq allow-passthrough all
+
+You also need to make sure that tmux supports 24-bit colors and that it knows
+that the client terminal supports 24-bit colors (you may need to install the st
+terminfo entry on all systems that you use, including remote ones).
 
 ## Installation
 
 As usual, copy `config.def.h` to `config.h`, modify it according to your needs,
 run `make install`.
 
-Additional dependencies required for the graphics module: imlib2, zlib
+In addition to the standard st dependencies (X11, fontconfig, freetype2),
+you will need imlib2 and zlib for the graphics module.
 
 ## Configuration
 
@@ -18,8 +34,9 @@ You may want to change the graphics-related shortcuts and image size limits (see
 Default shortcuts:
 - `Ctrl+Shift+RightClick` to preview the clicked image in feh.
 - `Ctrl+Shift+MiddleClick` to see debug info (image id, placement id, etc).
-- `Ctrl+Shift+F1` to enter graphics debug mode. It will show bounding boxes,
-  general info, and will also print logs to stderr.
+- `Ctrl+Shift+F1` to toggle graphics debug mode. It has three states: 1) no
+  debugging; 2) show general info and print logs to stderr; 3) print logs and
+  show bounding boxes.
 - `Ctrl+Shift+F6` to dump the state of all images to stderr.
 - `Ctrl+Shift+F7` to unload all images from ram (but the cache in `/tmp` will be
   preserved).
@@ -45,11 +62,10 @@ features.
         - ⚡ jpeg. Actually any format supported by imlib2 should work. The key
           value is the same as for png (`f=100`).
     - Transmission mediums:
-        - ✅ Direct (`m=d`)
-        - ✅ File (`m=f`)
-        - ❌ Temporary file (`m=t`) - the image gets uploaded, but the original
-          file is not deleted.
-        - ❌ Shared memory object (`m=s`)
+        - ✅ Direct (`t=d`)
+        - ✅ File (`t=f`)
+        - ✅ Temporary file (`t=t`)
+        - ❌ Shared memory object (`t=s`)
     - ❌ Size and offset specification (`S` and `O` keys)
     - ✅ Image numbers
     - ✅ Responses
@@ -100,3 +116,28 @@ features.
   on classic placements because they aren't attached to cells, but in
   st-graphics classic placements are implemented on top of Unicode placements,
   so they get erased.
+
+## Patch compatibility
+
+This fork includes some patches and features that are not graphics-related
+per se, but are hard to disentangle from the graphics implementation:
+- [Anysize](https://st.suckless.org/patches/anysize/) - this patch is applied
+  and on by default. If you want the "expected" anysize behavior (no centering),
+  set `anysize_halign` and `anysize_valign` to zero in `config.h`.
+- Support for several XTWINOPS control sequences to query information that is
+  sometimes required for image display (like cell size in pixels).
+- Support for decoration (underline) color. The decoration color is used to
+  specify the placement id in Unicode placeholders.
+
+Patches that I have tried to apply together with graphics:
+- [Boxdraw](https://st.suckless.org/patches/boxdraw) - seems to work, applied
+  with minimal conflicts, see
+  [this branch](https://github.com/sergei-grechanik/st-graphics/tree/graphics-with-boxdraw).
+- [Scrollback](https://st.suckless.org/patches/scrollback) - quite a few
+  conflicts, but easy to resolve. Seems to work but more testing may be needed.
+  See [this branch](https://github.com/sergei-grechanik/st-graphics/tree/graphics-with-scrollback).
+- [Alpha](https://st.suckless.org/patches/alpha) - doesn't work well, images
+  become transparent too.
+- [Background Image](https://st.suckless.org/patches/background_image) - seems
+  to work, see
+  [this branch](https://github.com/sergei-grechanik/st-graphics/tree/graphics-with-background-image).

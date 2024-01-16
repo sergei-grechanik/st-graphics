@@ -643,6 +643,9 @@ line_end="$(printf "\e[39;m")"
 id4th="$(expr \( "$image_id" / 16777216 \) % 256 )"
 eval "id_diacritic=\$d${id4th}"
 
+# Reset the brush state, mostly to reset the underline color.
+printf "\e[0m"
+
 # Fill the output with characters representing the image
 for y in $(seq 0 "$(expr "$rows" - 1)"); do
     eval "row_diacritic=\$d${y}"
@@ -660,3 +663,5 @@ for y in $(seq 0 "$(expr "$rows" - 1)"); do
     done
     printf '%s\n' "$line_end"
 done
+
+printf "\e[0m"
