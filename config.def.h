@@ -13,7 +13,7 @@ static int borderpx = 2;
  * expects farbfeld format
  * pseudo transparency fixes coordinates to the screen origin
  */
-static const char *bgfile = "/path/to/image.ff";
+static const char *bgfile = "./image.ff";
 static const int pseudotransparency = 0;
 
 /*
