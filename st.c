@@ -367,7 +367,7 @@ static int speculation_is_password_line() {
 // Returns true if speculation can be started and resets the speculation state
 // if speculation is not already active.
 static int speculation_start() {
-	if (IS_SET(MODE_ECHO) || IS_SET(MODE_HIDE))
+	if (IS_SET(MODE_ECHO))
 		return 0;
 	if (term.spec.ring_size == 0) {
 		if (speculation_is_password_line())
@@ -384,17 +384,74 @@ static int speculation_start() {
 	return 1;
 }
 
+static int speculation_leftmost() {
+	term.spec.cx = term.spec.stable_x;
+	term.spec.cy = term.spec.base_y + term.spec.dy;
+	LIMIT(term.spec.cx, 0, term.col - 1);
+	LIMIT(term.spec.cy, 0, term.row - 1);
+
+	int cx = term.spec.cx;
+	Line line = term.line[term.spec.cy];
+	if (cx >= 4 && (line[cx - 1].u == ' ' || line[cx - 1].u == 0) &&
+	    line[cx - 2].u == '$' &&
+	    (line[cx - 3].u == ' ' || line[cx - 1].u == 0) &&
+	    line[cx - 4].u == '>')
+		return 1;
+	return 0;
+}
+
+static int speculation_rightmost() {
+	term.spec.cx = term.spec.stable_x;
+	term.spec.cy = term.spec.base_y + term.spec.dy;
+	LIMIT(term.spec.cx, 0, term.col - 1);
+	LIMIT(term.spec.cy, 0, term.row - 1);
+
+	int cx = term.spec.cx;
+	Line line = term.line[term.spec.cy];
+	for (int i = cx; i < term.col && i < cx + 9; i++) {
+		if (line[i].u != ' ' && line[i].u != 0)
+			return 0;
+	}
+	return 1;
+}
+
+static int speculation_topmost() {
+	term.spec.cx = term.spec.stable_x;
+	term.spec.cy = term.spec.base_y + term.spec.dy;
+	LIMIT(term.spec.cx, 0, term.col - 1);
+	LIMIT(term.spec.cy, 0, term.row - 1);
+
+	if (term.spec.cy >= 1 && term.line[term.spec.cy - 1][term.spec.cx].u == 0x2500)
+		return 1;
+	if (term.spec.cy < term.row - 1 && term.line[term.spec.cy + 1][term.spec.cx].u == 0x2500)
+		return 1;
+	return 0;
+}
+
+static int speculation_bottommost() {
+	term.spec.cx = term.spec.stable_x;
+	term.spec.cy = term.spec.base_y + term.spec.dy;
+	LIMIT(term.spec.cx, 0, term.col - 1);
+	LIMIT(term.spec.cy, 0, term.row - 1);
+
+	if (term.spec.cy >= 1 && term.line[term.spec.cy - 1][term.spec.cx].u == 0x2500)
+		return 1;
+	if (term.spec.cy < term.row - 1 && term.line[term.spec.cy + 1][term.spec.cx].u == 0x2500)
+		return 1;
+	return 0;
+}
+
 // Appends a cursor movement to the speculation ring buffer.
 void speculation_arrow(int dx, int dy) {
 	if (term.spec.disabled || !speculation_start())
 		return;
-	if (dx < 0)
+	if (dx < 0 && !speculation_leftmost())
 		speculation_append(SPECULATION_ACTION_LEFT);
-	if (dx > 0)
+	if (dx > 0 && !speculation_rightmost())
 		speculation_append(SPECULATION_ACTION_RIGHT);
-	if (dy < 0)
+	if (dy < 0 && !speculation_topmost())
 		speculation_append(SPECULATION_ACTION_UP);
-	if (dy > 0)
+	if (dy > 0 && !speculation_bottommost())
 		speculation_append(SPECULATION_ACTION_DOWN);
 	draw();
 }
@@ -415,7 +472,7 @@ void speculation_text(const char *text, size_t len) {
 // and removes actions from the ring buffer accordingly or stops the
 // speculation.
 static void speculation_check() {
-	if (IS_SET(MODE_HIDE) || term.spec.ring_size == 0)
+	if (term.spec.ring_size == 0)
 		return;
 	if (term.spec.base_x != term.c.x && term.spec.base_y == term.c.y) {
 		// This is a horizontal cursor movement, and the true row is the
@@ -3247,21 +3304,19 @@ draw(void)
 	xerasecursor(term.spec.ocx, term.spec.ocy,
 		     term.line[term.spec.ocy][term.spec.ocx]);
 	xerasecursor(term.ocx, term.ocy, term.line[term.ocy][term.ocx]);
-	if (!IS_SET(MODE_HIDE)) {
-		if (term.spec.ring_size && !term.spec.invisible &&
-		    (term.spec.cx != term.c.x || term.spec.cy != term.c.y)) {
-			if (!term.spec.lag_cursor_on_spec_glyph)
-				xdrawcursor(cx, term.c.y,
-					    term.line[term.c.y][cx],
-					    defaultlaggingcs);
-			if (term.spec.ring_size)
-				xdrawcursor(
-					term.spec.cx, term.spec.cy,
-					term.line[term.spec.cy][term.spec.cx],
-					defaultspeculativecs);
-		} else {
-			xdrawcursor(cx, term.c.y, term.line[term.c.y][cx], -1);
-		}
+	if (term.spec.ring_size && !term.spec.invisible &&
+	    (term.spec.cx != term.c.x || term.spec.cy != term.c.y)) {
+		if (!term.spec.lag_cursor_on_spec_glyph)
+			xdrawcursor(cx, term.c.y,
+				    term.line[term.c.y][cx],
+				    defaultlaggingcs);
+		if (term.spec.ring_size)
+			xdrawcursor(
+				term.spec.cx, term.spec.cy,
+				term.line[term.spec.cy][term.spec.cx],
+				defaultspeculativecs);
+	} else {
+		xdrawcursor(cx, term.c.y, term.line[term.c.y][cx], -1);
 	}
 	term.ocx = cx;
 	term.ocy = term.c.y;

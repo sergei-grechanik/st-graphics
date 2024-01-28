@@ -1677,6 +1677,9 @@ xdrawcursor(int cx, int cy, Glyph g, int color)
 {
 	Color drawcol;
 
+	if (IS_SET(MODE_HIDE))
+		return;
+
 	// If it's an image, just draw a ballot box for simplicity.
 	if (g.mode & ATTR_IMAGE)
 		g.u = 0x2610;
@@ -2126,11 +2129,16 @@ speculation_keypress(KeySym ksym, uint state, const char *s, size_t len) {
 		if (inside_vim)
 			speculation_arrow(0, 1);
 	}
-	else if (ksym == XK_Left || ksym == XK_BackSpace) {
+	else if (ksym == XK_Left) {
 		speculation_arrow(-1, 0);
 	}
 	else if (ksym == XK_Right) {
 		speculation_arrow(1, 0);
+	}
+	else if (ksym == XK_BackSpace) {
+		if (inside_vim && win.cursor != 5 && win.cursor != 6)
+			return;
+		speculation_arrow(-1, 0);
 	}
 	else if (len > 0 && !BETWEEN(s[0], 0, 0x1f)) {
 		if (inside_vim && win.cursor != 5 && win.cursor != 6)
