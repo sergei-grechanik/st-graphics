@@ -3306,9 +3306,10 @@ draw(void)
 	xerasecursor(term.ocx, term.ocy, term.line[term.ocy][term.ocx]);
 	if (term.spec.ring_size && !term.spec.invisible &&
 	    (term.spec.cx != term.c.x || term.spec.cy != term.c.y)) {
-		if (!term.spec.lag_cursor_on_spec_glyph)
-			xdrawcursor(cx, term.c.y,
-				    term.line[term.c.y][cx],
+		if (!term.spec.lag_cursor_on_spec_glyph &&
+		    !(term.spec.cy == term.c.y &&
+		      abs(term.spec.cx - term.c.x) <= 1))
+			xdrawcursor(cx, term.c.y, term.line[term.c.y][cx],
 				    defaultlaggingcs);
 		if (term.spec.ring_size)
 			xdrawcursor(
