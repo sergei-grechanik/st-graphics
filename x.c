@@ -207,6 +207,14 @@ static int match(uint, uint);
 static void run(void);
 static void usage(void);
 
+#define XEMBED_EMBEDDED_NOTIFY 0
+#define XEMBED_WINDOW_ACTIVATE 1
+#define XEMBED_FOCUS_CURRENT   0
+
+void sendxembed(Window embed, long msg, long detail, long d1, long d2);
+void createnotify(XEvent *e);
+void destroynotify(XEvent *e);
+
 static void (*handler[LASTEvent])(XEvent *) = {
 	[KeyPress] = kpress,
 	[ClientMessage] = cmessage,
@@ -219,6 +227,8 @@ static void (*handler[LASTEvent])(XEvent *) = {
 	[MotionNotify] = bmotion,
 	[ButtonPress] = bpress,
 	[ButtonRelease] = brelease,
+	[CreateNotify] = createnotify,
+	[DestroyNotify] = destroynotify,
 /*
  * Uncomment if you want the selection to disappear when you select something
  * different in another window.
@@ -274,6 +284,163 @@ static char *opt_title = NULL;
 static uint buttons; /* bit field of pressed buttons */
 
 static char inside_vim = 0;
+
+void
+sendxembed(Window embed, long msg, long detail, long d1, long d2)
+{
+	XEvent e = { 0 };
+
+	e.xclient.window = embed;
+	e.xclient.type = ClientMessage;
+	e.xclient.message_type = xw.xembed;
+	e.xclient.format = 32;
+	e.xclient.data.l[0] = CurrentTime;
+	e.xclient.data.l[1] = msg;
+	e.xclient.data.l[2] = detail;
+	e.xclient.data.l[3] = d1;
+	e.xclient.data.l[4] = d2;
+	XSendEvent(xw.dpy, embed, False, NoEventMask, &e);
+}
+
+static void trymatchwindowtopid(Window w)
+{
+	// Get pid of the client.
+	Atom type;
+	int format;
+	unsigned long n, extra;
+	pid_t *ppid = NULL;
+	if (XGetWindowProperty(xw.dpy, w, xw.netwmpid, 0, 1, False, XA_CARDINAL,
+			       &type, &format, &n, &extra, (unsigned char **)&ppid) != Success) {
+		return;
+	}
+	if (!ppid) {
+		fprintf(stderr, "pid is null for %lu\n", w);
+		return;
+	}
+	fprintf(stderr, "win %lu pid: %d\n", w, *ppid);
+
+	EmbeddedWin *ew = NULL;
+	for (int i = 0; i < LEN(embedded_wins); ++i) {
+		if (embedded_wins[i].pid == *ppid) {
+			embedded_wins[i].win = w;
+			ew = &embedded_wins[i];
+			break;
+		}
+	}
+
+	if (!ew) {
+		fprintf(stderr, "Could not find embedded win %lu pid: %d\n", w, *ppid);
+		return;
+	}
+	fprintf(stderr, "found embedded win %lu pid: %d\n", w, *ppid);
+	updateembeddedwin(ew);
+}
+
+void spawnbrowser(EmbeddedWin *m) {
+	m->pid = 0;
+	m->win = 0;
+	char windidstr[32];
+	snprintf(windidstr, sizeof(windidstr), "%lu", xgetwindowid());
+	int pid = fork();
+	if (pid == 0) {
+		char *argv[] = { "surf", "-e", windidstr, m->url, NULL };
+		execvp(argv[0], argv);
+		exit(1);
+	} else if (pid < 0) {
+	} else {
+		fprintf(stderr, "spawned browser %d for %s\n", pid, m->url);
+		m->pid = pid;
+	}
+}
+
+
+void updateembeddedwin(EmbeddedWin *ew) {
+	const int embedborder = 2;
+	if (ew->needs_respawn || !ew->pid) {
+		ew->needs_respawn = 0;
+
+		if (ew->win) {
+			fprintf(stderr, "killing %lu pid: %d url: %s\n", ew->win, ew->pid, ew->url);
+			XKillClient(xw.dpy, ew->win);
+			ew->win = 0;
+			ew->pid = 0;
+		}
+
+		if (!ew->visible)
+			return;
+		spawnbrowser(ew);
+	}
+
+	if (!ew->win) {
+		// We will update the window position when we receive the create notify event.
+		return;
+	}
+
+	fprintf(stderr, "updating %lu pid: %d  %d %d  %d x %d\n", ew->win, ew->pid, ew->x, ew->y, ew->w, ew->h);
+
+	if (!ew->visible || ew->w <= 0 || ew->h <= 0) {
+		fprintf(stderr, "hiding %lu pid: %d\n", ew->win, ew->pid);
+		XUnmapWindow(xw.dpy, ew->win);
+		return;
+	}
+
+	int new_pix_x = win.hborderpx + ew->x * win.cw;
+	int new_pix_y = win.vborderpx + ew->y * win.ch;
+	int new_pix_w = ew->w * win.cw;
+	int new_pix_h = ew->h * win.ch;
+
+	if (ew->pix_x != new_pix_x || ew->pix_y != new_pix_y || ew->pix_w != new_pix_w || ew->pix_h != new_pix_h) {
+		ew->pix_x = new_pix_x;
+		ew->pix_y = new_pix_y;
+		ew->pix_w = new_pix_w;
+		ew->pix_h = new_pix_h;
+		XWindowChanges wc;
+		wc.x = ew->pix_x + embedborder;
+		wc.y = ew->pix_y + embedborder;
+		wc.width = ew->pix_w - 2*embedborder;
+		wc.height = ew->pix_h - 2*embedborder;
+		fprintf(stderr, "resize %lu to %d %d %d %d\n", ew->win, wc.x, wc.y, wc.width, wc.height);
+		XConfigureWindow(xw.dpy, ew->win, CWX | CWY | CWWidth | CWHeight, &wc);
+		XSetInputFocus(xw.dpy, xw.win, RevertToParent, CurrentTime);
+	}
+	XSelectInput(xw.dpy, ew->win, PropertyChangeMask | StructureNotifyMask | EnterWindowMask | KeyPressMask | KeyReleaseMask);
+
+	fprintf(stderr, "showing %lu pid: %d\n", ew->win, ew->pid);
+	XMapWindow(xw.dpy, ew->win);
+	XFlush(xw.dpy);
+}
+
+void
+createnotify(XEvent *e)
+{
+	if (e->xcreatewindow.override_redirect)
+		return;
+
+	Window embed = e->xcreatewindow.window;
+	if (embed == xw.win)
+		return;
+
+	/* XSetWindowAttributes attr; */
+	/* attr.override_redirect = True; */
+	/* XChangeWindowAttributes(xw.dpy, embed, CWOverrideRedirect, &attr); */
+
+	XReparentWindow(xw.dpy, embed, xw.win, 0, 0);
+	XSelectInput(xw.dpy, embed, PropertyChangeMask | StructureNotifyMask | EnterWindowMask | KeyPressMask | KeyReleaseMask);
+
+	sendxembed(embed, XEMBED_EMBEDDED_NOTIFY, 0, xw.win, 0);
+	XSetInputFocus(xw.dpy, xw.win, RevertToParent, CurrentTime);
+
+	trymatchwindowtopid(embed);
+}
+
+void
+destroynotify(XEvent *e)
+{
+	visibility(e);
+	if (e->xdestroywindow.window != xw.win) {
+		focus(e);
+	}
+}
 
 void
 clipcopy(const Arg *dummy)
@@ -571,6 +738,9 @@ mouseaction(XEvent *e, uint release)
 void
 bpress(XEvent *e)
 {
+	/* if (e->xbutton.window != xw.win) */
+	/*         return; */
+
 	int btn = e->xbutton.button;
 	struct timespec now;
 	int snap;
@@ -613,6 +783,11 @@ propnotify(XEvent *e)
 	Atom clipboard = XInternAtom(xw.dpy, "CLIPBOARD", 0);
 
 	xpev = &e->xproperty;
+	if (xpev->window != xw.win) {
+		if (xpev->atom == xw.netwmpid)
+			trymatchwindowtopid(xpev->window);
+		return;
+	}
 	if (xpev->state == PropertyNewValue &&
 			(xpev->atom == XA_PRIMARY ||
 			 xpev->atom == clipboard)) {
@@ -802,6 +977,9 @@ xsetsel(char *str)
 void
 brelease(XEvent *e)
 {
+	/* if (e->xbutton.window != xw.win) */
+	/*         return; */
+
 	int btn = e->xbutton.button;
 
 	if (1 <= btn && btn <= 11)
@@ -821,6 +999,9 @@ brelease(XEvent *e)
 void
 bmotion(XEvent *e)
 {
+	/* if (e->xbutton.window != xw.win) */
+	/*         return; */
+
 	if (!xw.pointerisvisible) {
 		XDefineCursor(xw.dpy, xw.win, xw.vpointer);
 		xw.pointerisvisible = 1;
@@ -1281,7 +1462,8 @@ xinit(int cols, int rows)
 	xw.attrs.bit_gravity = NorthWestGravity;
 	xw.attrs.event_mask = FocusChangeMask | KeyPressMask | KeyReleaseMask
 		| ExposureMask | VisibilityChangeMask | StructureNotifyMask
-		| ButtonMotionMask | ButtonPressMask | ButtonReleaseMask;
+		| ButtonMotionMask | ButtonPressMask | ButtonReleaseMask
+		| SubstructureNotifyMask | SubstructureRedirectMask;
 	xw.attrs.colormap = xw.cmap;
 
 	if (!(opt_embed && (parent = strtol(opt_embed, NULL, 0))))
@@ -1923,6 +2105,10 @@ xsettitle(char *p)
 	XFree(prop.value);
 }
 
+unsigned long xgetwindowid(void) {
+	return xw.win;
+}
+
 int
 xstartdraw(void)
 {
@@ -2003,6 +2189,8 @@ visibility(XEvent *ev)
 void
 unmap(XEvent *ev)
 {
+	if (ev->xunmap.window != xw.win)
+		return;
 	win.mode &= ~MODE_VISIBLE;
 }
 
@@ -2056,6 +2244,11 @@ void
 focus(XEvent *ev)
 {
 	XFocusChangeEvent *e = &ev->xfocus;
+
+	fprintf(stderr, "focus event: %lu\n", e->window);
+
+	if (e->window != xw.win)
+		return;
 
 	if (e->mode == NotifyGrab)
 		return;
@@ -2158,6 +2351,10 @@ kpress(XEvent *ev)
 	Status status;
 	Shortcut *bp;
 
+	fprintf(stderr, "keypress: %lu\n", e->window);
+	/* if (e->window != xw.win) */
+	/*         return; */
+
 	if (xw.pointerisvisible) {
 		XDefineCursor(xw.dpy, xw.win, xw.bpointer);
 		xsetpointermotion(1);
@@ -2211,6 +2408,8 @@ kpress(XEvent *ev)
 void
 cmessage(XEvent *e)
 {
+	/* if (e->xclient.window != xw.win) */
+	/*         return; */
 	/*
 	 * See xembed specs
 	 *  http://standards.freedesktop.org/xembed-spec/xembed-spec-latest.html
@@ -2232,6 +2431,9 @@ cmessage(XEvent *e)
 void
 resize(XEvent *e)
 {
+	if (e->xconfigure.window != xw.win)
+		return;
+
 	if (e->xconfigure.width == win.w && e->xconfigure.height == win.h)
 		return;
 

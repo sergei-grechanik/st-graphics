@@ -43,3 +43,18 @@ void xximspot(int, int);
 
 void xstartimagedraw();
 void xfinishimagedraw();
+
+typedef struct EmbeddedWin {
+	int x, y, w, h;
+	int pix_x, pix_y, pix_w, pix_h;
+	int pid;
+	unsigned long win;
+	char visible;
+	char needs_respawn;
+	char url[256];
+} EmbeddedWin;
+
+EmbeddedWin embedded_wins[16];
+
+unsigned long xgetwindowid(void);
+void updateembeddedwin(EmbeddedWin *ew);

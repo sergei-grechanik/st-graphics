@@ -3264,10 +3264,250 @@ resettitle(void)
 	xsettitle(NULL);
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// Markers
+////////////////////////////////////////////////////////////////////////////////
+
+typedef struct Marker {
+	int markery;
+	int x, y, w, h;
+	EmbeddedWin* ew;
+	char url[256];
+} Marker;
+
+Marker markers[16];
+
+void createmarkerwindows() {
+	fprintf(stderr, "===========================================\n");
+	for (int i = 0; i < LEN(embedded_wins); ++i)
+		embedded_wins[i].visible = 0;
+	// First try to reuse existing marker-window pairs.
+	for (int i = 0; i < LEN(markers); ++i) {
+		Marker *m = &markers[i];
+		if (m->h <= 0) {
+			m->ew = NULL;
+			continue;
+		}
+		fprintf(stderr, "marker #%d %d %s (%d, %d) %dx%d\n", i, m->markery, m->url, m->x, m->y, m->w, m->h);
+		if (m->ew && strcmp(m->ew->url, m->url) == 0) {
+			m->ew->x = m->x;
+			m->ew->y = m->y;
+			m->ew->w = m->w;
+			m->ew->h = m->h;
+			m->ew->visible = 1;
+			fprintf(stderr, "  reusing ew #%ld\n", m->ew - embedded_wins);
+			continue;
+		}
+	}
+	// Then try to find the best new pair for each marker.
+	for (int i = 0; i < LEN(markers); ++i) {
+		Marker *m = &markers[i];
+		if (m->h <= 0 || (m->ew && m->ew->visible))
+			continue;
+		EmbeddedWin *bestwin = NULL;
+		unsigned long bestdistance = ULONG_MAX;
+		for (int j = 0; j < LEN(embedded_wins); ++j) {
+			EmbeddedWin *ew = &embedded_wins[j];
+			if (ew->visible)
+				continue;
+			unsigned long distance = (ew->w - m->w) * (ew->w - m->w) + (ew->h - m->h) * (ew->h - m->h);
+			distance += ((ew->x - m->x) * (ew->x - m->x) + (ew->y - m->y) * (ew->y - m->y)) / 10;
+			if (!ew->win) {
+				// Prefer existing windows.
+				distance += 10000;
+				// And avoid windows that has been spawned but not yet created.
+				if (!ew->pid)
+					distance += 10000000;
+			} else if (strcmp(ew->url, m->url) != 0) {
+				// Avoid existing windows with different URLs.
+				distance += 10000000;
+			}
+			if (distance < bestdistance) {
+				bestdistance = distance;
+				bestwin = ew;
+			}
+		}
+		if (bestwin) {
+			bestwin->x = m->x;
+			bestwin->y = m->y;
+			bestwin->w = m->w;
+			bestwin->h = m->h;
+			bestwin->visible = 1;
+			if (bestdistance >= 10000000) {
+				strcpy(bestwin->url, m->url);
+				bestwin->needs_respawn = 1;
+			}
+			m->ew = bestwin;
+			fprintf(stderr, "For marker #%d best ew #%ld\n", i, bestwin - embedded_wins);
+		} else {
+			fprintf(stderr, "No window for marker #%d\n", i);
+		}
+	}
+	for (int i = 0; i < LEN(embedded_wins); ++i) {
+		fprintf(stderr, "embedded win #%d pid %d win %lu %s (%d, %d) %dx%d %d\n", i,
+			embedded_wins[i].pid, embedded_wins[i].win,
+			embedded_wins[i].url, embedded_wins[i].x,
+			embedded_wins[i].y, embedded_wins[i].w,
+			embedded_wins[i].h, embedded_wins[i].visible);
+	}
+	// Update the windows.
+	for (int i = 0; i < LEN(embedded_wins); ++i) {
+		EmbeddedWin *ew = &embedded_wins[i];
+		if (ew->h <= 1 || ew->w <= 2)
+			ew->visible = 0;
+		updateembeddedwin(ew);
+	}
+}
+
+void checkdirtymarkers() {
+	for (int i = 0; i < LEN(markers); ++i) {
+		Marker *m = &markers[i];
+		if (m->h <= 0)
+			continue;
+		if (m->y >= term.row) {
+			m->h = 0;
+			continue;
+		}
+		if (term.dirty[m->markery]) {
+			m->h = 0;
+			continue;
+		}
+		if (m->y + m->h >= term.row || m->x + m->w >= term.col) {
+			term.dirty[m->markery] = 1;
+			m->h = 0;
+			continue;
+		}
+		for (int y = m->markery; y <= m->y + m->h && y < term.row; ++y) {
+			if (term.dirty[y]) {
+				term.dirty[m->markery] = 1;
+				m->h = 0;
+				break;
+			}
+		}
+		if (m->h != 0)
+			fprintf(stderr, "preserved marker #%d %d %s (%d, %d) %dx%d\n", i, m->markery, m->url, m->x, m->y, m->w, m->h);
+	}
+}
+
+void createorupdatemarker(int y, char *url, int x, int w, int h) {
+	fprintf(stderr, "createorupdatemarker %s %d %d %d %d\n", url, x, y + 1, w, h);
+	Marker *candidate = NULL;
+	for (int i = 0; i < LEN(markers); ++i) {
+		fprintf(stderr, "considering %d\n", i);
+		Marker *m = &markers[i];
+		if (m->markery == y && m->y == y + 1 && m->x == x && m->w == w && strcmp(m->url, url) == 0) {
+			candidate = m;
+			break;
+		}
+		if (!candidate && m->h <= 0) {
+			candidate = m;
+			continue;
+		}
+	}
+	if (!candidate) {
+		fprintf(stderr, "Too many markers, cannot show %s\n", url);
+		return;
+	}
+	candidate->markery = y;
+	candidate->x = x;
+	candidate->y = y + 1;
+	candidate->w = w;
+	candidate->h = h;
+	strcpy(candidate->url, url);
+}
+
+void getmarkerrect(int y, int markerx, int markerw, int *rectx, int *rectw, int *recth) {
+	int ch = term.pixh / term.row;
+	int cw = term.pixw / term.col;
+	*rectx = markerx;
+	*rectw = markerw;
+	*recth = 0;
+	++y;
+	int curscore = 0;
+	for (; y < term.row; ++y) {
+		int bestnewxstart = *rectx;
+		int bestnewwidth = 0;
+		int curxstart = *rectx;
+		int curwidth = 0;
+		for (int x = *rectx; x < *rectx + *rectw; ++x) {
+			if (term.line[y][x].u && term.line[y][x].u != ' ') {
+				curwidth = 0;
+				curxstart = x + 1;
+				if (curxstart >= markerx + markerw)
+					break;
+			} else {
+				++curwidth;
+				if (x + curwidth <= markerx)
+					continue;
+				if (curwidth > bestnewwidth) {
+					bestnewwidth = curwidth;
+					bestnewxstart = curxstart;
+				}
+			}
+		}
+		int newscore = MIN(bestnewwidth * cw, (*recth + 1) * ch);
+		if (newscore >= curscore) {
+			curscore = newscore;
+			*rectx = bestnewxstart;
+			*rectw = bestnewwidth;
+			++*recth;
+		} else {
+			break;
+		}
+	}
+}
+
+void
+processmarkers(int y) {
+	int x;
+	char marker[256];
+	int marker_len = 0;
+	int inside_marker = 0;
+	Line line = term.line[y];
+	for (x = 0; x + 2 < term.col; ++x) {
+		if (line[x].u == '^' && line[x + 1].u == '^' && line[x + 2].u == '{') {
+			inside_marker = 1;
+			marker_len = 0;
+			marker[0] = '\0';
+			x += 2;
+			continue;
+		}
+		if (line[x].u == '}' && line[x + 1].u == '^' && line[x + 2].u == '^') {
+			if (!inside_marker)
+				continue;
+			int xstart = x - marker_len - 3;
+			int width = marker_len + 6;
+			x += 3;
+			while (x < term.col && (line[x].u != '^' && line[x].u != ' ' && line[x].u != '\0')) {
+				++width;
+				++x;
+			}
+			--x;
+			int rectx, rectw, recth = 0;
+			getmarkerrect(y, xstart, width, &rectx, &rectw, &recth);
+			createorupdatemarker(y, marker, rectx, rectw, recth);
+			inside_marker = 0;
+		}
+		if (inside_marker) {
+			if (marker_len >= sizeof(marker) - 1)
+				continue;
+			marker[marker_len] = line[x].u;
+			marker_len++;
+			marker[marker_len] = '\0';
+		}
+	}
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+
 void
 drawregion(int x1, int y1, int x2, int y2)
 {
 	int y;
+
+	fprintf(stderr, "drawregion %d %d %d %d\n", x1, y1, x2, y2);
 
 	xstartimagedraw();
 
@@ -3277,6 +3517,7 @@ drawregion(int x1, int y1, int x2, int y2)
 
 		term.dirty[y] = 0;
 		xdrawline(term.line[y], x1, y, x2);
+		processmarkers(y);
 	}
 
 	xfinishimagedraw();
@@ -3299,6 +3540,7 @@ draw(void)
 		cx--;
 
 	speculation_before_draw();
+	checkdirtymarkers();
 
 	drawregion(0, 0, term.col, term.row);
 	xerasecursor(term.spec.ocx, term.spec.ocy,
@@ -3328,6 +3570,7 @@ draw(void)
 		xximspot(term.ocx, term.ocy);
 
 	speculation_after_draw();
+	createmarkerwindows();
 }
 
 void
