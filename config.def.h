@@ -5,7 +5,8 @@
  *
  * font: see http://freedesktop.org/software/fontconfig/fontconfig-user.html
  */
-static char *font = "DejaVu Sans Mono:size=10:antialias=true:autohint=true";
+// static char *font = "DejaVu Sans Mono:size=10:antialias=true:autohint=true";
+static char *font = "JetBrainsMonoNerdFontMono:pixelsize=22:antialias=true:autohint=true:weight=medium";
 static int borderpx = 2;
 
 /* How to align the content in the window when the size of the terminal
