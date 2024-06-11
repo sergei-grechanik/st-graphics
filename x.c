@@ -143,7 +143,6 @@ typedef struct {
 	short lbearing;
 	short rbearing;
 	XftFont *match;
-	FcFontSet *set;
 	FcPattern *pattern;
 } Font;
 
@@ -1072,7 +1071,6 @@ xloadfont(Font *f, FcPattern *pattern)
 		(const FcChar8 *) ascii_printable,
 		strlen(ascii_printable), &extents);
 
-	f->set = NULL;
 	f->pattern = configured;
 
 	f->ascent = f->match->ascent;
@@ -1162,8 +1160,6 @@ xunloadfont(Font *f)
 {
 	XftFontClose(xw.dpy, f->match);
 	FcPatternDestroy(f->pattern);
-	if (f->set)
-		FcFontSetDestroy(f->set);
 }
 
 void
@@ -1365,9 +1361,9 @@ xmakeglyphfontspecs(XftGlyphFontSpec *specs, const Glyph *glyphs, int len, int x
 	FT_UInt glyphidx;
 	FcResult fcres;
 	FcPattern *fcpattern, *fontpattern;
-	FcFontSet *fcsets[] = { NULL };
 	FcCharSet *fccharset;
-	int i, f, numspecs = 0;
+	FcFontSet *candidatefonts;
+	int i, j, f, numspecs = 0;
 
 	for (i = 0, xp = winx, yp = winy + font->ascent; i < len; ++i) {
 		/* Fetch rune and mode for current glyph. */
@@ -1429,11 +1425,6 @@ xmakeglyphfontspecs(XftGlyphFontSpec *specs, const Glyph *glyphs, int len, int x
 
 		/* Nothing was found. Use fontconfig to find matching font. */
 		if (f >= frclen) {
-			if (!font->set)
-				font->set = FcFontSort(0, font->pattern,
-				                       1, 0, &fcres);
-			fcsets[0] = font->set;
-
 			/*
 			 * Nothing was found in the cache. Now use
 			 * some dozen of Fontconfig calls to get the
@@ -1453,8 +1444,32 @@ xmakeglyphfontspecs(XftGlyphFontSpec *specs, const Glyph *glyphs, int len, int x
 					FcMatchPattern);
 			FcDefaultSubstitute(fcpattern);
 
-			fontpattern = FcFontSetMatch(0, fcsets, 1,
-					fcpattern, &fcres);
+			/* FcFontSetMatch may return a font that doesn't contain
+			 * the character we are looking for. Sort the font set
+			 * instead and use the first one that contains the
+			 * character or the first font if none contains it.
+			 */
+			candidatefonts =
+				FcFontSort(0, fcpattern, 1, 0, &fcres);
+			fontpattern = NULL;
+			for (j = 0; j < candidatefonts->nfont; j++) {
+				FcCharSet *charset = NULL;
+				fontpattern = candidatefonts->fonts[j];
+				char contains_rune =
+					FcPatternGetCharSet(
+						fontpattern, FC_CHARSET, 0,
+						&charset) == FcResultMatch &&
+					charset &&
+					FcCharSetHasChar(charset, rune);
+				if (contains_rune)
+					break;
+				fontpattern = NULL;
+			}
+			if (!fontpattern)
+				fontpattern = candidatefonts->fonts[0];
+			fontpattern =
+				FcFontRenderPrepare(0, fcpattern, fontpattern);
+			FcFontSetDestroy(candidatefonts);
 
 			/* Allocate memory for the new cache entry. */
 			if (frclen >= frccap) {
