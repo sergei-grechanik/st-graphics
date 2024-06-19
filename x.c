@@ -1440,8 +1440,6 @@ xmakeglyphfontspecs(XftGlyphFontSpec *specs, const Glyph *glyphs, int len, int x
 					fccharset);
 			FcPatternAddBool(fcpattern, FC_SCALABLE, 1);
 
-			FcConfigSubstitute(0, fcpattern,
-					FcMatchPattern);
 			FcDefaultSubstitute(fcpattern);
 
 			/* FcFontSetMatch may return a font that doesn't contain
