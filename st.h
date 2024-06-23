@@ -20,8 +20,9 @@
 #define TRUECOLOR(r,g,b)	(1 << 24 | (r) << 16 | (g) << 8 | (b))
 #define IS_TRUECOL(x)		(1 << 24 & (x))
 
-#define DECOR_UNSET		0xffffffff
-#define IS_DECOR_UNSET(x)	((0xffffffff & (x)) == 0xffffffff)
+// This decor color indicates that the fg color should be used. Note that it's
+// not a 24-bit color because the 25-th bit is not set.
+#define DECOR_DEFAULT_COLOR	0x0ffffff
 
 enum glyph_attribute {
 	ATTR_NULL       = 0,
@@ -54,6 +55,14 @@ enum selection_type {
 enum selection_snap {
 	SNAP_WORD = 1,
 	SNAP_LINE = 2
+};
+
+enum underline_style {
+	UNDERLINE_STRAIGHT = 1,
+	UNDERLINE_DOUBLE = 2,
+	UNDERLINE_CURLY = 3,
+	UNDERLINE_DOTTED = 4,
+	UNDERLINE_DASHED = 5,
 };
 
 typedef unsigned char uchar;
@@ -132,6 +141,18 @@ extern unsigned int defaultfg;
 extern unsigned int defaultbg;
 extern unsigned int defaultcs;
 
+// Accessors to decoration properties stored in `decor`.
+// The 25-th bit is used to indicate if it's a 24-bit color.
+static inline uint32_t tgetdecorcolor(Glyph *g) { return g->decor & 0x1ffffff; }
+static inline uint32_t tgetdecorstyle(Glyph *g) { return (g->decor >> 25) & 0x7; }
+static inline void tsetdecorcolor(Glyph *g, uint32_t color) {
+	g->decor = (g->decor & ~0x1ffffff) | (color & 0x1ffffff);
+}
+static inline void tsetdecorstyle(Glyph *g, uint32_t style) {
+	g->decor = (g->decor & ~(0x7 << 25)) | ((style & 0x7) << 25);
+}
+
+
 // Some accessors to image placeholder properties stored in `u`:
 // - row (1-base) - 9 bits
 // - column (1-base) - 9 bits
@@ -177,7 +198,7 @@ static inline void tsetimgid(Glyph *g, uint32_t id) {
 }
 
 static inline uint32_t tgetimgplacementid(Glyph *g) {
-	if (IS_DECOR_UNSET(g->decor))
+	if (tgetdecorcolor(g) == DECOR_DEFAULT_COLOR)
 		return 0;
 	return g->decor & 0xFFFFFF;
 }
