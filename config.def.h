@@ -6,7 +6,7 @@
  * font: see http://freedesktop.org/software/fontconfig/fontconfig-user.html
  */
 // static char *font = "DejaVu Sans Mono:size=10:antialias=true:autohint=true";
-static char *font = "JetBrainsMonoNerdFontMono:pixelsize=22:antialias=true:autohint=true:weight=medium";
+static char *font = "JetBrainsMonoNerdFontMono:pixelsize=23:antialias=true:autohint=true:weight=medium";
 static int borderpx = 2;
 
 /* How to align the content in the window when the size of the terminal
@@ -124,22 +124,22 @@ static const char *colorname[] = {
 	// "cyan",
 	// "white",
 
-	"#000000",
-	"#990000",
-	"#007700",
-	"#e28500",
-	"#0000b2",
-	"#b200b2",
-	"#006688",
-	"#bfbfbf",
-	"#666666",
-	"#e50000",
-	"#00aa00",
-	"#e5e500",
-	"#0000ff",
-	"#e500e5",
-	"#00e5e5",
-	"#fffff2",
+	[ 0] = "#2c2930",
+	[ 1] = "#990000",
+	[ 2] = "#007700",
+	[ 3] = "#e28500",
+	[ 4] = "#0366d6",
+	[ 5] = "#955ae7",
+	[ 6] = "#007aa3",
+	[ 7] = "#bfbfbf",
+	[ 8] = "#666666",
+	[ 9] = "#ff6666",
+	[10] = "#c0f2d4",
+	[11] = "#fce94e",
+	[12] = "#0000ff",
+	[13] = "#e500e5",
+	[14] = "#50e0e6",
+	[15] = "#f5f5f5",
 
 	[255] = 0,
 
