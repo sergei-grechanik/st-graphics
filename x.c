@@ -1689,7 +1689,7 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 	/* Float thickness, used as a base to compute other values. */
 	float fthick = dc.font.height / 18.0;
 	/* Integer thickness in pixels. Must not be 0. */
-	int thick = MAX(1, roundf(fthick));
+	int thick = 1; //MAX(1, roundf(fthick));
 	/* The default gap between the baseline and a single underline. */
 	int gap = roundf(fthick * 2);
 	/* The total thickness of a double underline. */
