@@ -1062,7 +1062,7 @@ treset(void)
 		.mode = ATTR_NULL,
 		.fg = defaultfg,
 		.bg = defaultbg,
-		.decor = DECOR_UNSET
+		.decor = DECOR_DEFAULT_COLOR
 	}, .x = 0, .y = 0, .state = CURSOR_DEFAULT};
 
 	memset(term.tabs, 0, term.col * sizeof(*term.tabs));
@@ -1087,7 +1087,7 @@ tnew(int col, int row)
 {
 	term = (Term){.c = {.attr = {.fg = defaultfg,
 				     .bg = defaultbg,
-				     .decor = DECOR_UNSET}}};
+				     .decor = DECOR_DEFAULT_COLOR}}};
 	tresize(col, row);
 	treset();
 }
@@ -1181,6 +1181,7 @@ csiparse(void)
 {
 	char *p = csiescseq.buf, *np;
 	long int v;
+	int sep = ';'; /* colon or semi-colon, but not both */
 
 	csiescseq.narg = 0;
 	if (*p == '?') {
@@ -1198,7 +1199,9 @@ csiparse(void)
 			v = -1;
 		csiescseq.arg[csiescseq.narg++] = v;
 		p = np;
-		if ((*p != ';' && *p != ':') || csiescseq.narg == ESC_ARG_SIZ)
+		if (sep == ';' && *p == ':')
+			sep = ':'; /* allow override to colon once */
+		if (*p != sep || csiescseq.narg == ESC_ARG_SIZ)
 			break;
 		p++;
 	}
@@ -1504,7 +1507,7 @@ tsetattr(const int *attr, int l)
 				ATTR_STRUCK     );
 			term.c.attr.fg = defaultfg;
 			term.c.attr.bg = defaultbg;
-			term.c.attr.decor = DECOR_UNSET;
+			term.c.attr.decor = DECOR_DEFAULT_COLOR;
 			break;
 		case 1:
 			term.c.attr.mode |= ATTR_BOLD;
@@ -1517,6 +1520,20 @@ tsetattr(const int *attr, int l)
 			break;
 		case 4:
 			term.c.attr.mode |= ATTR_UNDERLINE;
+			if (i + 1 < l) {
+				idx = attr[++i];
+				if (BETWEEN(idx, 1, 5)) {
+					tsetdecorstyle(&term.c.attr, idx);
+				} else if (idx == 0) {
+					term.c.attr.mode &= ~ATTR_UNDERLINE;
+					tsetdecorstyle(&term.c.attr, 0);
+				} else {
+					fprintf(stderr,
+						"erresc: unknown underline "
+						"style %d\n",
+						idx);
+				}
+			}
 			break;
 		case 5: /* slow blink */
 			/* FALLTHROUGH */
@@ -1540,6 +1557,7 @@ tsetattr(const int *attr, int l)
 			break;
 		case 24:
 			term.c.attr.mode &= ~ATTR_UNDERLINE;
+			tsetdecorstyle(&term.c.attr, 0);
 			break;
 		case 25:
 			term.c.attr.mode &= ~ATTR_BLINK;
@@ -1569,10 +1587,10 @@ tsetattr(const int *attr, int l)
 			break;
 		case 58:
 			if ((idx = tdefcolor(attr, &i, l)) >= 0)
-				term.c.attr.decor = idx;
+				tsetdecorcolor(&term.c.attr, idx);
 			break;
 		case 59:
-			term.c.attr.decor = DECOR_UNSET;
+			tsetdecorcolor(&term.c.attr, DECOR_DEFAULT_COLOR);
 			break;
 		default:
 			if (BETWEEN(attr[i], 30, 37)) {
@@ -1790,7 +1808,7 @@ csihandle(void)
 			ttywrite(vtiden, strlen(vtiden), 0);
 		break;
 	case 'b': /* REP -- if last char is printable print it <n> more times */
-		DEFAULT(csiescseq.arg[0], 1);
+		LIMIT(csiescseq.arg[0], 1, 65535);
 		if (term.lastc)
 			while (csiescseq.arg[0]-- > 0)
 				tputc(term.lastc);
@@ -1875,6 +1893,7 @@ csihandle(void)
 		}
 		break;
 	case 'S': /* SU -- Scroll <n> line up */
+		if (csiescseq.priv) break;
 		DEFAULT(csiescseq.arg[0], 1);
 		tscrollup(term.top, csiescseq.arg[0]);
 		break;

@@ -767,8 +767,7 @@ static void gr_infer_placement_size_maybe(ImagePlacement *placement) {
 		return;
 	}
 
-	// It doesn't seem to be documented anywhere, but some applications
-	// specify only one of the dimensions.
+	// Some applications specify only one of the dimensions.
 	if (placement->scale_mode == SCALE_MODE_CONTAIN) {
 		// If we preserve aspect ratio and fit to width/height, the most
 		// logical thing is to find the minimum size of the
@@ -791,7 +790,12 @@ static void gr_infer_placement_size_maybe(ImagePlacement *placement) {
 	} else {
 		// Otherwise we stretch the image or preserve the original size.
 		// In both cases we compute the best number of columns from the
-		// pixel size and cell size to be compatible with kitty.
+		// pixel size and cell size.
+		// TODO: In the case of stretching it's not the most logical
+		//       thing to do, may need to revisit in the future.
+		//       Currently we switch to SCALE_MODE_CONTAIN when only one
+		//       of the dimensions is specified, so this case shouldn't
+		//       happen in practice.
 		if (!placement->cols)
 			placement->cols =
 				ceil_div(placement->src_pix_width, current_cw);
@@ -1554,13 +1558,18 @@ void gr_finish_drawing(Drawable buf) {
 
 		Display *disp = imlib_context_get_display();
 		GC gc = XCreateGC(disp, buf, 0, NULL);
+		const char *debug_mode_str =
+			graphics_debug_mode == GRAPHICS_DEBUG_LOG_AND_BOXES
+				? "(boxes shown) "
+				: "";
 		char info[MAX_INFO_LEN];
 		snprintf(info, MAX_INFO_LEN,
-			 "Frame rendering time: %d ms  Image storage ram: %ld "
+			 "%sFrame rendering time: %d ms  "
+			 "Image storage ram: %ld "
 			 "KiB disk: %ld KiB  count: %d   cell %dx%d",
-			 milliseconds, images_ram_size / 1024,
-			 images_disk_size / 1024, kh_size(images),
-			 current_cw, current_ch);
+			 debug_mode_str, milliseconds, images_ram_size / 1024,
+			 images_disk_size / 1024, kh_size(images), current_cw,
+			 current_ch);
 		XSetForeground(disp, gc, 0x000000);
 		XFillRectangle(disp, buf, gc, 0, 0, 600, 16);
 		XSetForeground(disp, gc, 0xFFFFFF);
@@ -2212,12 +2221,21 @@ static void gr_handle_put_command(GraphicsCommand *cmd) {
 	placement->rows = cmd->rows;
 	placement->do_not_move_cursor = cmd->do_not_move_cursor;
 
-	if (placement->virtual)
+	if (placement->virtual) {
 		placement->scale_mode = SCALE_MODE_CONTAIN;
-	else if (placement->cols || placement->rows)
+	} else if (placement->cols && placement->rows) {
+		// For classic placements the default is to stretch the image if
+		// both cols and rows are specified.
 		placement->scale_mode = SCALE_MODE_FILL;
-	else
+	} else if (placement->cols || placement->rows) {
+		// But if only one of them is specified, the default is to
+		// contain.
+		placement->scale_mode = SCALE_MODE_CONTAIN;
+	} else {
+		// If none of them are specified, the default is to use the
+		// original size.
 		placement->scale_mode = SCALE_MODE_NONE;
+	}
 
 	// Display the placement unless it's virtual.
 	gr_display_nonvirtual_placement(placement);
