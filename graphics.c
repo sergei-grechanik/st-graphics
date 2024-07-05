@@ -34,6 +34,7 @@
 #include <zlib.h>
 #include <Imlib2.h>
 #include <X11/Xlib.h>
+#include <X11/extensions/Xrender.h>
 #include <assert.h>
 #include <ctype.h>
 #include <stdarg.h>
@@ -173,8 +174,9 @@ typedef struct ImagePlacement {
 	int src_pix_x, src_pix_y;
 	/// Height and width of the source rectangle (zero if full image).
 	int src_pix_width, src_pix_height;
-	/// The image appropriately scaled and loaded into RAM.
-	Imlib_Image scaled_image;
+	/// The image appropriately scaled and uploaded to the X server. This
+	/// pixmap is premultiplied by alpha.
+	Pixmap pixmap;
 	/// The dimensions of the cell used to scale the image. If cell
 	/// dimensions are changed (font change), the image will be rescaled.
 	uint16_t scaled_cw, scaled_ch;
@@ -364,15 +366,15 @@ static void gr_unload_image(Image *img) {
 /// If the on-disk file of the corresponding image is preserved, it can be
 /// reloaded later.
 static void gr_unload_placement(ImagePlacement *placement) {
-	if (!placement->scaled_image)
+	if (!placement->pixmap)
 		return;
 
-	imlib_context_set_image(placement->scaled_image);
-	imlib_free_image();
+	Display *disp = imlib_context_get_display();
+	XFreePixmap(disp, placement->pixmap);
 
 	images_ram_size -= gr_placement_ram_size(placement);
 
-	placement->scaled_image = NULL;
+	placement->pixmap = 0;
 	placement->scaled_ch = placement->scaled_cw = 0;
 
 	GR_LOG("After unloading placement %u/%u ram: %ld KiB\n",
@@ -810,9 +812,9 @@ static void gr_infer_placement_size_maybe(ImagePlacement *placement) {
 ////////////////////////////////////////////////////////////////////////////////
 
 /// Copies `num_pixels` pixels (not bytes!) from a buffer `from` to an imlib2
-/// image data `to`. The format may be 24 (RGBA) or 32 (RGB), and it's converted
-/// to imlib2's representation, which depends on the endianness, and on
-/// little-endian architectures the memory layout is actually BGRA.
+/// image data `to`. The format may be 24 (RGB) or 32 (RGBA), and it's converted
+/// to imlib2's representation, which is 0xAARRGGBB (having BGRA memory layout
+/// on little-endian architectures).
 static inline void gr_copy_pixels(DATA32 *to, unsigned char *from, int format,
 				  size_t num_pixels) {
 	size_t pixel_size = format == 24 ? 3 : 4;
@@ -1055,6 +1057,23 @@ static void gr_load_image(Image *img) {
 	img->status = STATUS_RAM_LOADING_SUCCESS;
 }
 
+/// Premultiplies the alpha channel of the image data. The data is an array of
+/// pixels such that each pixel is a 32-bit integer in the format 0xAARRGGBB.
+static void gr_premultiply_alpha(DATA32 *data, size_t num_pixels) {
+	for (size_t i = 0; i < num_pixels; ++i) {
+		DATA32 pixel = data[i];
+		unsigned char a = pixel >> 24;
+		if (a == 0) {
+			data[i] = 0;
+		} else if (a != 255) {
+			unsigned char b = (pixel & 0xFF) * a / 255;
+			unsigned char g = ((pixel >> 8) & 0xFF) * a / 255;
+			unsigned char r = ((pixel >> 16) & 0xFF) * a / 255;
+			data[i] = (a << 24) | (r << 16) | (g << 8) | b;
+		}
+	}
+}
+
 /// Loads the image placement into RAM by creating an imlib object. The in-ram
 /// image is correctly fit to the box defined by the number of rows/columns of
 /// the image placement and the provided cell dimensions in pixels. If the
@@ -1065,7 +1084,7 @@ static void gr_load_placement(ImagePlacement *placement, int cw, int ch) {
 	gr_touch_placement(placement);
 
 	// If it's already loaded with the same cw and ch, do nothing.
-	if (placement->scaled_image && placement->scaled_ch == ch &&
+	if (placement->pixmap && placement->scaled_ch == ch &&
 	    placement->scaled_cw == cw)
 		return;
 
@@ -1084,7 +1103,8 @@ static void gr_load_placement(ImagePlacement *placement, int cw, int ch) {
 	// Infer the placement size if needed.
 	gr_infer_placement_size_maybe(placement);
 
-	// Create the scaled image.
+	// Create the scaled image. This is temporary, we will scale it
+	// appropriately, upload to the X server, and then delete immediately.
 	int scaled_w = (int)placement->cols * cw;
 	int scaled_h = (int)placement->rows * ch;
 	if (scaled_w * scaled_h * 4 > graphics_max_single_image_ram_size) {
@@ -1095,22 +1115,21 @@ static void gr_load_placement(ImagePlacement *placement, int cw, int ch) {
 			scaled_h, graphics_max_single_image_ram_size);
 		return;
 	}
-	placement->scaled_image = imlib_create_image(scaled_w, scaled_h);
-	if (!placement->scaled_image) {
+	Imlib_Image scaled_image = imlib_create_image(scaled_w, scaled_h);
+	if (!scaled_image) {
 		fprintf(stderr,
 			"error: imlib_create_image(%d, %d) returned "
 			"null\n",
 			scaled_w, scaled_h);
 		return;
 	}
-	imlib_context_set_image(placement->scaled_image);
+	imlib_context_set_image(scaled_image);
 	imlib_image_set_has_alpha(1);
 
 	// First fill the scaled image with the transparent color.
 	imlib_context_set_blend(0);
 	imlib_context_set_color(0, 0, 0, 0);
-	imlib_image_fill_rectangle(0, 0, (int)placement->cols * cw,
-				   (int)placement->rows * ch);
+	imlib_image_fill_rectangle(0, 0, scaled_w, scaled_h);
 	imlib_context_set_anti_alias(1);
 	imlib_context_set_blend(1);
 
@@ -1163,6 +1182,34 @@ static void gr_load_placement(ImagePlacement *placement, int cw, int ch) {
 					     src_y, src_w, src_h, dest_x,
 					     dest_y, dest_w, dest_h);
 	}
+
+	// XRender needs the alpha channel premultiplied.
+	DATA32 *data = imlib_image_get_data();
+	gr_premultiply_alpha(data, scaled_w * scaled_h);
+
+	// Upload the image to the X server.
+	Display *disp = imlib_context_get_display();
+	Visual *vis = imlib_context_get_visual();
+	Colormap cmap = imlib_context_get_colormap();
+	Drawable drawable = imlib_context_get_drawable();
+	if (!drawable)
+		drawable = DefaultRootWindow(disp);
+	placement->pixmap =
+		XCreatePixmap(disp, drawable, scaled_w, scaled_h, 32);
+	XVisualInfo visinfo;
+	XMatchVisualInfo(disp, DefaultScreen(disp), 32, TrueColor, &visinfo);
+	XImage *ximage = XCreateImage(disp, visinfo.visual, 32, ZPixmap, 0,
+				      (char *)data, scaled_w, scaled_h, 32, 0);
+	GC gc = XCreateGC(disp, placement->pixmap, 0, NULL);
+	XPutImage(disp, placement->pixmap, gc, ximage, 0, 0, 0, 0, scaled_w,
+		  scaled_h);
+	XFreeGC(disp, gc);
+	// XDestroyImage will free the data as well, but it is managed by imlib,
+	// so set it to NULL.
+	ximage->data = NULL;
+	XDestroyImage(ximage);
+	imlib_image_put_back_data(data);
+	imlib_free_image();
 
 	// Mark the placement as loaded.
 	placement->scaled_ch = ch;
@@ -1309,7 +1356,7 @@ void gr_get_placement_description(uint32_t image_id, uint32_t placement_id,
 		 placement->src_pix_width, placement->src_pix_height,
 		 image_uploading_failure_strings[img->uploading_failure],
 		 img->disk_size / 1024,
-		 placement->scaled_image ? "loaded" : "not loaded",
+		 placement->pixmap ? "loaded" : "not loaded",
 		 img->original_image ? "loaded" : "not loaded");
 }
 
@@ -1399,7 +1446,7 @@ void gr_dump_state() {
 			fprintf(stderr,
 				"        cell size: %u cols x %u rows\n",
 				placement->cols, placement->rows);
-			if (placement->scaled_image) {
+			if (placement->pixmap) {
 				unsigned ram_size =
 					gr_placement_ram_size(placement);
 				fprintf(stderr,
@@ -1488,32 +1535,68 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 	gr_load_placement(placement, rect->cw, rect->ch);
 
 	// If the image couldn't be loaded, display the bounding box.
-	if (!placement->scaled_image) {
+	if (!placement->pixmap) {
 		gr_showrect(buf, rect);
 		if (graphics_debug_mode == GRAPHICS_DEBUG_LOG_AND_BOXES)
 			gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
 		return;
 	}
 
+	int src_x = rect->start_col * rect->cw;
+	int src_y = rect->start_row * rect->ch;
+	int width = (rect->end_col - rect->start_col) * rect->cw;
+	int height = (rect->end_row - rect->start_row) * rect->ch;
+	int dst_x = rect->x_pix;
+	int dst_y = rect->y_pix;
+
 	// Display the image.
-	imlib_context_set_anti_alias(0);
-	imlib_context_set_image(placement->scaled_image);
-	imlib_context_set_drawable(buf);
+	Display *disp = imlib_context_get_display();
+	Visual *vis = imlib_context_get_visual();
+
+	// Create an xrender picture for the window.
+	XRenderPictFormat *win_format =
+		XRenderFindVisualFormat(disp, vis);
+	Picture window_pic =
+		XRenderCreatePicture(disp, buf, win_format, 0, NULL);
+
+	Pixmap pixmap = placement->pixmap;
+
+	// If needed, invert the image pixmap. Note that this naive approach of
+	// inverting the pixmap is not entirely correct, because the pixmap is
+	// premultiplied. But the result is good enough to visually indicate
+	// selection.
 	if (rect->reverse) {
-		Imlib_Color_Modifier cm = imlib_create_color_modifier();
-		imlib_context_set_color_modifier(cm);
-		imlib_set_color_modifier_tables(reverse_table, reverse_table,
-						reverse_table, NULL);
+		unsigned pixmap_w =
+			(unsigned)placement->cols * placement->scaled_cw;
+		unsigned pixmap_h =
+			(unsigned)placement->rows * placement->scaled_ch;
+		pixmap = XCreatePixmap(disp, buf, pixmap_w, pixmap_h, 32);
+		XGCValues gcv = {.function = GXcopyInverted};
+		GC gc = XCreateGC(disp, pixmap, GCFunction, &gcv);
+		XCopyArea(disp, placement->pixmap, pixmap, gc, 0, 0, pixmap_w,
+			  pixmap_h, 0, 0);
+		XFreeGC(disp, gc);
 	}
-	int w_pix = (rect->end_col - rect->start_col) * rect->cw;
-	int h_pix = (rect->end_row - rect->start_row) * rect->ch;
-	imlib_render_image_part_on_drawable_at_size(
-		rect->start_col * rect->cw, rect->start_row * rect->ch, w_pix,
-		h_pix, rect->x_pix, rect->y_pix, w_pix, h_pix);
-	if (rect->reverse) {
-		imlib_free_color_modifier();
-		imlib_context_set_color_modifier(NULL);
-	}
+
+	// Create a picture for the image pixmap.
+	XRenderPictFormat *pic_format =
+		XRenderFindStandardFormat(disp, PictStandardARGB32);
+	Picture pixmap_pic =
+		XRenderCreatePicture(disp, pixmap, pic_format, 0, NULL);
+
+	// Composite the image onto the window. In the reverse mode we ignore
+	// the alpha channel of the image because the naive inversion above
+	// seems to invert the alpha channel as well.
+	int pictop = rect->reverse ? PictOpSrc : PictOpOver;
+	XRenderComposite(disp, pictop, pixmap_pic, 0, window_pic,
+			 src_x, src_y, src_x, src_y, dst_x, dst_y, width,
+			 height);
+
+	// Free resources
+	XRenderFreePicture(disp, pixmap_pic);
+	XRenderFreePicture(disp, window_pic);
+	if (rect->reverse)
+		XFreePixmap(disp, pixmap);
 
 	// In debug mode always draw bounding boxes and print info.
 	if (graphics_debug_mode == GRAPHICS_DEBUG_LOG_AND_BOXES) {
@@ -1535,6 +1618,7 @@ void gr_start_drawing(Drawable buf, int cw, int ch) {
 	current_cw = cw;
 	current_ch = ch;
 	drawing_start_time = clock();
+	imlib_context_set_drawable(buf);
 }
 
 /// Finish image drawing. This functions will draw all the rectangles left to
@@ -1555,6 +1639,9 @@ void gr_finish_drawing(Drawable buf) {
 		int milliseconds = 1000 *
 				   (drawing_end_time - drawing_start_time) /
 				   CLOCKS_PER_SEC;
+		if (milliseconds > 0)
+			fprintf(stderr, "Frame rendering time: %d ms\n",
+				milliseconds);
 
 		Display *disp = imlib_context_get_display();
 		GC gc = XCreateGC(disp, buf, 0, NULL);
