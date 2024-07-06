@@ -1701,20 +1701,21 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 	XftDrawSetClipRectangles(xw.draw, winx, winy, &r, 1);
 
 	/* Decoration color. */
-	Color *decor, truedecor;
+	Color decor;
 	uint32_t decorcolor = tgetdecorcolor(&base);
 	if (decorcolor == DECOR_DEFAULT_COLOR) {
-		decor = fg;
+		decor = *fg;
 	} else if (IS_TRUECOL(decorcolor)) {
 		colfg.alpha = 0xffff;
 		colfg.red = TRUERED(decorcolor);
 		colfg.green = TRUEGREEN(decorcolor);
 		colfg.blue = TRUEBLUE(decorcolor);
-		XftColorAllocValue(xw.dpy, xw.vis, xw.cmap, &colfg, &truedecor);
-		decor = &truedecor;
+		XftColorAllocValue(xw.dpy, xw.vis, xw.cmap, &colfg, &decor);
 	} else {
-		decor = &dc.col[decorcolor];
+		decor = dc.col[decorcolor];
 	}
+	decor.color.alpha = 0xffff;
+	decor.pixel |= 0xff << 24;
 
 	/* Float thickness, used as a base to compute other values. */
 	float fthick = dc.font.height / 18.0;
@@ -1735,22 +1736,22 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 		liney -= MAX(0, liney + thick - (winy + win.ch));
 		if (style == UNDERLINE_DOUBLE) {
 			liney -= MAX(0, liney + doubleh - (winy + win.ch));
-			XftDrawRect(xw.draw, decor, winx, liney, width, thick);
-			XftDrawRect(xw.draw, decor, winx,
+			XftDrawRect(xw.draw, &decor, winx, liney, width, thick);
+			XftDrawRect(xw.draw, &decor, winx,
 				    liney + doubleh - thick, width, thick);
 		} else if (style == UNDERLINE_DOTTED) {
-			xdrawunderdashed(xw.draw, decor, winx, liney, width,
+			xdrawunderdashed(xw.draw, &decor, winx, liney, width,
 					 thick * 2, 0.5, thick);
 		} else if (style == UNDERLINE_DASHED) {
 			int wavelen = MAX(2, win.cw * 0.9);
-			xdrawunderdashed(xw.draw, decor, winx, liney, width,
+			xdrawunderdashed(xw.draw, &decor, winx, liney, width,
 					 wavelen, 0.65, thick);
 		} else if (style == UNDERLINE_CURLY) {
 			liney -= MAX(0, liney + curlh - (winy + win.ch));
-			xdrawundercurl(xw.draw, decor, winx, liney, width,
+			xdrawundercurl(xw.draw, &decor, winx, liney, width,
 				       curlh, thick);
 		} else {
-			XftDrawRect(xw.draw, decor, winx, liney, width, thick);
+			XftDrawRect(xw.draw, &decor, winx, liney, width, thick);
 		}
 	}
 
