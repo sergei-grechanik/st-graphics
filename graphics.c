@@ -1509,10 +1509,10 @@ static void gr_showrect(Drawable buf, ImageRect *rect) {
 	int h_pix = (rect->end_row - rect->start_row) * rect->ch;
 	Display *disp = imlib_context_get_display();
 	GC gc = XCreateGC(disp, buf, 0, NULL);
-	XSetForeground(disp, gc, 0x00FF00);
+	XSetForeground(disp, gc, 0xFF00FF00);
 	XDrawRectangle(disp, buf, gc, rect->x_pix, rect->y_pix, w_pix - 1,
 		       h_pix - 1);
-	XSetForeground(disp, gc, 0xFF0000);
+	XSetForeground(disp, gc, 0xFFFF0000);
 	XDrawRectangle(disp, buf, gc, rect->x_pix + 1, rect->y_pix + 1,
 		       w_pix - 3, h_pix - 3);
 	XFreeGC(disp, gc);
@@ -1527,7 +1527,7 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 	if (!placement || !graphics_display_images) {
 		gr_showrect(buf, rect);
 		if (graphics_debug_mode == GRAPHICS_DEBUG_LOG_AND_BOXES)
-			gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
+			gr_displayinfo(buf, rect, 0xFF000000, 0xFFFFFFFF, "");
 		return;
 	}
 
@@ -1538,7 +1538,7 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 	if (!placement->pixmap) {
 		gr_showrect(buf, rect);
 		if (graphics_debug_mode == GRAPHICS_DEBUG_LOG_AND_BOXES)
-			gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
+			gr_displayinfo(buf, rect, 0xFF000000, 0xFFFFFFFF, "");
 		return;
 	}
 
@@ -1601,7 +1601,7 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 	// In debug mode always draw bounding boxes and print info.
 	if (graphics_debug_mode == GRAPHICS_DEBUG_LOG_AND_BOXES) {
 		gr_showrect(buf, rect);
-		gr_displayinfo(buf, rect, 0x000000, 0xFFFFFF, "");
+		gr_displayinfo(buf, rect, 0xFF000000, 0xFFFFFFFF, "");
 	}
 }
 
@@ -1657,9 +1657,9 @@ void gr_finish_drawing(Drawable buf) {
 			 debug_mode_str, milliseconds, images_ram_size / 1024,
 			 images_disk_size / 1024, kh_size(images), current_cw,
 			 current_ch);
-		XSetForeground(disp, gc, 0x000000);
+		XSetForeground(disp, gc, 0xFF000000);
 		XFillRectangle(disp, buf, gc, 0, 0, 600, 16);
-		XSetForeground(disp, gc, 0xFFFFFF);
+		XSetForeground(disp, gc, 0xFFFFFFFF);
 		XDrawString(disp, buf, gc, 0, 14, info, strlen(info));
 		XFreeGC(disp, gc);
 	}
@@ -1690,7 +1690,7 @@ void gr_append_imagerect(Drawable buf, uint32_t image_id, uint32_t placement_id,
 
 	// Display some red text in debug mode.
 	if (graphics_debug_mode == GRAPHICS_DEBUG_LOG_AND_BOXES)
-		gr_displayinfo(buf, &new_rect, 0x000000, 0xFF0000, "? ");
+		gr_displayinfo(buf, &new_rect, 0xFF000000, 0xFFFF0000, "? ");
 
 	// If it's the empty image (image_id=0) or an empty rectangle, do
 	// nothing.
