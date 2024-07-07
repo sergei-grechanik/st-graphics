@@ -3,10 +3,15 @@
 This is a fork of [st](https://st.suckless.org/) that implements a subset of
 [kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/).
 
+**I've recently switched to XRender for displaying images. There might be issues,
+try the legacy branch
+[graphics-legacy](https://github.com/sergei-grechanik/st-graphics/tree/graphics-legacy)
+if you encounter any.**
+
 If you want this formatted as a single patch, take the last commit from this
 branch: [graphics-squashed](https://github.com/sergei-grechanik/st-graphics/tree/graphics-squashed).
 
-![Viewing images with icat-mini.sh in tmux in st](https://github.com/sergei-grechanik/st-graphics/assets/1084979/54a639ec-afea-45d8-ac18-4f26844e6678)
+![Viewing images with icat-mini.sh in tmux in st with alpha patch](https://github.com/sergei-grechanik/st-graphics/assets/1084979/039e5d22-f831-4dbd-a10d-58715474c221)
 
 This repository also includes a simple script to display images `icat-mini.sh`.
 Note: to make it work in tmux you need to enable pass-through sequences, i.e.
@@ -21,12 +26,16 @@ terminfo entry on all systems that you use, including remote ones).
 ## Installation
 
 As usual, copy `config.def.h` to `config.h`, modify it according to your needs,
-run `make install`.
+run `make install` or `DESTDIR=/some/prefix make install`.
 
 In addition to the standard st dependencies (X11, fontconfig, freetype2),
 you will need imlib2 and zlib for the graphics module.
 
 ## Configuration
+
+**This fork includes some seemingly unrelated changes, like anysize and
+underline color and style. You may want to tweak them too if you don't like the
+defaults. See also [patch compatibility](#patch-compatibility).**
 
 You may want to change the graphics-related shortcuts and image size limits (see
 `config.def.h`).
@@ -126,8 +135,12 @@ per se, but are hard to disentangle from the graphics implementation:
   set `anysize_halign` and `anysize_valign` to zero in `config.h`.
 - Support for several XTWINOPS control sequences to query information that is
   sometimes required for image display (like cell size in pixels).
-- Support for decoration (underline) color. The decoration color is used to
-  specify the placement id in Unicode placeholders.
+- Support for decoration (underline) color and style. The decoration color is
+  used to specify the placement id in Unicode placeholders, so it's hard to make
+  them separate. The behavior of the underline is different from the upstream
+  st: it's drawn behind the text and the thickness depends on the font size. You
+  may need to tweak the code in `xdrawglyphfontspecs` in `x.c` if you don't like
+  it.
 
 Patches that I have tried to apply together with graphics:
 - [Boxdraw](https://st.suckless.org/patches/boxdraw) - seems to work, applied
@@ -136,8 +149,9 @@ Patches that I have tried to apply together with graphics:
 - [Scrollback](https://st.suckless.org/patches/scrollback) - quite a few
   conflicts, but easy to resolve. Seems to work but more testing may be needed.
   See [this branch](https://github.com/sergei-grechanik/st-graphics/tree/graphics-with-scrollback).
-- [Alpha](https://st.suckless.org/patches/alpha) - doesn't work well, images
-  become transparent too.
+- [Alpha](https://st.suckless.org/patches/alpha) - works. Check out the
+  [graphics-with-alpha](https://github.com/sergei-grechanik/st-graphics/tree/graphics-with-alpha)
+  branch where the alpha is adjustable with `Ctrl-Shift-[` and `Ctrl-Shift-]`.
 - [Background Image](https://st.suckless.org/patches/background_image) - seems
   to work, see
   [this branch](https://github.com/sergei-grechanik/st-graphics/tree/graphics-with-background-image).
