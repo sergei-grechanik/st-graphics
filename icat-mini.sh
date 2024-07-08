@@ -19,6 +19,7 @@ Options:
   --max-rows N        The maximum number of rows.
   --cell-size WxH     The cell size in pixels.
   -m METHOD           The uploading method, may be 'file', 'direct' or 'auto'.
+  --speed SPEED       The multiplier for the animation speed (float).
 "
 
 # Exit the script on keyboard interrupt
@@ -33,6 +34,7 @@ cell_size=""
 scale=1
 max_cols=""
 max_rows=""
+speed=""
 
 # Parse the command line.
 while [ $# -gt 0 ]; do
@@ -69,6 +71,10 @@ while [ $# -gt 0 ]; do
             max_rows="$2"
             shift 2
             ;;
+        --speed)
+            speed="$2"
+            shift 2
+            ;;
         --)
             file="$2"
             shift 2
@@ -87,6 +93,8 @@ while [ $# -gt 0 ]; do
             ;;
     esac
 done
+
+file="$(realpath "$file")"
 
 #####################################################################
 # Adjust the terminal state
@@ -119,7 +127,6 @@ if [ -n "$TMUX" ]; then
             ;;
     esac
 fi
-
 
 #####################################################################
 # Compute the number of rows and columns
@@ -193,8 +200,9 @@ bc_round() {
 
 # Compute the number of rows and columns of the image.
 if [ -z "$cols" ] || [ -z "$rows" ]; then
-    # Get the size of the image and its resolution
-    format_output="$(identify -format '%w %h' "$file")"
+    # Get the size of the image and its resolution. If it's an animation, use
+    # the first frame.
+    format_output="$(identify -format '%w %h\n' "$file" | head -1)"
     img_width="$(printf '%s' "$format_output" | cut -d ' ' -f 1)"
     img_height="$(printf '%s' "$format_output" | cut -d ' ' -f 2)"
     if ! is_decimal "$img_width" || ! is_decimal "$img_height"; then
@@ -249,7 +257,7 @@ while [ -z "$image_id" ]; do
 done
 
 #####################################################################
-# Upload the image
+# Uploading the image
 #####################################################################
 
 # Choose the uploading method
@@ -285,50 +293,172 @@ gr_command() {
     end_gr_command
 }
 
-file="$(realpath "$file")"
-
-if [ "$uploading_method" = "file" ]; then
-    # base64-encode the filename
-    encoded_filename=$(printf '%s' "$file" | base64 -w0)
-    gr_command "q=2,a=T,U=1,i=${image_id},f=100,t=f,c=${cols},r=${rows};${encoded_filename}"
-fi
-
-if [ "$uploading_method" = "direct" ]; then
-    # Create a temporary directory to store the chunked image.
-    tmpdir="$(mktemp -d)"
-    if [ ! "$tmpdir" ] || [ ! -d "$tmpdir" ]; then
-        echo "Can't create a temp dir" >&2
-        exit 1
+# Send an uploading command. Usage: gr_upload <action> <command> <file>
+# Where <action> is a part of command that specifies the action, it will be
+# repeated for every chunk (if the method is direct), and <command> is the rest
+# of the command that specifies the image parameters. <action> and <command>
+# must not include the transmission method or ';'.
+# Example:
+# gr_upload "a=T,q=2" "U=1,i=${image_id},f=100,c=${cols},r=${rows}" "$file"
+gr_upload() {
+    arg_action="$1"
+    arg_command="$2"
+    arg_file="$3"
+    if [ "$uploading_method" = "file" ]; then
+        # base64-encode the filename
+        encoded_filename=$(printf '%s' "$arg_file" | base64 -w0)
+        gr_command "${arg_action},${arg_command},t=f;${encoded_filename}"
     fi
-    # base64-encode the file and split it into chunks. The size of each
-    # graphics command shouldn't be more than 4096, so we set the size of an
-    # encoded chunk to be 3968, slightly less than that.
-    chunk_size=3968
-    cat "$file" | base64 -w0 | split -b "$chunk_size" - "$tmpdir/chunk_"
+    if [ "$uploading_method" = "direct" ]; then
+        # Create a temporary directory to store the chunked image.
+        chunkdir="$(mktemp -d)"
+        if [ ! "$chunkdir" ] || [ ! -d "$chunkdir" ]; then
+            echo "Can't create a temp dir" >&2
+            exit 1
+        fi
+        # base64-encode the file and split it into chunks. The size of each
+        # graphics command shouldn't be more than 4096, so we set the size of an
+        # encoded chunk to be 3968, slightly less than that.
+        chunk_size=3968
+        cat "$arg_file" | base64 -w0 | split -b "$chunk_size" - "$chunkdir/chunk_"
 
-    # Issue a command indicating that we want to start data transmission for a
-    # new image.
-    gr_command "q=2,a=T,U=1,i=${image_id},f=100,t=d,c=${cols},r=${rows},m=1"
+        # Issue a command indicating that we want to start data transmission for
+        # a new image.
+        gr_command "${arg_action},${arg_command},t=d,m=1"
 
-    # Transmit chunks.
-    for chunk in "$tmpdir/chunk_"*; do
-        start_gr_command
-        printf '%s' "i=${image_id},m=1;" >> "$tty"
-        cat "$chunk" >> "$tty"
-        end_gr_command
-        rm "$chunk"
-    done
+        # Transmit chunks.
+        for chunk in "$chunkdir/chunk_"*; do
+            start_gr_command
+            printf '%s' "${arg_action},i=${image_id},m=1;" >> "$tty"
+            cat "$chunk" >> "$tty"
+            end_gr_command
+            rm "$chunk"
+        done
 
-    # Tell the terminal that we are done.
-    gr_command "i=$image_id,m=0"
+        # Tell the terminal that we are done.
+        gr_command "${arg_action},i=$image_id,m=0"
 
-    # Remove the temporary directory.
-    rmdir "$tmpdir"
-fi
+        # Remove the temporary directory.
+        rmdir "$chunkdir"
+    fi
+}
+
+delayed_frame_dir_cleanup() {
+    arg_frame_dir="$1"
+    sleep 2
+    if [ -n "$arg_frame_dir" ]; then
+        for frame in "$arg_frame_dir"/frame_*.png; do
+            rm "$frame"
+        done
+        rmdir "$arg_frame_dir"
+    fi
+}
+
+upload_image_and_print_placeholder() {
+    # Check if the file is an animation.
+    frame_count=$(identify -format '%n\n' "$file" | head -n 1)
+    if [ "$frame_count" -gt 1 ]; then
+        # The file is an animation, decompose into frames and upload each frame.
+        frame_dir="$(mktemp -d)"
+        frame_dir="$HOME/temp/frames${frame_dir}"
+        mkdir -p "$frame_dir"
+        if [ ! "$frame_dir" ] || [ ! -d "$frame_dir" ]; then
+            echo "Can't create a temp dir for frames" >&2
+            exit 1
+        fi
+
+        # Decompose the animation into separate frames.
+        convert -coalesce "$file" "$frame_dir/frame_%06d.png"
+
+        # Get all frame delays at once, in centiseconds, as a space-separated
+        # string.
+        delays=$(identify -format "%T " "$file")
+
+        frame_number=1
+        for frame in "$frame_dir"/frame_*.png; do
+            # Read the delay for the current frame and convert it from
+            # centiseconds to milliseconds.
+            delay=$(printf '%s' "$delays" | cut -d ' ' -f "$frame_number")
+            delay=$((delay * 10))
+            # If the delay is 0, set it to 100ms.
+            if [ "$delay" -eq 0 ]; then
+                delay=100
+            fi
+
+            if [ -n "$speed" ]; then
+                delay=$(bc_round "$delay / $speed")
+            fi
+
+            if [ "$frame_number" -eq 1 ]; then
+                # Upload the first frame with a=T
+                gr_upload "q=2,a=T" "f=100,U=1,i=${image_id},c=${cols},r=${rows}" "$frame"
+                # Set the delay for the first frame and also play the animation
+                # in loading mode (s=2).
+                gr_command "a=a,v=1,s=2,r=${frame_number},z=${delay},i=${image_id}"
+                # Print the placeholder after the first frame to reduce the wait
+                # time.
+                print_placeholder
+            else
+                # Upload subsequent frames with a=f
+                gr_upload "q=2,a=f" "f=100,i=${image_id},z=${delay}" "$frame"
+            fi
+
+            frame_number=$((frame_number + 1))
+        done
+
+        # Play the animation in loop mode (s=3).
+        gr_command "a=a,v=1,s=3,i=${image_id}"
+
+        # Remove the temporary directory, but do it in the background with a
+        # delay to avoid removing files before they are loaded by the terminal.
+        delayed_frame_dir_cleanup "$frame_dir" 2> /dev/null &
+    else
+        # The file is not an animation, upload it directly
+        gr_upload "q=2,a=T" "U=1,i=${image_id},f=100,c=${cols},r=${rows}" "$file"
+        # Print the placeholder
+        print_placeholder
+    fi
+}
 
 #####################################################################
 # Printing the image placeholder
 #####################################################################
+
+print_placeholder() {
+    # Each line starts with the escape sequence to set the foreground color to
+    # the image id.
+    blue="$(expr "$image_id" % 256 )"
+    green="$(expr \( "$image_id" / 256 \) % 256 )"
+    red="$(expr \( "$image_id" / 65536 \) % 256 )"
+    line_start="$(printf "\e[38;2;%d;%d;%dm" "$red" "$green" "$blue")"
+    line_end="$(printf "\e[39;m")"
+
+    id4th="$(expr \( "$image_id" / 16777216 \) % 256 )"
+    eval "id_diacritic=\$d${id4th}"
+
+    # Reset the brush state, mostly to reset the underline color.
+    printf "\e[0m"
+
+    # Fill the output with characters representing the image
+    for y in $(seq 0 "$(expr "$rows" - 1)"); do
+        eval "row_diacritic=\$d${y}"
+        printf '%s' "$line_start"
+        for x in $(seq 0 "$(expr "$cols" - 1)"); do
+            eval "col_diacritic=\$d${x}"
+            # Note that when $x is out of bounds, the column diacritic will
+            # be empty, meaning that the column should be guessed by the
+            # terminal.
+            if [ "$x" -ge "$num_diacritics" ]; then
+                printf '%s' "${placeholder}${row_diacritic}"
+            else
+                printf '%s' "${placeholder}${row_diacritic}${col_diacritic}${id_diacritic}"
+            fi
+        done
+        printf '%s\n' "$line_end"
+    done
+
+    printf "\e[0m"
+}
 
 d0="̅"
 d1="̍"
@@ -632,36 +762,8 @@ num_diacritics="297"
 
 placeholder="􎻮"
 
-# Each line starts with the escape sequence to set the foreground color to
-# the image id.
-blue="$(expr "$image_id" % 256 )"
-green="$(expr \( "$image_id" / 256 \) % 256 )"
-red="$(expr \( "$image_id" / 65536 \) % 256 )"
-line_start="$(printf "\e[38;2;%d;%d;%dm" "$red" "$green" "$blue")"
-line_end="$(printf "\e[39;m")"
+#####################################################################
+# Upload the image and print the placeholder
+#####################################################################
 
-id4th="$(expr \( "$image_id" / 16777216 \) % 256 )"
-eval "id_diacritic=\$d${id4th}"
-
-# Reset the brush state, mostly to reset the underline color.
-printf "\e[0m"
-
-# Fill the output with characters representing the image
-for y in $(seq 0 "$(expr "$rows" - 1)"); do
-    eval "row_diacritic=\$d${y}"
-    printf '%s' "$line_start"
-    for x in $(seq 0 "$(expr "$cols" - 1)"); do
-        eval "col_diacritic=\$d${x}"
-        # Note that when $x is out of bounds, the column diacritic will
-        # be empty, meaning that the column should be guessed by the
-        # terminal.
-        if [ "$x" -ge "$num_diacritics" ]; then
-            printf '%s' "${placeholder}${row_diacritic}"
-        else
-            printf '%s' "${placeholder}${row_diacritic}${col_diacritic}${id_diacritic}"
-        fi
-    done
-    printf '%s\n' "$line_end"
-done
-
-printf "\e[0m"
+upload_image_and_print_placeholder

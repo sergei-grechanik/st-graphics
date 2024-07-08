@@ -1716,9 +1716,9 @@ xdrawglyph(Glyph g, int x, int y)
 	numspecs = xmakeglyphfontspecs(&spec, &g, 1, x, y);
 	xdrawglyphfontspecs(&spec, g, numspecs, x, y);
 	if (g.mode & ATTR_IMAGE) {
-		xstartimagedraw();
+		gr_start_drawing(xw.buf, win.cw, win.ch);
 		xdrawoneimagecell(g, x, y);
-		xfinishimagedraw();
+		gr_finish_drawing(xw.buf);
 	}
 }
 
@@ -1817,8 +1817,6 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
  * image ID and the same placement ID). */
 void
 xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
-	int x_pix_start = win.hborderpx + x1 * win.cw;
-	int x_pix = x_pix_start;
 	int y_pix = win.vborderpx + y1 * win.ch;
 	uint32_t image_id_24bits = base.fg & 0xFFFFFF;
 	uint32_t placement_id = tgetimgplacementid(&base);
@@ -1826,6 +1824,7 @@ xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 	int last_col = 0;
 	int last_row = 0;
 	int last_start_col = 0;
+	int last_start_x = x1;
 	// The most significant byte is also 1-base, subtract 1 before use.
 	uint32_t last_id_4thbyteplus1 = 0;
 	// We may need to inherit row/column/4th byte from the previous cell.
@@ -1838,8 +1837,8 @@ xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 		last_id_4thbyteplus1 = tgetimgid4thbyteplus1(prev);
 		last_start_col = last_col + 1;
 	}
-	for (int i = 0; i < x2 - x1; ++i) {
-		Glyph *g = &line[x1 + i];
+	for (int x = x1; x < x2; ++x) {
+		Glyph *g = &line[x];
 		uint32_t cur_row = tgetimgrow(g);
 		uint32_t cur_col = tgetimgcol(g);
 		uint32_t cur_id_4thbyteplus1 = tgetimgid4thbyteplus1(g);
@@ -1876,15 +1875,18 @@ xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 			uint32_t image_id = image_id_24bits;
 			if (last_id_4thbyteplus1)
 				image_id |= (last_id_4thbyteplus1 - 1) << 24;
-			if (last_row != 0)
+			if (last_row != 0) {
+				int x_pix =
+					win.hborderpx + last_start_x * win.cw;
 				gr_append_imagerect(
 					xw.buf, image_id, placement_id,
 					last_start_col - 1, last_col,
-					last_row - 1, last_row, x_pix, y_pix,
-					win.cw, win.ch,
+					last_row - 1, last_row, last_start_x,
+					y1, x_pix, y_pix, win.cw, win.ch,
 					base.mode & ATTR_REVERSE);
+			}
 			last_start_col = cur_col;
-			x_pix = x_pix_start + i * win.cw;
+			last_start_x = x;
 		}
 		last_row = cur_row;
 		last_col = cur_col;
@@ -1903,11 +1905,13 @@ xdrawimages(Glyph base, Line line, int x1, int y1, int x2) {
 	if (last_id_4thbyteplus1)
 		image_id |= (last_id_4thbyteplus1 - 1) << 24;
 	// Draw the last contiguous stripe.
-	if (last_row != 0)
+	if (last_row != 0) {
+		int x_pix = win.hborderpx + last_start_x * win.cw;
 		gr_append_imagerect(xw.buf, image_id, placement_id,
 				    last_start_col - 1, last_col, last_row - 1,
-				    last_row, x_pix, y_pix, win.cw, win.ch,
-				    base.mode & ATTR_REVERSE);
+				    last_row, last_start_x, y1, x_pix, y_pix,
+				    win.cw, win.ch, base.mode & ATTR_REVERSE);
+	}
 }
 
 /* Draw just one image cell without inheriting attributes from the left. */
@@ -1921,13 +1925,14 @@ void xdrawoneimagecell(Glyph g, int x, int y) {
 	uint32_t placement_id = tgetimgplacementid(&g);
 	uint32_t image_id = tgetimgid(&g);
 	gr_append_imagerect(xw.buf, image_id, placement_id, col, col + 1, row,
-			    row + 1, x_pix, y_pix, win.cw, win.ch,
+			    row + 1, x, y, x_pix, y_pix, win.cw, win.ch,
 			    g.mode & ATTR_REVERSE);
 }
 
 /* Prepare for image drawing. */
-void xstartimagedraw() {
+void xstartimagedraw(int *dirty, int rows) {
 	gr_start_drawing(xw.buf, win.cw, win.ch);
+	gr_mark_dirty_animations(dirty, rows);
 }
 
 /* Draw all queued image cells. */
@@ -2291,6 +2296,14 @@ run(void)
 
 		if (XPending(xw.dpy))
 			timeout = 0;  /* existing events might not set xfd */
+
+		/* Decrease the timeout if there are active animations. */
+		if (graphics_next_redraw_delay != INT_MAX &&
+		    IS_SET(MODE_VISIBLE))
+			timeout = timeout == -1
+					  ? graphics_next_redraw_delay
+					  : MIN(timeout,
+						graphics_next_redraw_delay);
 
 		seltv.tv_sec = timeout / 1E3;
 		seltv.tv_nsec = 1E6 * (timeout - 1E3 * seltv.tv_sec);
