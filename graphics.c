@@ -1,6 +1,6 @@
 /* The MIT License
 
-   Copyright (c) 2021-2023 Sergei Grechanik <sergei.grechanik@gmail.com>
+   Copyright (c) 2021-2024 Sergei Grechanik <sergei.grechanik@gmail.com>
 
    Permission is hereby granted, free of charge, to any person obtaining
    a copy of this software and associated documentation files (the
@@ -68,6 +68,17 @@ enum ScaleMode {
 	SCALE_MODE_NONE_OR_CONTAIN = 4,
 };
 
+enum AnimationState {
+	ANIMATION_STATE_UNSET = 0,
+	/// The animation is stopped. Display the current frame, but don't
+	/// advance to the next one.
+	ANIMATION_STATE_STOPPED = 1,
+	/// Run the animation to then end, then wait for the next frame.
+	ANIMATION_STATE_LOADING = 2,
+	/// Run the animation in a loop.
+	ANIMATION_STATE_LOOPING = 3,
+};
+
 /// The status of an image. Each image uploaded to the terminal is cached on
 /// disk, then it is loaded to ram when needed.
 enum ImageStatus {
@@ -77,6 +88,7 @@ enum ImageStatus {
 	STATUS_UPLOADING_SUCCESS = 3,
 	STATUS_RAM_LOADING_ERROR = 4,
 	STATUS_RAM_LOADING_SUCCESS = 5,
+	STATUS_RAM_LOADING_IN_PROGRESS = 6,
 };
 
 const char *image_status_strings[6] = {
@@ -117,7 +129,7 @@ typedef struct ImageFrame {
 	int index;
 	/// The last time when the frame was displayed or otherwise touched.
 	struct timespec atime;
-	/// The background color of the frame.
+	/// The background color of the frame in the 0xRRGGBBAA format.
 	uint32_t background_color;
 	/// The index of the background frame. Zero to use the color instead.
 	int background_frame_index;
@@ -128,8 +140,9 @@ typedef struct ImageFrame {
 	unsigned expected_size;
 	/// Format specification (see the `f=` key).
 	int format;
-	/// Pixel width and height if format is 32 or 24.
-	int pix_width, pix_height;
+	/// Pixel width and height of the original frame data. May differ from
+	/// the image (i.e. first frame) dimensions.
+	int data_pix_width, data_pix_height;
 	/// The offset of the frame relative to the first frame.
 	int x, y;
 	/// Compression mode (see the `o=` key).
@@ -171,6 +184,17 @@ typedef struct Image {
 	/// The global index of the creation command. Used to decide which image
 	/// is newer if they have the same image number.
 	uint64_t global_command_index;
+	/// The 1-based index of the currently displayed frame.
+	int current_frame;
+	/// The state of the animation, see `AnimationState`.
+	char animation_state;
+	/// The last time when the current frame was displayed.
+	struct timespec current_frame_time;
+	/// The delay until the next frame should be displayed, in milliseconds.
+	unsigned next_redraw_delay;
+	/// The unscaled pixel width and height of the image. Usually inherited
+	/// from the first frame.
+	int pix_width, pix_height;
 	/// The first frame.
 	ImageFrame first_frame;
 	/// The array of frames beyond the first one.
@@ -322,6 +346,11 @@ extern double graphics_excess_tolerance_ratio;
 // Basic image management functions (create, delete, find, etc).
 ////////////////////////////////////////////////////////////////////////////////
 
+/// Returns the 1-based index of the last frame.
+static inline int gr_last_frame_index(Image *img) {
+	return kv_size(img->frames_beyond_the_first) + 1;
+}
+
 /// Returns the frame with the given index. Returns NULL if the index is out of
 /// bounds. The index is 1-based.
 static ImageFrame *gr_get_frame(Image *img, int index) {
@@ -329,8 +358,8 @@ static ImageFrame *gr_get_frame(Image *img, int index) {
 		return NULL;
 	if (index == 1)
 		return &img->first_frame;
-	if (index > 1 && index <= kv_size(img->frames_beyond_the_first))
-		return &kv_A(img->frames_beyond_the_first, index - 1);
+	if (2 <= index && index <= gr_last_frame_index(img))
+		return &kv_A(img->frames_beyond_the_first, index - 2);
 	return NULL;
 }
 
@@ -338,10 +367,7 @@ static ImageFrame *gr_get_frame(Image *img, int index) {
 static ImageFrame *gr_get_last_frame(Image *img) {
 	if (!img)
 		return NULL;
-	if (kv_size(img->frames_beyond_the_first) == 0)
-		return &img->first_frame;
-	size_t lastidx = kv_size(img->frames_beyond_the_first) - 1;
-	return &kv_A(img->frames_beyond_the_first, lastidx);
+	return gr_get_frame(img, gr_last_frame_index(img));
 }
 
 /// Returns the pixmap for the frame with the given index. Returns 0 if the
@@ -349,8 +375,9 @@ static ImageFrame *gr_get_last_frame(Image *img) {
 static Pixmap gr_get_frame_pixmap(ImagePlacement *placement, int index) {
 	if (index == 1)
 		return placement->first_pixmap;
-	if (index > 1 && index <= kv_size(placement->pixmaps_beyond_the_first))
-		return kv_A(placement->pixmaps_beyond_the_first, index - 1);
+	if (2 <= index &&
+	    index <= kv_size(placement->pixmaps_beyond_the_first) + 1)
+		return kv_A(placement->pixmaps_beyond_the_first, index - 2);
 	return 0;
 }
 
@@ -363,8 +390,8 @@ static void gr_set_frame_pixmap(ImagePlacement *placement, int index,
 		return;
 	}
 	// Resize the array if needed.
-	kv_a(Pixmap, placement->pixmaps_beyond_the_first, index - 1);
-	kv_A(placement->pixmaps_beyond_the_first, index - 1) = pixmap;
+	kv_a(Pixmap, placement->pixmaps_beyond_the_first, index - 2);
+	kv_A(placement->pixmaps_beyond_the_first, index - 2) = pixmap;
 }
 
 /// Finds the image corresponding to the client id. Returns NULL if cannot find.
@@ -444,7 +471,7 @@ static void gr_get_frame_filename(ImageFrame *frame, char *out,
 static unsigned gr_frame_current_ram_size(ImageFrame *frame) {
 	if (!frame->original_image)
 		return 0;
-	return (unsigned)frame->pix_width * frame->pix_height * 4;
+	return (unsigned)frame->image->pix_width * frame->image->pix_height * 4;
 }
 
 /// Returns the (estimation) of the RAM size used by a single frame pixmap.
@@ -843,6 +870,25 @@ static Image *gr_new_image(uint32_t id) {
 	return img;
 }
 
+/// Creates a new frame at the end of the frame array. It may be the first frame
+/// if there are no frames yet.
+static ImageFrame *gr_append_new_frame(Image *img) {
+	ImageFrame *frame = NULL;
+	if (img->first_frame.index == 0 &&
+	    kv_size(img->frames_beyond_the_first) == 0) {
+		frame = &img->first_frame;
+		frame->index = 1;
+	} else {
+		frame = kv_pushp(ImageFrame, img->frames_beyond_the_first);
+		memset(frame, 0, sizeof(ImageFrame));
+		frame->index = kv_size(img->frames_beyond_the_first) + 1;
+	}
+	frame->image = img;
+	gr_touch_frame(frame);
+	GR_LOG("Appending frame %d to image %u\n", frame->index, img->image_id);
+	return frame;
+}
+
 /// Creates a new placement with the given id. If a placement with that id
 /// already exists, it is deleted first. If the provided id is 0, generates a
 /// random id.
@@ -879,8 +925,8 @@ static int64_t ceil_div(int64_t a, int64_t b) {
 /// specified, and also adjusts the source rectangle size.
 static void gr_infer_placement_size_maybe(ImagePlacement *placement) {
 	// The size of the image.
-	int image_pix_width = placement->image->first_frame.pix_width;
-	int image_pix_height = placement->image->first_frame.pix_height;
+	int image_pix_width = placement->image->pix_width;
+	int image_pix_height = placement->image->pix_height;
 	// Negative values are not allowed. Quietly set them to 0.
 	if (placement->src_pix_x < 0)
 		placement->src_pix_x = 0;
@@ -957,6 +1003,89 @@ static void gr_infer_placement_size_maybe(ImagePlacement *placement) {
 		if (!placement->rows)
 			placement->rows =
 				ceil_div(placement->src_pix_height, current_ch);
+	}
+}
+
+/// Adjusts the current frame index if enough time has passed since the display
+/// of the current frame. Returns the new frame index. Also computes the delay
+/// until the next redraw of this image.
+static int gr_adjust_and_get_frame_index(Image *img) {
+	if (img->current_frame == 0) {
+		clock_gettime(CLOCK_MONOTONIC, &img->current_frame_time);
+		img->current_frame = 1;
+		img->next_redraw_delay = MAX(1, img->first_frame.gap);
+		return img->current_frame;
+	}
+	// If the animation is stopped, show the current frame.
+	if (!img->animation_state ||
+	    img->animation_state == ANIMATION_STATE_STOPPED) {
+		// The next redraw is never (unless the state is changed).
+		img->next_redraw_delay = -1;
+		return img->current_frame;
+	}
+	// If we are loading and we reached the last frame, show the last frame.
+	if (img->animation_state == ANIMATION_STATE_LOADING &&
+	    img->current_frame == gr_last_frame_index(img)) {
+		img->next_redraw_delay =
+			MAX(1, gr_get_frame(img, img->current_frame)->gap);
+		return img->current_frame;
+	}
+
+	// Check how many milliseconds passed since the current frame was shown.
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	int passed_ms =
+		(now.tv_sec - img->current_frame_time.tv_sec) * 1000 +
+		(now.tv_nsec - img->current_frame_time.tv_nsec) / 1000000;
+	// Find the next frame.
+	int original_frame_index = img->current_frame;
+	while (1) {
+		ImageFrame *frame = gr_get_frame(img, img->current_frame);
+		if (!frame) {
+			img->current_frame = 1;
+			img->current_frame_time = now;
+			img->next_redraw_delay = MAX(1, img->first_frame.gap);
+			return img->current_frame;
+		}
+		if (frame->gap >= 0 && passed_ms < frame->gap) {
+			// Not enough time has passed, we are still in the same
+			// frame, and it's not a gapless frame.
+			img->next_redraw_delay = MAX(1, frame->gap - passed_ms);
+			return img->current_frame;
+		}
+		// Otherwise go to the next frame.
+		passed_ms -= MAX(0, frame->gap);
+		if (img->current_frame >= gr_last_frame_index(img)) {
+			// It's the last frame, if the animation is loading,
+			// remain on it.
+			if (img->animation_state == ANIMATION_STATE_LOADING) {
+				img->next_redraw_delay = MAX(1, frame->gap);
+				return img->current_frame;
+			}
+			// Otherwise the animation is looping.
+			img->current_frame = 1;
+			// TODO: Support finite number of loops.
+		} else {
+			img->current_frame++;
+		}
+		// Make sure we don't get stuck in an infinite loop.
+		if (img->current_frame == original_frame_index) {
+			// We loop through all frames, but haven't reached the
+			// next frame yet. This may happen if too much time has
+			// passed since the last redraw or all the frames are
+			// gapless. Just move on to the next frame.
+			img->current_frame++;
+			if (img->current_frame > gr_last_frame_index(img))
+				img->current_frame = 1;
+			img->current_frame_time = now;
+			img->next_redraw_delay = MAX(
+				1, gr_get_frame(img, img->current_frame)->gap);
+			return img->current_frame;
+		}
+		// Adjust the start time of the frame.
+		img->current_frame_time.tv_sec += frame->gap / 1000;
+		img->current_frame_time.tv_nsec +=
+			(frame->gap % 1000) * 1000000;
 	}
 }
 
@@ -1109,7 +1238,7 @@ static int gr_load_raw_pixel_data_compressed(DATA32 *data, FILE *file,
 /// may be compressed.
 static Imlib_Image gr_load_raw_pixel_data(ImageFrame *frame,
 					  const char *filename) {
-	size_t total_pixels = frame->pix_width * frame->pix_height;
+	size_t total_pixels = frame->data_pix_width * frame->data_pix_height;
 	if (total_pixels * 4 > graphics_max_single_image_ram_size) {
 		fprintf(stderr,
 			"error: image %u frame %u is too big too load: %zu > %u\n",
@@ -1126,11 +1255,12 @@ static Imlib_Image gr_load_raw_pixel_data(ImageFrame *frame,
 		return NULL;
 	}
 
-	Imlib_Image image = imlib_create_image(frame->pix_width, frame->pix_height);
+	Imlib_Image image = imlib_create_image(frame->data_pix_width,
+					       frame->data_pix_height);
 	if (!image) {
 		fprintf(stderr,
 			"error: could not create an image of size %d x %d\n",
-			frame->pix_width, frame->pix_height);
+			frame->data_pix_width, frame->data_pix_height);
 		fclose(file);
 		return NULL;
 	}
@@ -1179,25 +1309,28 @@ static void gr_load_original_image(ImageFrame *frame) {
 		return;
 	}
 
-	// Load the original image.
+	// Prevent recursive dependences between frames.
+	if (frame->status == STATUS_RAM_LOADING_IN_PROGRESS) {
+		fprintf(stderr,
+			"error: recursive loading of image %u frame %u\n",
+			frame->image->image_id, frame->index);
+		frame->status = STATUS_RAM_LOADING_ERROR;
+		return;
+	}
+	frame->status = STATUS_RAM_LOADING_IN_PROGRESS;
+
+	// Load the frame data image.
+	Imlib_Image frame_data_image = NULL;
 	char filename[MAX_FILENAME_SIZE];
 	gr_get_frame_filename(frame, filename, MAX_FILENAME_SIZE);
 	GR_LOG("Loading image: %s\n", sanitized_filename(filename));
-	if (frame->format == 100 || frame->format == 0) {
-		frame->original_image = imlib_load_image(filename);
-		if (frame->original_image) {
-			// If imlib loading succeeded, set the information about
-			// the original image size.
-			imlib_context_set_image(frame->original_image);
-			frame->pix_width = imlib_image_get_width();
-			frame->pix_height = imlib_image_get_height();
-		}
-	}
+	if (frame->format == 100 || frame->format == 0)
+		frame_data_image = imlib_load_image(filename);
 	if (frame->format == 32 || frame->format == 24 ||
-	    (!frame->original_image && frame->format == 0)) {
-		frame->original_image = gr_load_raw_pixel_data(frame, filename);
-	}
-	if (!frame->original_image) {
+	    (!frame_data_image && frame->format == 0))
+		frame_data_image = gr_load_raw_pixel_data(frame, filename);
+
+	if (!frame_data_image) {
 		if (frame->status != STATUS_RAM_LOADING_ERROR) {
 			fprintf(stderr, "error: could not load image: %s\n",
 				sanitized_filename(filename));
@@ -1205,6 +1338,83 @@ static void gr_load_original_image(ImageFrame *frame) {
 		frame->status = STATUS_RAM_LOADING_ERROR;
 		return;
 	}
+
+	imlib_context_set_image(frame_data_image);
+	int frame_data_width = imlib_image_get_width();
+	int frame_data_height = imlib_image_get_height();
+	GR_LOG("Successfully loaded, size %d x %d\n", frame_data_width,
+	       frame_data_height);
+	// If imlib loading succeeded, and it is the first frame, set the
+	// information about the original image size, unless it's already set.
+	if (frame->index == 1 && frame->image->pix_width == 0 &&
+	    frame->image->pix_height == 0) {
+		frame->image->pix_width = frame_data_width;
+		frame->image->pix_height = frame_data_height;
+	}
+
+	int image_width = frame->image->pix_width;
+	int image_height = frame->image->pix_height;
+
+	// Compose the image with the background color or frame.
+	if (frame->background_color != 0 || frame->background_frame_index ||
+	    image_width != frame_data_width ||
+	    image_height != frame_data_height) {
+		Imlib_Image composed_image = imlib_create_image(
+			image_width, image_height);
+		imlib_context_set_image(composed_image);
+		imlib_image_set_has_alpha(1);
+		imlib_context_set_anti_alias(0);
+
+		// Start with the background frame or color.
+		imlib_context_set_blend(0);
+		if (frame->background_frame_index) {
+			ImageFrame *bg_frame = gr_get_frame(
+				frame->image, frame->background_frame_index);
+			if (!bg_frame) {
+				fprintf(stderr,
+					"error: could not find background "
+					"frame %d for image %u frame %d\n",
+					frame->background_frame_index,
+					frame->image->image_id, frame->index);
+				imlib_free_image();
+				imlib_context_set_image(frame_data_image);
+				imlib_free_image();
+				frame->status = STATUS_RAM_LOADING_ERROR;
+				return;
+			}
+			// Load the background frame if needed. Hopefully it's
+			// not recursive.
+			gr_load_original_image(bg_frame);
+			if (bg_frame->original_image)
+				imlib_blend_image_onto_image(
+					bg_frame->original_image, 1, 0, 0,
+					image_width, image_height, 0, 0,
+					image_width, image_height);
+		} else {
+			int r = (frame->background_color >> 24) & 0xFF;
+			int g = (frame->background_color >> 16) & 0xFF;
+			int b = (frame->background_color >> 8) & 0xFF;
+			int a = frame->background_color & 0xFF;
+			imlib_context_set_color(r, g, b, a);
+			imlib_image_fill_rectangle(0, 0, image_width,
+						   image_height);
+		}
+
+		// Blend the frame data image onto the background.
+		imlib_context_set_blend(1);
+		imlib_blend_image_onto_image(
+			frame_data_image, 1, 0, 0, frame->data_pix_width,
+			frame->data_pix_height, frame->x, frame->y,
+			frame->data_pix_width, frame->data_pix_height);
+
+		// Free the frame data image.
+		imlib_context_set_image(frame_data_image);
+		imlib_free_image();
+
+		frame_data_image = composed_image;
+	}
+
+	frame->original_image = frame_data_image;
 
 	images_ram_size += gr_frame_current_ram_size(frame);
 	frame->status = STATUS_RAM_LOADING_SUCCESS;
@@ -1517,7 +1727,7 @@ void gr_get_placement_description(uint32_t image_id, uint32_t placement_id,
 		 "(frame 1) placement pixmap is %s\n"
 		 "(frame 1) original image as imlib object is %s\n",
 		 image_id, placement_id, placement->cols, placement->rows,
-		 img->first_frame.pix_width, img->first_frame.pix_height,
+		 img->pix_width, img->pix_height,
 		 placement->scaled_cw, placement->scaled_ch,
 		 placement->src_pix_x, placement->src_pix_y,
 		 placement->src_pix_width, placement->src_pix_height,
@@ -1530,7 +1740,7 @@ void gr_get_placement_description(uint32_t image_id, uint32_t placement_id,
 
 /// Prints the time difference between now and past in a human-readable format.
 static void gr_print_ago(struct timespec *now, struct timespec *past) {
-	double seconds = difftime(now->tv_sec, past->tv_sec) +
+	double seconds = (now->tv_sec - past->tv_sec) +
 			 (now->tv_nsec - past->tv_nsec) / 1e9;
 
 	if (seconds < 1)
@@ -1576,7 +1786,7 @@ void gr_dump_state() {
 		fprintf(stderr, "    total disk size: %u KiB\n",
 			img->total_disk_size / 1024);
 		fprintf(stderr, "    total duration: %d\n", img->total_duration);
-		fprintf(stderr, "    frames: %zu\n", kv_size(img->frames_beyond_the_first) + 1);
+		fprintf(stderr, "    frames: %d\n", gr_last_frame_index(img));
 		int64_t total_disk_size_computed = 0;
 		int total_duration_computed = 0;
 		foreach_frame(ImageFrame *frame, *img, {
@@ -1595,8 +1805,8 @@ void gr_dump_state() {
 						[frame->uploading_failure]);
 			fprintf(stderr, "        gap: %d\n", frame->gap);
 			total_duration_computed += frame->gap;
-			fprintf(stderr, "        pix size: %ux%u\n",
-				frame->pix_width, frame->pix_height);
+			fprintf(stderr, "        data pix size: %ux%u\n",
+				frame->data_pix_width, frame->data_pix_height);
 			char filename[MAX_FILENAME_SIZE];
 			gr_get_frame_filename(frame, filename,
 					      MAX_FILENAME_SIZE);
@@ -1735,8 +1945,13 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 		return;
 	}
 
-	// Load the image.
-	Pixmap pixmap = gr_load_placement(placement, 1, rect->cw, rect->ch);
+	// Choose the frame index to display. Note that currently all image
+	// placements are synchronized.
+	int frameidx = gr_adjust_and_get_frame_index(placement->image);
+
+	// Load the frame.
+	Pixmap pixmap =
+		gr_load_placement(placement, frameidx, rect->cw, rect->ch);
 
 	// If the image couldn't be loaded, display the bounding box.
 	if (!pixmap) {
@@ -1951,7 +2166,7 @@ typedef struct {
 	char *command;
 	/// The payload (after ';').
 	char *payload;
-	/// 'a=', may be 't', 'T', 'p', 'd'.
+	/// 'a=', may be 't', 'q', 'f', 'T', 'p', 'd', 'a'.
 	char action;
 	/// 'q=', 1 to suppress OK response, 2 to suppress errors too.
 	int quiet;
@@ -1961,12 +2176,12 @@ typedef struct {
 	int format;
 	/// 'o=', may be 'z' for RFC 1950 ZLIB.
 	int compression;
-	/// 't=', may be 'f' or 'd'.
+	/// 't=', may be 'f', 't' or 'd'.
 	char transmission_medium;
-	/// 'd=', may be only 'I' if specified.
+	/// 'd='
 	char delete_specifier;
 	/// 's=', 'v=', used only when 'f=24' or 'f=32'.
-	int pix_width, pix_height;
+	int image_pix_width, image_pix_height;
 	/// 'x=', 'y=' - top-left corner of the source rectangle.
 	int src_pix_x, src_pix_y;
 	/// 'w=', 'h=' - width and height of the source rectangle.
@@ -1975,7 +2190,7 @@ typedef struct {
 	int rows, columns;
 	/// 'i='
 	uint32_t image_id;
-	/// 'I=', not supported.
+	/// 'I='
 	uint32_t image_number;
 	/// 'p='
 	uint32_t placement_id;
@@ -1994,6 +2209,38 @@ typedef struct {
 	/// 'C=', if true, do not move the cursor when displaying this placement
 	/// (non-virtual placements only).
 	char do_not_move_cursor;
+	// ---------------------------------------------------------------------
+	// Animation-related fields. Their keys often overlap with keys of other
+	// commands, so these make sense only if the action is 'a=f' (frame
+	// transmission) or 'a=a' (animation control).
+	//
+	// 'x=' and 'y=', the relative position of the frame image when it's
+	// composed on top of another frame.
+	int frame_dst_pix_x, frame_dst_pix_y;
+	/// (Only for 'a=f'). 's=', 'v=', the size of the frame rectangle when
+	/// composed on top of another frame.
+	int frame_pix_width, frame_pix_height;
+	/// 'X=', 'X=1' to replace colors instead of alpha blending on top of
+	/// the background color or frame.
+	char replace_instead_of_blending;
+	/// 'Y=', the background color in the 0xRRGGBBAA format (still
+	/// transmitted as a decimal number).
+	uint32_t background_color;
+	/// (Only for 'a=f'). 'c=', the 1-based index of the background frame.
+	int background_frame;
+	/// (Only for 'a=a'). 'c=', sets the index of the current frame.
+	int current_frame;
+	/// 'r=', the 1-based index of the frame to edit.
+	int edit_frame;
+	/// 'z=', the duration of the frame. Zero if not specified, negative if
+	/// the frame is gapless (i.e. skipped).
+	int gap;
+	/// (Only for 'a=a'). 's=', if non-zero, sets the state of the
+	/// animation, 1 to stop, 2 to run in loading mode, 3 to loop.
+	int animation_state;
+	/// (Only for 'a=a'). 'v=', if non-zero, sets the number of times the
+	/// animation will loop. 1 to loop infinitely, N to loop N-1 times.
+	int loops;
 } GraphicsCommand;
 
 /// Replaces all non-printed characters in `str` with '?' and truncates the
@@ -2322,29 +2569,49 @@ static ImageFrame *gr_new_image_or_frame_from_command(GraphicsCommand *cmd) {
 					"for raw pixel data (f=32 or f=24)");
 		// Even though we report an error, we still create an image.
 	}
-	// Create an image object. If the action is `q`, we'll use random id
-	// instead of the one specified in the command.
-	uint32_t image_id = cmd->action == 'q' ? 0 : cmd->image_id;
-	Image *img = gr_new_image(image_id);
-	if (!img)
-		return NULL;
-	if (cmd->action == 'q')
-		img->query_id = cmd->image_id;
-	else if (!cmd->image_id)
-		cmd->image_id = img->image_id;
-	// Set the image number.
-	img->image_number = cmd->image_number;
-	// Initialize the first frame.
-	ImageFrame *frame = &img->first_frame;
-	frame->atime = img->atime;
-	frame->image = img;
-	frame->index = 1;
+
+	Image *img = NULL;
+	if (cmd->action == 'f') {
+		// If it's a frame transmission action, there must be an
+		// existing image.
+		img = gr_find_image_for_command(cmd);
+		if (!img) {
+			gr_reporterror_cmd(cmd, "ENOENT: image not found");
+			return NULL;
+		}
+	} else {
+		// Otherwise create a new image object. If the action is `q`,
+		// we'll use random id instead of the one specified in the
+		// command.
+		uint32_t image_id = cmd->action == 'q' ? 0 : cmd->image_id;
+		img = gr_new_image(image_id);
+		if (!img)
+			return NULL;
+		if (cmd->action == 'q')
+			img->query_id = cmd->image_id;
+		else if (!cmd->image_id)
+			cmd->image_id = img->image_id;
+		// Set the image number.
+		img->image_number = cmd->image_number;
+	}
+
+	ImageFrame *frame = gr_append_new_frame(img);
+	// Initialize the frame.
 	frame->expected_size = cmd->size;
 	frame->format = cmd->format;
 	frame->compression = cmd->compression;
-	frame->pix_width = cmd->pix_width;
-	frame->pix_height = cmd->pix_height;
-	// We save the quietness information in the image because for direct
+	// Set the frame data dimensions. It comes from different fields for
+	// different actions.
+	if (cmd->action == 'f') {
+		frame->data_pix_width = cmd->frame_pix_width;
+		frame->data_pix_height = cmd->frame_pix_height;
+		frame->x = cmd->frame_dst_pix_x;
+		frame->y = cmd->frame_dst_pix_y;
+	} else {
+		frame->data_pix_width = cmd->image_pix_width;
+		frame->data_pix_height = cmd->image_pix_height;
+	}
+	// We save the quietness information in the frame because for direct
 	// transmission subsequent transmission command won't contain this info.
 	frame->quiet = cmd->quiet;
 	return frame;
@@ -2383,7 +2650,7 @@ static ImageFrame *gr_handle_transmit_command(GraphicsCommand *cmd) {
 	if (cmd->transmission_medium == 'f' ||
 	    cmd->transmission_medium == 't') {
 		// File transmission.
-		// Create a new image or frame structure.
+		// Create a new image or a new frame of an existing image.
 		frame = gr_new_image_or_frame_from_command(cmd);
 		if (!frame)
 			return NULL;
@@ -2448,7 +2715,7 @@ static ImageFrame *gr_handle_transmit_command(GraphicsCommand *cmd) {
 				// Get the file size of the copied file.
 				frame->status = STATUS_UPLOADING_SUCCESS;
 				frame->disk_size = st.st_size;
-				frame->image->total_disk_size += data_size;
+				frame->image->total_disk_size += st.st_size;
 				images_disk_size += frame->disk_size;
 				if (frame->expected_size &&
 				    frame->expected_size != frame->disk_size) {
@@ -2632,6 +2899,54 @@ static void gr_handle_delete_command(GraphicsCommand *cmd) {
 	}
 }
 
+static void gr_handle_animation_control_command(GraphicsCommand *cmd) {
+	if (cmd->image_id == 0 && cmd->image_number == 0) {
+		gr_reporterror_cmd(cmd,
+				   "EINVAL: neither image id nor image number "
+				   "are specified or both are zero");
+		return;
+	}
+
+	// Find the image with the id or number.
+	Image *img = gr_find_image_for_command(cmd);
+	if (!img) {
+		gr_reporterror_cmd(cmd, "ENOENT: image not found");
+		return;
+	}
+
+	// Find the frame to edit, if requested.
+	ImageFrame *frame = NULL;
+	if (cmd->edit_frame)
+		frame = gr_get_frame(img, cmd->edit_frame);
+	if (cmd->edit_frame || cmd->gap) {
+		if (!frame) {
+			gr_reporterror_cmd(cmd, "ENOENT: frame %d not found",
+					   cmd->edit_frame);
+			return;
+		}
+		if (cmd->gap)
+			frame->gap = cmd->gap;
+	}
+
+	// Set animation-related parameters of the image.
+	if (cmd->current_frame)
+		img->current_frame = cmd->current_frame;
+	if (cmd->animation_state) {
+		if (cmd->animation_state == 1) {
+			img->animation_state = ANIMATION_STATE_STOPPED;
+		} else if (cmd->animation_state == 2) {
+			img->animation_state = ANIMATION_STATE_LOADING;
+		} else if (cmd->animation_state == 3) {
+			img->animation_state = ANIMATION_STATE_LOOPING;
+		} else {
+			gr_reporterror_cmd(
+				cmd, "EINVAL: invalid animation state: %d",
+				cmd->animation_state);
+		}
+	}
+	// TODO: Set the number of loops to cmd->loops
+}
+
 /// Handles a command.
 static void gr_handle_command(GraphicsCommand *cmd) {
 	if (!cmd->image_id && !cmd->image_number) {
@@ -2652,8 +2967,10 @@ static void gr_handle_command(GraphicsCommand *cmd) {
 		break;
 	case 't':
 	case 'q':
+	case 'f':
 		// Transmit data. 'q' means query, which is basically the same
 		// as transmit, but the image is discarded, and the id is fake.
+		// 'f' appends a frame to an existing image.
 		gr_handle_transmit_command(cmd);
 		break;
 	case 'p':
@@ -2673,6 +2990,9 @@ static void gr_handle_command(GraphicsCommand *cmd) {
 	case 'd':
 		gr_handle_delete_command(cmd);
 		break;
+	case 'a':
+		gr_handle_animation_control_command(cmd);
+		break;
 	default:
 		gr_reporterror_cmd(cmd, "EINVAL: unsupported action: %c",
 				   cmd->action);
@@ -2680,10 +3000,19 @@ static void gr_handle_command(GraphicsCommand *cmd) {
 	}
 }
 
-/// Parses the value specified by `value_start` and `value_end` and assigns it
-/// to the field of `cmd` specified by `key_start` and `key_end`.
-static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start,
-			    char *key_end, char *value_start, char *value_end) {
+/// A partially parsed key-value pair.
+typedef struct KeyAndValue {
+	char *key_start;
+	char *val_start;
+	unsigned key_len, val_len;
+} KeyAndValue;
+
+/// Parses the value of a key and assigns it to the appropriate field of `cmd`.
+static void gr_set_keyvalue(GraphicsCommand *cmd, KeyAndValue *kv) {
+	char *key_start = kv->key_start;
+	char *key_end = key_start + kv->key_len;
+	char *value_start = kv->val_start;
+	char *value_end = value_start + kv->val_len;
 	// Currently all keys are one-character.
 	if (key_end - key_start != 1) {
 		gr_reporterror_cmd(cmd, "EINVAL: unknown key of length %ld: %s",
@@ -2745,10 +3074,20 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start,
 		}
 		break;
 	case 's':
-		cmd->pix_width = num;
+		if (cmd->action == 'f')
+			cmd->frame_pix_width = num;
+		else if (cmd->action == 'a')
+			cmd->animation_state = num;
+		else
+			cmd->image_pix_width = num;
 		break;
 	case 'v':
-		cmd->pix_height = num;
+		if (cmd->action == 'f')
+			cmd->frame_pix_height = num;
+		else if (cmd->action == 'a')
+			cmd->loops = num;
+		else
+			cmd->image_pix_height = num;
 		break;
 	case 'i':
 		cmd->image_id = num;
@@ -2761,9 +3100,13 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start,
 		break;
 	case 'x':
 		cmd->src_pix_x = num;
+		cmd->frame_dst_pix_x = num;
 		break;
 	case 'y':
-		cmd->src_pix_y = num;
+		if (cmd->action == 'f')
+			cmd->frame_dst_pix_y = num;
+		else
+			cmd->src_pix_y = num;
 		break;
 	case 'w':
 		cmd->src_pix_width = num;
@@ -2772,10 +3115,18 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start,
 		cmd->src_pix_height = num;
 		break;
 	case 'c':
-		cmd->columns = num;
+		if (cmd->action == 'f')
+			cmd->background_frame = num;
+		else if (cmd->action == 'a')
+			cmd->current_frame = num;
+		else
+			cmd->columns = num;
 		break;
 	case 'r':
-		cmd->rows = num;
+		if (cmd->action == 'f' || cmd->action == 'a')
+			cmd->edit_frame = num;
+		else
+			cmd->rows = num;
 		break;
 	case 'm':
 		cmd->is_data_transmission = 1;
@@ -2788,11 +3139,22 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start,
 		cmd->virtual = num;
 		break;
 	case 'X':
+		if (cmd->action == 'f')
+			cmd->replace_instead_of_blending = num;
+		else
+			break; /*ignore*/
+		break;
 	case 'Y':
+		if (cmd->action == 'f')
+			cmd->background_color = num;
+		else
+			break; /*ignore*/
+		break;
 	case 'z':
-		fprintf(stderr,
-			"WARNING: the key '%c' is not supported and will be ignored\n",
-			*key_start);
+		if (cmd->action == 'f')
+			cmd->gap = num;
+		else
+			break; /*ignore*/
 		break;
 	case 'C':
 		cmd->do_not_move_cursor = num;
@@ -2805,7 +3167,7 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, char *key_start,
 }
 
 /// Parse and execute a graphics command. `buf` must start with 'G' and contain
-/// at least `len + 1` characters. Returns 0 on success.
+/// at least `len + 1` characters. Returns 1 on success.
 int gr_parse_command(char *buf, size_t len) {
 	if (buf[0] != 'G')
 		return 0;
@@ -2823,6 +3185,9 @@ int gr_parse_command(char *buf, size_t len) {
 	// The state of parsing. 'k' to parse key, 'v' to parse value, 'p' to
 	// parse the payload.
 	char state = 'k';
+	// An array of partially parsed key-value pairs.
+	KeyAndValue key_vals[32];
+	unsigned key_vals_count = 0;
 	char *key_start = buf;
 	char *key_end = NULL;
 	char *val_start = NULL;
@@ -2855,8 +3220,20 @@ int gr_parse_command(char *buf, size_t len) {
 			case '\0':
 				state = *c == ',' ? 'k' : 'p';
 				val_end = c;
-				gr_set_keyvalue(&cmd, key_start, key_end,
-					     val_start, val_end);
+				if (key_vals_count >=
+				    sizeof(key_vals) / sizeof(*key_vals)) {
+					gr_reporterror_cmd(&cmd,
+							   "EINVAL: too many "
+							   "key-value pairs");
+					break;
+				}
+				key_vals[key_vals_count].key_start = key_start;
+				key_vals[key_vals_count].val_start = val_start;
+				key_vals[key_vals_count].key_len =
+					key_end - key_start;
+				key_vals[key_vals_count].val_len =
+					val_end - val_start;
+				++key_vals_count;
 				key_start = c + 1;
 				break;
 			default:
@@ -2868,6 +3245,21 @@ int gr_parse_command(char *buf, size_t len) {
 			break;
 		}
 		++c;
+	}
+
+	// Set the action key ('a=') first because we need it to disambiguate
+	// some keys.
+	for (unsigned i = 0; i < key_vals_count; ++i) {
+		if (*key_vals[i].key_start == 'a' && key_vals[i].key_len == 1) {
+			gr_set_keyvalue(&cmd, &key_vals[i]);
+			break;
+		}
+	}
+	// Set the rest of the keys.
+	for (unsigned i = 0; i < key_vals_count; ++i) {
+		if (*key_vals[i].key_start == 'a' && key_vals[i].key_len == 1)
+			continue;
+		gr_set_keyvalue(&cmd, &key_vals[i]);
 	}
 
 	if (!cmd.payload)

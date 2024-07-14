@@ -24,7 +24,7 @@ void gr_start_drawing(Drawable buf, int cw, int ch);
 void gr_finish_drawing(Drawable buf);
 
 /// Parse and execute a graphics command. `buf` must start with 'G' and contain
-/// at least `len + 1` characters (including '\0'). Returns 0 on success.
+/// at least `len + 1` characters (including '\0'). Returns 1 on success.
 /// Additional informations is returned through `graphics_command_result`.
 int gr_parse_command(char *buf, size_t len);
 
