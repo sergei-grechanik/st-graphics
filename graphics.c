@@ -308,6 +308,8 @@ static uint32_t current_upload_image_id = 0;
 static int current_upload_frame_index = 0;
 /// The time when the current frame drawing started (used for debugging fps).
 static clock_t drawing_start_time;
+/// The time used to figure out the current frame for animations.
+static struct timespec common_animation_time;
 /// The global index of the current command.
 static uint64_t global_command_counter = 0;
 
@@ -390,7 +392,12 @@ static void gr_set_frame_pixmap(ImagePlacement *placement, int index,
 		return;
 	}
 	// Resize the array if needed.
-	kv_a(Pixmap, placement->pixmaps_beyond_the_first, index - 2);
+	size_t old_size = kv_size(placement->pixmaps_beyond_the_first);
+	if (old_size < index - 1) {
+		kv_a(Pixmap, placement->pixmaps_beyond_the_first, index - 2);
+		for (size_t i = old_size; i < index - 1; i++)
+			kv_A(placement->pixmaps_beyond_the_first, i) = 0;
+	}
 	kv_A(placement->pixmaps_beyond_the_first, index - 2) = pixmap;
 }
 
@@ -1008,8 +1015,9 @@ static void gr_infer_placement_size_maybe(ImagePlacement *placement) {
 
 /// Adjusts the current frame index if enough time has passed since the display
 /// of the current frame. Returns the new frame index. Also computes the delay
-/// until the next redraw of this image.
-static int gr_adjust_and_get_frame_index(Image *img) {
+/// until the next redraw of this image. The current time is passed as an
+/// argument so that all animations are in sync.
+static int gr_adjust_and_get_frame_index(Image *img, struct timespec *now) {
 	if (img->current_frame == 0) {
 		clock_gettime(CLOCK_MONOTONIC, &img->current_frame_time);
 		img->current_frame = 1;
@@ -1032,18 +1040,16 @@ static int gr_adjust_and_get_frame_index(Image *img) {
 	}
 
 	// Check how many milliseconds passed since the current frame was shown.
-	struct timespec now;
-	clock_gettime(CLOCK_MONOTONIC, &now);
 	int passed_ms =
-		(now.tv_sec - img->current_frame_time.tv_sec) * 1000 +
-		(now.tv_nsec - img->current_frame_time.tv_nsec) / 1000000;
+		(now->tv_sec - img->current_frame_time.tv_sec) * 1000 +
+		(now->tv_nsec - img->current_frame_time.tv_nsec) / 1000000;
 	// Find the next frame.
 	int original_frame_index = img->current_frame;
 	while (1) {
 		ImageFrame *frame = gr_get_frame(img, img->current_frame);
 		if (!frame) {
 			img->current_frame = 1;
-			img->current_frame_time = now;
+			img->current_frame_time = *now;
 			img->next_redraw_delay = MAX(1, img->first_frame.gap);
 			return img->current_frame;
 		}
@@ -1077,7 +1083,7 @@ static int gr_adjust_and_get_frame_index(Image *img) {
 			img->current_frame++;
 			if (img->current_frame > gr_last_frame_index(img))
 				img->current_frame = 1;
-			img->current_frame_time = now;
+			img->current_frame_time = *now;
 			img->next_redraw_delay = MAX(
 				1, gr_get_frame(img, img->current_frame)->gap);
 			return img->current_frame;
@@ -1319,6 +1325,32 @@ static void gr_load_original_image(ImageFrame *frame) {
 	}
 	frame->status = STATUS_RAM_LOADING_IN_PROGRESS;
 
+	// Load the background frame if needed. Hopefully it's not recursive.
+	ImageFrame *bg_frame = NULL;
+	if (frame->background_frame_index) {
+		bg_frame = gr_get_frame(frame->image,
+					frame->background_frame_index);
+		if (!bg_frame) {
+			fprintf(stderr,
+				"error: could not find background "
+				"frame %d for image %u frame %d\n",
+				frame->background_frame_index,
+				frame->image->image_id, frame->index);
+			frame->status = STATUS_RAM_LOADING_ERROR;
+			return;
+		}
+		gr_load_original_image(bg_frame);
+		if (!bg_frame->original_image) {
+			fprintf(stderr,
+				"error: could not load background frame %d for "
+				"image %u frame %d\n",
+				frame->background_frame_index,
+				frame->image->image_id, frame->index);
+			frame->status = STATUS_RAM_LOADING_ERROR;
+			return;
+		}
+	}
+
 	// Load the frame data image.
 	Imlib_Image frame_data_image = NULL;
 	char filename[MAX_FILENAME_SIZE];
@@ -1356,9 +1388,11 @@ static void gr_load_original_image(ImageFrame *frame) {
 	int image_height = frame->image->pix_height;
 
 	// Compose the image with the background color or frame.
-	if (frame->background_color != 0 || frame->background_frame_index ||
+	if (frame->background_color != 0 || bg_frame ||
 	    image_width != frame_data_width ||
 	    image_height != frame_data_height) {
+		GR_LOG("Composing the frame bg = 0x%08X, bgframe = %d\n",
+		       frame->background_color, frame->background_frame_index);
 		Imlib_Image composed_image = imlib_create_image(
 			image_width, image_height);
 		imlib_context_set_image(composed_image);
@@ -1367,29 +1401,11 @@ static void gr_load_original_image(ImageFrame *frame) {
 
 		// Start with the background frame or color.
 		imlib_context_set_blend(0);
-		if (frame->background_frame_index) {
-			ImageFrame *bg_frame = gr_get_frame(
-				frame->image, frame->background_frame_index);
-			if (!bg_frame) {
-				fprintf(stderr,
-					"error: could not find background "
-					"frame %d for image %u frame %d\n",
-					frame->background_frame_index,
-					frame->image->image_id, frame->index);
-				imlib_free_image();
-				imlib_context_set_image(frame_data_image);
-				imlib_free_image();
-				frame->status = STATUS_RAM_LOADING_ERROR;
-				return;
-			}
-			// Load the background frame if needed. Hopefully it's
-			// not recursive.
-			gr_load_original_image(bg_frame);
-			if (bg_frame->original_image)
-				imlib_blend_image_onto_image(
-					bg_frame->original_image, 1, 0, 0,
-					image_width, image_height, 0, 0,
-					image_width, image_height);
+		if (bg_frame && bg_frame->original_image) {
+			imlib_blend_image_onto_image(
+				bg_frame->original_image, 1, 0, 0,
+				image_width, image_height, 0, 0,
+				image_width, image_height);
 		} else {
 			int r = (frame->background_color >> 24) & 0xFF;
 			int g = (frame->background_color >> 16) & 0xFF;
@@ -1418,6 +1434,10 @@ static void gr_load_original_image(ImageFrame *frame) {
 
 	images_ram_size += gr_frame_current_ram_size(frame);
 	frame->status = STATUS_RAM_LOADING_SUCCESS;
+
+	GR_LOG("After loading image %u frame %d ram: %ld KiB\n",
+	       frame->image->image_id, frame->index,
+	       images_ram_size / 1024);
 }
 
 /// Premultiplies the alpha channel of the image data. The data is an array of
@@ -1587,6 +1607,10 @@ Pixmap gr_load_placement(ImagePlacement *placement, int frameidx, int cw, int ch
 	// Assign the pixmap to the frame and increase the ram size.
 	gr_set_frame_pixmap(placement, frameidx, pixmap);
 	images_ram_size += gr_placement_single_frame_ram_size(placement);
+
+	GR_LOG("After loading placement %u/%u frame %d ram: %ld KiB\n",
+	       frame->image->image_id, placement->placement_id, frame->index,
+	       images_ram_size / 1024);
 
 	// Free up ram if needed, but keep the placement we've loaded no matter
 	// what.
@@ -1947,7 +1971,8 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 
 	// Choose the frame index to display. Note that currently all image
 	// placements are synchronized.
-	int frameidx = gr_adjust_and_get_frame_index(placement->image);
+	int frameidx = gr_adjust_and_get_frame_index(placement->image,
+						     &common_animation_time);
 
 	// Load the frame.
 	Pixmap pixmap =
@@ -2036,6 +2061,7 @@ void gr_start_drawing(Drawable buf, int cw, int ch) {
 	current_cw = cw;
 	current_ch = ch;
 	drawing_start_time = clock();
+	clock_gettime(CLOCK_MONOTONIC, &common_animation_time);
 	imlib_context_set_drawable(buf);
 }
 
@@ -2600,6 +2626,11 @@ static ImageFrame *gr_new_image_or_frame_from_command(GraphicsCommand *cmd) {
 	frame->expected_size = cmd->size;
 	frame->format = cmd->format;
 	frame->compression = cmd->compression;
+	frame->background_color = cmd->background_color;
+	frame->background_frame_index = cmd->background_frame;
+	frame->gap = cmd->gap;
+	img->total_duration += frame->gap;
+	frame->blend = !cmd->replace_instead_of_blending;
 	// Set the frame data dimensions. It comes from different fields for
 	// different actions.
 	if (cmd->action == 'f') {
@@ -2924,8 +2955,11 @@ static void gr_handle_animation_control_command(GraphicsCommand *cmd) {
 					   cmd->edit_frame);
 			return;
 		}
-		if (cmd->gap)
+		if (cmd->gap) {
+			img->total_duration -= frame->gap;
 			frame->gap = cmd->gap;
+			img->total_duration += frame->gap;
+		}
 	}
 
 	// Set animation-related parameters of the image.
