@@ -1275,12 +1275,15 @@ static Imlib_Image gr_load_raw_pixel_data(ImageFrame *frame,
 	imlib_image_set_has_alpha(1);
 	DATA32* data = imlib_image_get_data();
 
+	// The default format is 32.
+	int format = frame->format ? frame->format : 32;
+
 	if (frame->compression == 0) {
-		gr_load_raw_pixel_data_uncompressed(data, file, frame->format,
+		gr_load_raw_pixel_data_uncompressed(data, file, format,
 						    total_pixels);
 	} else {
-		int ret = gr_load_raw_pixel_data_compressed(
-			data, file, frame->format, total_pixels);
+		int ret = gr_load_raw_pixel_data_compressed(data, file, format,
+							    total_pixels);
 		if (ret != 0) {
 			imlib_image_put_back_data(data);
 			imlib_free_image();
