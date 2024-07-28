@@ -271,25 +271,29 @@ typedef struct {
 
 /// Executes `code` for each frame of an image. Example:
 ///
-///     foreach_frame(ImageFrame *frame, image, {
+///     foreach_frame(image, frame, {
 ///         printf("Frame %d\n", frame->index);
 ///     });
 ///
-#define foreach_frame(framedecl, image, code) { size_t __i; \
+#define foreach_frame(image, framevar, code) { size_t __i; \
 	for (__i = 0; __i <= kv_size((image).frames_beyond_the_first); ++__i) { \
-		framedecl = __i == 0 ? &(image).first_frame : &kv_A((image).frames_beyond_the_first, __i - 1); \
+		ImageFrame *framevar = \
+			__i == 0 ? &(image).first_frame \
+			: &kv_A((image).frames_beyond_the_first, __i - 1); \
 		code; \
 	} }
 
 /// Executes `code` for each pixmap of a placement. Example:
 ///
-///     foreach_pixmap(Pixmap pixmap, placement, {
+///     foreach_pixmap(placement, pixmap, {
 ///         ...
 ///     });
 ///
-#define foreach_pixmap(pixmapdecl, placement, code) { size_t __i; \
+#define foreach_pixmap(placement, pixmapvar, code) { size_t __i; \
 	for (__i = 0; __i <= kv_size((placement).pixmaps_beyond_the_first); ++__i) { \
-		pixmapdecl = __i == 0 ? (placement).first_pixmap : kv_A((placement).pixmaps_beyond_the_first, __i - 1); \
+		Pixmap pixmapvar = \
+			__i == 0 ? (placement).first_pixmap \
+			: kv_A((placement).pixmaps_beyond_the_first, __i - 1); \
 		code; \
 	} }
 
@@ -329,6 +333,10 @@ static Milliseconds drawing_start_time;
 static uint64_t global_command_counter = 0;
 /// The next redraw times for each row of the terminal. Used for animations.
 static kvec_t(Milliseconds) next_redraw_times = {0, 0, NULL};
+/// The number of files loaded in the current redraw cycle.
+static int this_redraw_cycle_loaded_files = 0;
+/// The number of pixmaps loaded in the current redraw cycle.
+static int this_redraw_cycle_loaded_pixmaps = 0;
 
 /// The directory where the cache files are stored.
 static char cache_dir[MAX_FILENAME_SIZE - 16];
@@ -394,6 +402,13 @@ static void gr_image_reset_row_range(Image *img) {
 /// Returns the 1-based index of the last frame.
 static inline int gr_last_frame_index(Image *img) {
 	return kv_size(img->frames_beyond_the_first) + 1;
+}
+
+/// Normalize a potentially out-of-bounds frame index.
+static int gr_wrap_frame_index(Image *img, int index) {
+	if (index < 1)
+		return 1;
+	return (index - 1) % gr_last_frame_index(img) + 1;
 }
 
 /// Returns the frame with the given index. Returns NULL if the index is out of
@@ -536,7 +551,7 @@ static unsigned gr_placement_current_ram_size(ImagePlacement *placement) {
 	unsigned single_frame_size =
 		gr_placement_single_frame_ram_size(placement);
 	unsigned result = 0;
-	foreach_pixmap(Pixmap pixmap, *placement, {
+	foreach_pixmap(*placement, pixmap, {
 		if (pixmap)
 			result += single_frame_size;
 	});
@@ -561,7 +576,7 @@ static void gr_unload_frame(ImageFrame *frame) {
 
 /// Unload all frames of the image.
 static void gr_unload_all_frames(Image *img) {
-	foreach_frame(ImageFrame *frame, *img, {
+	foreach_frame(*img, frame, {
 		gr_unload_frame(frame);
 	});
 }
@@ -573,7 +588,7 @@ static void gr_unload_placement(ImagePlacement *placement) {
 	images_ram_size -= gr_placement_current_ram_size(placement);
 
 	Display *disp = imlib_context_get_display();
-	foreach_pixmap(Pixmap pixmap, *placement, {
+	foreach_pixmap(*placement, pixmap, {
 		if (pixmap)
 			XFreePixmap(disp, pixmap);
 	});
@@ -613,7 +628,7 @@ static void gr_delete_imagefile(ImageFrame *frame) {
 
 /// Deletes all on-disk cache files of the image (for each frame).
 static void gr_delete_imagefiles(Image *img) {
-	foreach_frame(ImageFrame *frame, *img, {
+	foreach_frame(*img, frame, {
 		gr_delete_imagefile(frame);
 	});
 }
@@ -646,7 +661,7 @@ static void gr_delete_image_keep_id(Image *img) {
 	if (!img)
 		return;
 	GR_LOG("Deleting image %u\n", img->image_id);
-	foreach_frame(ImageFrame *frame, *img, {
+	foreach_frame(*img, frame, {
 		gr_delete_imagefile(frame);
 		gr_unload_frame(frame);
 	});
@@ -1400,6 +1415,7 @@ static void gr_load_original_image(ImageFrame *frame) {
 	if (frame->format == 32 || frame->format == 24 ||
 	    (!frame_data_image && frame->format == 0))
 		frame_data_image = gr_load_raw_pixel_data(frame, filename);
+	this_redraw_cycle_loaded_files++;
 
 	if (!frame_data_image) {
 		if (frame->status != STATUS_RAM_LOADING_ERROR) {
@@ -1646,6 +1662,7 @@ Pixmap gr_load_placement(ImagePlacement *placement, int frameidx, int cw, int ch
 	// Assign the pixmap to the frame and increase the ram size.
 	gr_set_frame_pixmap(placement, frameidx, pixmap);
 	images_ram_size += gr_placement_single_frame_ram_size(placement);
+	this_redraw_cycle_loaded_pixmaps++;
 
 	GR_LOG("After loading placement %u/%u frame %d ram: %ld KiB\n",
 	       frame->image->image_id, placement->placement_id, frame->index,
@@ -1853,9 +1870,11 @@ void gr_dump_state() {
 			img->total_disk_size / 1024);
 		fprintf(stderr, "    total duration: %d\n", img->total_duration);
 		fprintf(stderr, "    frames: %d\n", gr_last_frame_index(img));
+		fprintf(stderr, "    row range: %d..%d\n", img->min_row,
+			img->max_row);
 		int64_t total_disk_size_computed = 0;
 		int total_duration_computed = 0;
-		foreach_frame(ImageFrame *frame, *img, {
+		foreach_frame(*img, frame, {
 			fprintf(stderr, "    Frame %d\n", frame->index);
 			if (frame->index == 0) {
 				fprintf(stderr, "        NOT INITIALIZED\n");
@@ -1928,6 +1947,9 @@ void gr_dump_state() {
 			fprintf(stderr, "        cell size: %ux%u\n",
 				placement->scaled_cw,
 				placement->scaled_ch);
+			fprintf(stderr, "        ram per frame: %u KiB\n",
+				gr_placement_single_frame_ram_size(placement) /
+					1024);
 			unsigned ram_size =
 				gr_placement_current_ram_size(placement);
 			fprintf(stderr,
@@ -1936,7 +1958,7 @@ void gr_dump_state() {
 				ram_size / 1024);
 			images_ram_size_computed += ram_size;
 			int frameidx = 1;
-			foreach_pixmap(Pixmap pixmap, *placement, {
+			foreach_pixmap(*placement, pixmap, {
 				fprintf(stderr, "        Frame %d pixmap %lu\n",
 					frameidx, pixmap);
 				++frameidx;
@@ -2060,6 +2082,14 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 		}
 	}
 
+	// Preload the next frame as a heuristic.
+	if (img->next_redraw) {
+		gr_load_placement(
+			placement,
+			gr_wrap_frame_index(img, img->current_frame + 1),
+			rect->cw, rect->ch);
+	}
+
 	// Load the frame.
 	Pixmap pixmap = gr_load_placement(placement, img->current_frame,
 					  rect->cw, rect->ch);
@@ -2146,6 +2176,8 @@ static int gr_getrectbottom(ImageRect *rect) {
 void gr_start_drawing(Drawable buf, int cw, int ch) {
 	current_cw = cw;
 	current_ch = ch;
+	this_redraw_cycle_loaded_files = 0;
+	this_redraw_cycle_loaded_pixmaps = 0;
 	drawing_start_time = gr_now_ms();
 	imlib_context_set_drawable(buf);
 }
@@ -2179,9 +2211,6 @@ void gr_finish_drawing(Drawable buf) {
 	// In debug mode display additional info.
 	if (graphics_debug_mode) {
 		int milliseconds = drawing_end_time - drawing_start_time;
-		if (milliseconds > 0)
-			fprintf(stderr, "Frame rendering time: %d ms\n",
-				milliseconds);
 
 		Display *disp = imlib_context_get_display();
 		GC gc = XCreateGC(disp, buf, 0, NULL);
@@ -2204,6 +2233,12 @@ void gr_finish_drawing(Drawable buf) {
 		XSetForeground(disp, gc, 0xFFFFFFFF);
 		XDrawString(disp, buf, gc, 0, 14, info, strlen(info));
 		XFreeGC(disp, gc);
+
+		if (milliseconds > 0) {
+			fprintf(stderr, "%s  (loaded %d files, %d pixmaps)\n",
+				info, this_redraw_cycle_loaded_files,
+				this_redraw_cycle_loaded_pixmaps);
+		}
 	}
 
 	// Check the limits in case we have used too much ram for placements.
