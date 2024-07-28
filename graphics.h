@@ -11,17 +11,26 @@ void gr_deinit();
 /// Add an image rectangle to a list if rectangles to draw. This function may
 /// actually draw some rectangles, or it may wait till more rectangles are
 /// appended. Must be called between `gr_start_drawing` and `gr_finish_drawing`.
+/// - `start_col..end_col` and `start_row..end_row` define the part of the image
+///    to draw.
 /// - `start_col` and `start_row` are zero-based.
 /// - `end_col` and `end_row` are exclusive (beyond the last col/row).
+/// - `x_col` and `y_row` are the coordinates of the top-left corner of the
+///   image in the terminal grid.
+/// - `x_pix` and `y_pix` are the same but in pixels.
 /// - `reverse` indicates whether colors should be inverted.
 void gr_append_imagerect(Drawable buf, uint32_t image_id, uint32_t placement_id,
 			 int start_col, int end_col, int start_row, int end_row,
-			 int x_pix, int y_pix, int cw, int ch, int reverse);
+			 int x_col, int y_row, int x_pix, int y_pix, int cw,
+			 int ch, int reverse);
 /// Prepare for image drawing. `cw` and `ch` are dimensions of the cell.
 void gr_start_drawing(Drawable buf, int cw, int ch);
 /// Finish image drawing. This functions will draw all the rectangles left to
 /// draw.
 void gr_finish_drawing(Drawable buf);
+/// Mark rows containing animations as dirty if it's time to redraw them. Must
+/// be called right after `gr_start_drawing`.
+void gr_mark_dirty_animations(int *dirty, int rows);
 
 /// Parse and execute a graphics command. `buf` must start with 'G' and contain
 /// at least `len + 1` characters (including '\0'). Returns 1 on success.
@@ -60,6 +69,10 @@ extern GraphicsDebugMode graphics_debug_mode;
 
 /// Whether to display images or just draw bounding boxes.
 extern char graphics_display_images;
+
+/// The time in milliseconds until the next redraw to update animations.
+/// INT_MAX means no redraw is needed. Populated by `gr_finish_drawing`.
+extern int graphics_next_redraw_delay;
 
 #define MAX_GRAPHICS_RESPONSE_LEN 256
 

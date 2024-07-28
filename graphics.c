@@ -54,6 +54,11 @@
 #define MAX_INFO_LEN 256
 #define MAX_IMAGE_RECTS 20
 
+/// The type used in this file to represent time. Used both for time differences
+/// and absolute times (as milliseconds since an arbitrary point in time, see
+/// `initialization_time`).
+typedef int64_t Milliseconds;
+
 enum ScaleMode {
 	SCALE_MODE_UNSET = 0,
 	/// Stretch or shrink the image to fill the box, ignoring aspect ratio.
@@ -128,7 +133,7 @@ typedef struct ImageFrame {
 	/// The 1-based index of the frame. Zero if the frame isn't initialized.
 	int index;
 	/// The last time when the frame was displayed or otherwise touched.
-	struct timespec atime;
+	Milliseconds atime;
 	/// The background color of the frame in the 0xRRGGBBAA format.
 	uint32_t background_color;
 	/// The index of the background frame. Zero to use the color instead.
@@ -176,7 +181,7 @@ typedef struct Image {
 	/// image_id, and it also should be mentioned in responses.
 	uint32_t image_number;
 	/// The last time when the image was displayed or otherwise touched.
-	struct timespec atime;
+	Milliseconds atime;
 	/// The total duration of the animation in milliseconds.
 	int total_duration;
 	/// The total size of cached image files for all frames.
@@ -188,10 +193,17 @@ typedef struct Image {
 	int current_frame;
 	/// The state of the animation, see `AnimationState`.
 	char animation_state;
-	/// The last time when the current frame was displayed.
-	struct timespec current_frame_time;
-	/// The delay until the next frame should be displayed, in milliseconds.
-	unsigned next_redraw_delay;
+	/// The absolute time that is assumed to be the start of the current
+	/// frame (in ms since initialization).
+	Milliseconds current_frame_time;
+	/// The absolute time of the last redraw (in ms since initialization).
+	Milliseconds last_redraw;
+	/// The absolute time of the next redraw (in ms since initialization).
+	/// 0 means no redraw is scheduled.
+	Milliseconds next_redraw;
+	/// The range of terminal rows this image occupies, both ends are
+	/// inclusive. This may be an overapproximation.
+	int min_row, max_row;
 	/// The unscaled pixel width and height of the image. Usually inherited
 	/// from the first frame.
 	int pix_width, pix_height;
@@ -214,7 +226,7 @@ typedef struct ImagePlacement {
 	/// The id of the placement. Must be nonzero.
 	uint32_t placement_id;
 	/// The last time when the placement was displayed or otherwise touched.
-	struct timespec atime;
+	Milliseconds atime;
 	/// Whether the placement shouldn't be unloaded from RAM.
 	char protected;
 	/// Whether the placement is used only for Unicode placeholders.
@@ -246,6 +258,8 @@ typedef struct {
 	uint32_t placement_id;
 	/// The position of the rectangle in pixels.
 	int x_pix, y_pix;
+	/// The starting row on the screen.
+	int y_row;
 	/// The part of the whole image to be drawn, in cells. Starts are
 	/// zero-based, ends are exclusive.
 	int start_col, end_col, start_row, end_row;
@@ -306,12 +320,15 @@ static int current_cw = 0, current_ch = 0;
 static uint32_t current_upload_image_id = 0;
 /// The index of the frame currently being uploaded.
 static int current_upload_frame_index = 0;
-/// The time when the current frame drawing started (used for debugging fps).
-static clock_t drawing_start_time;
-/// The time used to figure out the current frame for animations.
-static struct timespec common_animation_time;
+/// The time when the graphics module was initialized.
+static struct timespec initialization_time = {0};
+/// The time when the current frame drawing started, used for debugging fps and
+/// to calculate the current frame for animations.
+static Milliseconds drawing_start_time;
 /// The global index of the current command.
 static uint64_t global_command_counter = 0;
+/// The next redraw times for each row of the terminal. Used for animations.
+static kvec_t(Milliseconds) next_redraw_times = {0, 0, NULL};
 
 /// The directory where the cache files are stored.
 static char cache_dir[MAX_FILENAME_SIZE - 16];
@@ -323,6 +340,7 @@ static unsigned char reverse_table[256];
 GraphicsDebugMode graphics_debug_mode = GRAPHICS_DEBUG_NONE;
 char graphics_display_images = 1;
 GraphicsCommandResult graphics_command_result = {0};
+int graphics_next_redraw_delay = INT_MAX;
 
 // Defined in config.h
 extern const char graphics_cache_dir_template[];
@@ -334,8 +352,26 @@ extern unsigned graphics_max_total_placements;
 extern double graphics_excess_tolerance_ratio;
 
 
+////////////////////////////////////////////////////////////////////////////////
+// Basic helpers.
+////////////////////////////////////////////////////////////////////////////////
+
 #define MIN(a, b)		((a) < (b) ? (a) : (b))
 #define MAX(a, b)		((a) < (b) ? (b) : (a))
+
+/// Returns the difference between `end` and `start` in milliseconds.
+static int64_t gr_timediff_ms(const struct timespec *end,
+			      const struct timespec *start) {
+	return (end->tv_sec - start->tv_sec) * 1000 +
+	       (end->tv_nsec - start->tv_nsec) / 1000000;
+}
+
+/// Returns the current time in milliseconds since the initialization.
+static Milliseconds gr_now_ms() {
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return gr_timediff_ms(&now, &initialization_time);
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // Logging.
@@ -347,6 +383,12 @@ extern double graphics_excess_tolerance_ratio;
 ////////////////////////////////////////////////////////////////////////////////
 // Basic image management functions (create, delete, find, etc).
 ////////////////////////////////////////////////////////////////////////////////
+
+/// Resets the row range of the image to the empty range.
+static void gr_image_reset_row_range(Image *img) {
+	img->min_row = INT_MAX;
+	img->max_row = INT_MIN;
+}
 
 /// Returns the 1-based index of the last frame.
 static inline int gr_last_frame_index(Image *img) {
@@ -645,38 +687,25 @@ static void gr_delete_all_images() {
 	kh_clear(id2image, images);
 }
 
-/// A helper to compare timespecs.
-int gr_cmp_timespec(const struct timespec *t1, const struct timespec *t2) {
-	if (t1->tv_sec < t2->tv_sec)
-		return -1;
-	if (t1->tv_sec > t2->tv_sec)
-		return 1;
-	if (t1->tv_nsec < t2->tv_nsec)
-		return -1;
-	if (t1->tv_nsec > t2->tv_nsec)
-		return 1;
-	return 0;
-}
-
 /// A helper to compare frames by atime for qsort.
 static int gr_cmp_frames_by_atime(const void *a, const void *b) {
 	ImageFrame *frame_a = *(ImageFrame *const *)a;
 	ImageFrame *frame_b = *(ImageFrame *const *)b;
-	return gr_cmp_timespec(&frame_a->atime, &frame_b->atime);
+	return frame_a->atime - frame_b->atime;
 }
 
 /// A helper to compare images by atime for qsort.
 static int gr_cmp_images_by_atime(const void *a, const void *b) {
 	Image *img_a = *(Image *const *)a;
 	Image *img_b = *(Image *const *)b;
-	return gr_cmp_timespec(&img_a->atime, &img_b->atime);
+	return img_a->atime - img_b->atime;
 }
 
 /// A helper to compare placements by atime for qsort.
 static int gr_cmp_placements_by_atime(const void *a, const void *b) {
 	ImagePlacement *p_a = *(ImagePlacement **)a;
 	ImagePlacement *p_b = *(ImagePlacement **)b;
-	return gr_cmp_timespec(&p_a->atime, &p_b->atime);
+	return p_a->atime - p_b->atime;
 }
 
 /// Returns an array of pointers to all images sorted by atime. The size of the
@@ -835,19 +864,17 @@ void gr_unload_images_to_reduce_ram() {
 
 /// Update the atime of the image.
 static void gr_touch_image(Image *img) {
-	clock_gettime(CLOCK_MONOTONIC, &img->atime);
+	img->atime = gr_now_ms();
 }
 
 /// Update the atime of the frame.
 static void gr_touch_frame(ImageFrame *frame) {
-	clock_gettime(CLOCK_MONOTONIC, &frame->atime);
-	frame->image->atime = frame->atime;
+	frame->image->atime = frame->atime = gr_now_ms();
 }
 
 /// Update the atime of the placement. Touches the images too.
 static void gr_touch_placement(ImagePlacement *placement) {
-	clock_gettime(CLOCK_MONOTONIC, &placement->atime);
-	placement->image->atime = placement->atime;
+	placement->image->atime = placement->atime = gr_now_ms();
 }
 
 /// Creates a new image with the given id. If an image with that id already
@@ -867,6 +894,7 @@ static Image *gr_new_image(uint32_t id) {
 	GR_LOG("Creating image %u\n", id);
 	img = malloc(sizeof(Image));
 	memset(img, 0, sizeof(Image));
+	gr_image_reset_row_range(img);
 	img->placements = kh_init(id2placement);
 	int ret;
 	khiter_t k = kh_put(id2image, images, id, &ret);
@@ -1014,59 +1042,76 @@ static void gr_infer_placement_size_maybe(ImagePlacement *placement) {
 }
 
 /// Adjusts the current frame index if enough time has passed since the display
-/// of the current frame. Returns the new frame index. Also computes the delay
-/// until the next redraw of this image. The current time is passed as an
-/// argument so that all animations are in sync.
-static int gr_adjust_and_get_frame_index(Image *img, struct timespec *now) {
+/// of the current frame. Also computes the delay until the next redraw of this
+/// image. The current time is passed as an argument so that all animations are
+/// in sync.
+static void gr_update_frame_index(Image *img, Milliseconds now) {
 	if (img->current_frame == 0) {
-		clock_gettime(CLOCK_MONOTONIC, &img->current_frame_time);
+		img->current_frame_time = now;
 		img->current_frame = 1;
-		img->next_redraw_delay = MAX(1, img->first_frame.gap);
-		return img->current_frame;
+		img->next_redraw = now + MAX(1, img->first_frame.gap);
+		return;
 	}
 	// If the animation is stopped, show the current frame.
 	if (!img->animation_state ||
 	    img->animation_state == ANIMATION_STATE_STOPPED) {
 		// The next redraw is never (unless the state is changed).
-		img->next_redraw_delay = -1;
-		return img->current_frame;
+		img->next_redraw = 0;
+		return;
 	}
 	// If we are loading and we reached the last frame, show the last frame.
 	if (img->animation_state == ANIMATION_STATE_LOADING &&
 	    img->current_frame == gr_last_frame_index(img)) {
-		img->next_redraw_delay =
-			MAX(1, gr_get_frame(img, img->current_frame)->gap);
-		return img->current_frame;
+		// The next redraw is never (unless the state is changed).
+		img->next_redraw = 0;
+		return;
 	}
 
 	// Check how many milliseconds passed since the current frame was shown.
-	int passed_ms =
-		(now->tv_sec - img->current_frame_time.tv_sec) * 1000 +
-		(now->tv_nsec - img->current_frame_time.tv_nsec) / 1000000;
+	fprintf(stderr, "now: %ld\n", now);
+	fprintf(stderr, "current_frame_time: %ld\n", img->current_frame_time);
+	int passed_ms = now - img->current_frame_time;
+	// If the animation is looping and too much time has passes, we can
+	// make a shortcut.
+	if (img->animation_state == ANIMATION_STATE_LOOPING &&
+	    img->total_duration > 0 && passed_ms >= img->total_duration) {
+		passed_ms %= img->total_duration;
+		img->current_frame_time =
+			now - (img->total_duration - passed_ms);
+	}
 	// Find the next frame.
 	int original_frame_index = img->current_frame;
+	fprintf(stderr, "passed_ms: %d\n", passed_ms);
 	while (1) {
 		ImageFrame *frame = gr_get_frame(img, img->current_frame);
 		if (!frame) {
+			fprintf(stderr, "Bad frame\n");
+			// The frame doesn't exist, go to the first frame.
 			img->current_frame = 1;
-			img->current_frame_time = *now;
-			img->next_redraw_delay = MAX(1, img->first_frame.gap);
-			return img->current_frame;
+			img->current_frame_time = now;
+			img->next_redraw = now + MAX(1, img->first_frame.gap);
+			return;
 		}
+		fprintf(stderr, "Frame gap: %d\n", frame->gap);
 		if (frame->gap >= 0 && passed_ms < frame->gap) {
+			fprintf(stderr, "Same frame\n");
+			fprintf(stderr, "current_frame_time: %ld\n", img->current_frame_time);
 			// Not enough time has passed, we are still in the same
 			// frame, and it's not a gapless frame.
-			img->next_redraw_delay = MAX(1, frame->gap - passed_ms);
-			return img->current_frame;
+			img->next_redraw =
+				img->current_frame_time + MAX(1, frame->gap);
+			fprintf(stderr, "next_redraw: %ld\n", img->next_redraw);
+			return;
 		}
 		// Otherwise go to the next frame.
 		passed_ms -= MAX(0, frame->gap);
+		fprintf(stderr, "next passed_ms: %d\n", passed_ms);
 		if (img->current_frame >= gr_last_frame_index(img)) {
 			// It's the last frame, if the animation is loading,
 			// remain on it.
 			if (img->animation_state == ANIMATION_STATE_LOADING) {
-				img->next_redraw_delay = MAX(1, frame->gap);
-				return img->current_frame;
+				img->next_redraw = 0;
+				return;
 			}
 			// Otherwise the animation is looping.
 			img->current_frame = 1;
@@ -1076,22 +1121,22 @@ static int gr_adjust_and_get_frame_index(Image *img, struct timespec *now) {
 		}
 		// Make sure we don't get stuck in an infinite loop.
 		if (img->current_frame == original_frame_index) {
-			// We loop through all frames, but haven't reached the
+			fprintf(stderr, "Too much time\n");
+			// We looped through all frames, but haven't reached the
 			// next frame yet. This may happen if too much time has
 			// passed since the last redraw or all the frames are
 			// gapless. Just move on to the next frame.
 			img->current_frame++;
 			if (img->current_frame > gr_last_frame_index(img))
 				img->current_frame = 1;
-			img->current_frame_time = *now;
-			img->next_redraw_delay = MAX(
+			img->current_frame_time = now;
+			img->next_redraw = now + MAX(
 				1, gr_get_frame(img, img->current_frame)->gap);
-			return img->current_frame;
+			return;
 		}
-		// Adjust the start time of the frame.
-		img->current_frame_time.tv_sec += frame->gap / 1000;
-		img->current_frame_time.tv_nsec +=
-			(frame->gap % 1000) * 1000000;
+		// Adjust the start time of the frame. The next redraw time will
+		// be set in the next iteration.
+		img->current_frame_time += MAX(0, frame->gap);
 	}
 }
 
@@ -1656,6 +1701,9 @@ static void gr_make_sure_tmpdir_exists() {
 
 /// Initialize the graphics module.
 void gr_init(Display *disp, Visual *vis, Colormap cm) {
+	// Set the initialization time.
+	clock_gettime(CLOCK_MONOTONIC, &initialization_time);
+
 	// Create the temporary dir.
 	if (!gr_create_cache_dir())
 		abort();
@@ -1676,6 +1724,7 @@ void gr_init(Display *disp, Visual *vis, Colormap cm) {
 
 	// Create data structures.
 	images = kh_init(id2image);
+	kv_init(next_redraw_times);
 
 	atexit(gr_deinit);
 }
@@ -1765,10 +1814,9 @@ void gr_get_placement_description(uint32_t image_id, uint32_t placement_id,
 		 img->first_frame.original_image ? "loaded" : "not loaded");
 }
 
-/// Prints the time difference between now and past in a human-readable format.
-static void gr_print_ago(struct timespec *now, struct timespec *past) {
-	double seconds = (now->tv_sec - past->tv_sec) +
-			 (now->tv_nsec - past->tv_nsec) / 1e9;
+/// Prints a time difference in a human-readable format.
+static void gr_print_ago(Milliseconds diff) {
+	double seconds = (double)diff / 1000.0;
 
 	if (seconds < 1)
 		fprintf(stderr, "%.2f sec ago\n", seconds);
@@ -1794,8 +1842,7 @@ void gr_dump_state() {
 	fprintf(stderr, "Estimated Disk usage: %ld KiB\n",
 		images_disk_size / 1024);
 
-	struct timespec now;
-	clock_gettime(CLOCK_MONOTONIC, &now);
+	Milliseconds now = gr_now_ms();
 
 	int64_t images_ram_size_computed = 0;
 	int64_t images_disk_size_computed = 0;
@@ -1809,7 +1856,7 @@ void gr_dump_state() {
 		fprintf(stderr, "    global command index %lu\n",
 			img->global_command_index);
 		fprintf(stderr, "    accessed ");
-		gr_print_ago(&now, &img->atime);
+		gr_print_ago(img->atime - now);
 		fprintf(stderr, "    total disk size: %u KiB\n",
 			img->total_disk_size / 1024);
 		fprintf(stderr, "    total duration: %d\n", img->total_duration);
@@ -1880,7 +1927,7 @@ void gr_dump_state() {
 				fprintf(stderr,
 					"        ERROR: WRONG IMAGE POINTER\n");
 			fprintf(stderr, "        accessed ");
-			gr_print_ago(&now, &placement->atime);
+			gr_print_ago(placement->atime - now);
 			fprintf(stderr, "        scale_mode = %u\n",
 				placement->scale_mode);
 			fprintf(stderr,
@@ -1959,6 +2006,22 @@ static void gr_showrect(Drawable buf, ImageRect *rect) {
 	XFreeGC(disp, gc);
 }
 
+/// Updates the next redraw time for the given row. Resizes the
+/// next_redraw_times array if needed.
+static void gr_update_next_redraw_time(int row, Milliseconds next_redraw) {
+	if (next_redraw == 0)
+		return;
+	if (row >= kv_size(next_redraw_times)) {
+		size_t old_size = kv_size(next_redraw_times);
+		kv_a(Milliseconds, next_redraw_times, row);
+		for (size_t i = old_size; i <= row; ++i)
+			kv_A(next_redraw_times, i) = 0;
+	}
+	Milliseconds old_value = kv_A(next_redraw_times, row);
+	if (old_value == 0 || old_value > next_redraw)
+		kv_A(next_redraw_times, row) = next_redraw;
+}
+
 /// Draws the given part of an image.
 static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 	ImagePlacement *placement =
@@ -1972,14 +2035,44 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 		return;
 	}
 
-	// Choose the frame index to display. Note that currently all image
-	// placements are synchronized.
-	int frameidx = gr_adjust_and_get_frame_index(placement->image,
-						     &common_animation_time);
+	Image *img = placement->image;
+
+	if (img->last_redraw < drawing_start_time) {
+		// This is the first time we draw this image in this redraw
+		// cycle. Update the frame index we are going to display. Note
+		// that currently all image placements are synchronized.
+		int old_frame = img->current_frame;
+		gr_update_frame_index(img, drawing_start_time);
+		img->last_redraw = drawing_start_time;
+		// If the frame changed, it means that we will redraw the whole
+		// image in this cycle and will be able to recompute the full
+		// row range. Erase the old row range.
+		if (old_frame != img->current_frame)
+			gr_image_reset_row_range(img);
+	}
+
+	// Add the rows occupied by this rect to the row range of the image.
+	img->min_row = MIN(img->min_row, rect->y_row);
+	img->max_row =
+		MAX(img->max_row,
+		    rect->y_row + rect->end_row - rect->start_row - 1);
+
+	// Adjust next redraw times for the rows of this image. We need to
+	// update the whole range of rows occupied by the image to make sure
+	// all the rows are updated at the same time.
+	if (img->next_redraw) {
+		fprintf(stderr, "Next redraw in %ld ms\n",
+			img->next_redraw - drawing_start_time);
+		for (int row = img->min_row;
+		     row <= img->max_row; ++row) {
+			gr_update_next_redraw_time(
+				row, img->next_redraw);
+		}
+	}
 
 	// Load the frame.
-	Pixmap pixmap =
-		gr_load_placement(placement, frameidx, rect->cw, rect->ch);
+	Pixmap pixmap = gr_load_placement(placement, img->current_frame,
+					  rect->cw, rect->ch);
 
 	// If the image couldn't be loaded, display the bounding box.
 	if (!pixmap) {
@@ -2063,8 +2156,7 @@ static int gr_getrectbottom(ImageRect *rect) {
 void gr_start_drawing(Drawable buf, int cw, int ch) {
 	current_cw = cw;
 	current_ch = ch;
-	drawing_start_time = clock();
-	clock_gettime(CLOCK_MONOTONIC, &common_animation_time);
+	drawing_start_time = gr_now_ms();
 	imlib_context_set_drawable(buf);
 }
 
@@ -2080,12 +2172,24 @@ void gr_finish_drawing(Drawable buf) {
 		gr_freerect(rect);
 	}
 
+	// Compute the delay until the next redraw as the minimum of the next
+	// redraw delays for all rows.
+	Milliseconds drawing_end_time = gr_now_ms();
+	graphics_next_redraw_delay = INT_MAX;
+	for (int row = 0; row < kv_size(next_redraw_times); ++row) {
+		Milliseconds row_next_redraw = kv_A(next_redraw_times, row);
+		if (row_next_redraw > 0) {
+			int delay = MAX(1, row_next_redraw - drawing_end_time);
+			graphics_next_redraw_delay =
+				MIN(graphics_next_redraw_delay, delay);
+			fprintf(stderr, "%d: %d ", row, delay);
+		}
+	}
+	fprintf(stderr, "\n");
+
 	// In debug mode display additional info.
 	if (graphics_debug_mode) {
-		clock_t drawing_end_time = clock();
-		int milliseconds = 1000 *
-				   (drawing_end_time - drawing_start_time) /
-				   CLOCKS_PER_SEC;
+		int milliseconds = drawing_end_time - drawing_start_time;
 		if (milliseconds > 0)
 			fprintf(stderr, "Frame rendering time: %d ms\n",
 				milliseconds);
@@ -2096,14 +2200,16 @@ void gr_finish_drawing(Drawable buf) {
 			graphics_debug_mode == GRAPHICS_DEBUG_LOG_AND_BOXES
 				? "(boxes shown) "
 				: "";
+		int redraw_delay = graphics_next_redraw_delay == INT_MAX
+					   ? -1
+					   : graphics_next_redraw_delay;
 		char info[MAX_INFO_LEN];
 		snprintf(info, MAX_INFO_LEN,
-			 "%sFrame rendering time: %d ms  "
-			 "Image storage ram: %ld "
-			 "KiB disk: %ld KiB  count: %d   cell %dx%d",
+			 "%sRender time: %d ms  ram %ld K  disk %ld K  count "
+			 "%d  cell %dx%d  delay %d",
 			 debug_mode_str, milliseconds, images_ram_size / 1024,
 			 images_disk_size / 1024, kh_size(images), current_cw,
-			 current_ch);
+			 current_ch, redraw_delay);
 		XSetForeground(disp, gc, 0xFF000000);
 		XFillRectangle(disp, buf, gc, 0, 0, 600, 16);
 		XSetForeground(disp, gc, 0xFFFFFFFF);
@@ -2118,7 +2224,8 @@ void gr_finish_drawing(Drawable buf) {
 // Add an image rectangle to the list of rectangles to draw.
 void gr_append_imagerect(Drawable buf, uint32_t image_id, uint32_t placement_id,
 			 int start_col, int end_col, int start_row, int end_row,
-			 int x_pix, int y_pix, int cw, int ch, int reverse) {
+			 int x_col, int y_row, int x_pix, int y_pix, int cw,
+			 int ch, int reverse) {
 	current_cw = cw;
 	current_ch = ch;
 
@@ -2129,6 +2236,7 @@ void gr_append_imagerect(Drawable buf, uint32_t image_id, uint32_t placement_id,
 	new_rect.end_col = end_col;
 	new_rect.start_row = start_row;
 	new_rect.end_row = end_row;
+	new_rect.y_row = y_row;
 	new_rect.x_pix = x_pix;
 	new_rect.y_pix = y_pix;
 	new_rect.ch = ch;
@@ -2183,6 +2291,29 @@ void gr_append_imagerect(Drawable buf, uint32_t image_id, uint32_t placement_id,
 	}
 	// Start a new rectangle in `free_rect`.
 	*free_rect = new_rect;
+}
+
+/// Mark rows containing animations as dirty if it's time to redraw them. Must
+/// be called right after `gr_start_drawing`.
+void gr_mark_dirty_animations(int *dirty, int rows) {
+	fprintf(stderr, "rows %d\n", rows);
+	if (rows < kv_size(next_redraw_times))
+		kv_size(next_redraw_times) = rows;
+	if (rows * 2 < kv_max(next_redraw_times))
+		kv_resize(Milliseconds, next_redraw_times, rows);
+	for (int i = 0; i < MIN(rows, kv_size(next_redraw_times)); ++i) {
+		if (dirty[i]) {
+			fprintf(stderr, "d %d ", i);
+			kv_A(next_redraw_times, i) = 0;
+			continue;
+		}
+		Milliseconds next_update = kv_A(next_redraw_times, i);
+		if (next_update > 0 && next_update <= drawing_start_time) {
+			dirty[i] = 1;
+			kv_A(next_redraw_times, i) = 0;
+		}
+	}
+	fprintf(stderr, "\n");
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -2349,7 +2480,8 @@ static void gr_reportsuccess_cmd(GraphicsCommand *cmd) {
 
 /// Creates the 'OK' response to the current command (unless suppressed).
 static void gr_reportsuccess_frame(ImageFrame *frame) {
-	uint32_t id = frame->image->query_id ? frame->image->query_id : frame->image->image_id;
+	uint32_t id = frame->image->query_id ? frame->image->query_id
+					     : frame->image->image_id;
 	if (frame->quiet < 1)
 		gr_createresponse(id, frame->image->image_number,
 				  frame->image->initial_placement_id, "OK");
