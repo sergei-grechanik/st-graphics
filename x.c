@@ -2298,7 +2298,8 @@ run(void)
 			timeout = 0;  /* existing events might not set xfd */
 
 		/* Decrease the timeout if there are active animations. */
-		if (graphics_next_redraw_delay != INT_MAX)
+		if (graphics_next_redraw_delay != INT_MAX &&
+		    IS_SET(MODE_VISIBLE))
 			timeout = timeout == -1
 					  ? graphics_next_redraw_delay
 					  : MIN(timeout,

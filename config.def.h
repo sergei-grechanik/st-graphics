@@ -190,6 +190,8 @@ unsigned graphics_max_total_placements = 4096;
 /// The ratio by which limits can be exceeded. This is to reduce the frequency
 /// of image removal.
 double graphics_excess_tolerance_ratio = 0.05;
+/// The minimum delay between redraws caused by animations, in milliseconds.
+unsigned graphics_animation_min_delay = 20;
 
 /*
  * Force mouse select/shortcuts while mask is active (when MODE_MOUSE is set).

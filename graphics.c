@@ -350,6 +350,7 @@ extern unsigned graphics_max_single_image_ram_size;
 extern unsigned graphics_max_total_ram_size;
 extern unsigned graphics_max_total_placements;
 extern double graphics_excess_tolerance_ratio;
+extern unsigned graphics_animation_min_delay;
 
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1068,8 +1069,6 @@ static void gr_update_frame_index(Image *img, Milliseconds now) {
 	}
 
 	// Check how many milliseconds passed since the current frame was shown.
-	fprintf(stderr, "now: %ld\n", now);
-	fprintf(stderr, "current_frame_time: %ld\n", img->current_frame_time);
 	int passed_ms = now - img->current_frame_time;
 	// If the animation is looping and too much time has passes, we can
 	// make a shortcut.
@@ -1081,31 +1080,24 @@ static void gr_update_frame_index(Image *img, Milliseconds now) {
 	}
 	// Find the next frame.
 	int original_frame_index = img->current_frame;
-	fprintf(stderr, "passed_ms: %d\n", passed_ms);
 	while (1) {
 		ImageFrame *frame = gr_get_frame(img, img->current_frame);
 		if (!frame) {
-			fprintf(stderr, "Bad frame\n");
 			// The frame doesn't exist, go to the first frame.
 			img->current_frame = 1;
 			img->current_frame_time = now;
 			img->next_redraw = now + MAX(1, img->first_frame.gap);
 			return;
 		}
-		fprintf(stderr, "Frame gap: %d\n", frame->gap);
 		if (frame->gap >= 0 && passed_ms < frame->gap) {
-			fprintf(stderr, "Same frame\n");
-			fprintf(stderr, "current_frame_time: %ld\n", img->current_frame_time);
 			// Not enough time has passed, we are still in the same
 			// frame, and it's not a gapless frame.
 			img->next_redraw =
 				img->current_frame_time + MAX(1, frame->gap);
-			fprintf(stderr, "next_redraw: %ld\n", img->next_redraw);
 			return;
 		}
 		// Otherwise go to the next frame.
 		passed_ms -= MAX(0, frame->gap);
-		fprintf(stderr, "next passed_ms: %d\n", passed_ms);
 		if (img->current_frame >= gr_last_frame_index(img)) {
 			// It's the last frame, if the animation is loading,
 			// remain on it.
@@ -1121,7 +1113,6 @@ static void gr_update_frame_index(Image *img, Milliseconds now) {
 		}
 		// Make sure we don't get stuck in an infinite loop.
 		if (img->current_frame == original_frame_index) {
-			fprintf(stderr, "Too much time\n");
 			// We looped through all frames, but haven't reached the
 			// next frame yet. This may happen if too much time has
 			// passed since the last redraw or all the frames are
@@ -1731,15 +1722,16 @@ void gr_init(Display *disp, Visual *vis, Colormap cm) {
 
 /// Deinitialize the graphics module.
 void gr_deinit() {
-	if (!images)
-		return;
-	// Delete all images.
-	gr_delete_all_images();
 	// Remove the cache dir.
 	remove(cache_dir);
-	// Destroy the data structures.
-	kh_destroy(id2image, images);
-	images = NULL;
+	kv_destroy(next_redraw_times);
+	if (images) {
+		// Delete all images.
+		gr_delete_all_images();
+		// Destroy the data structures.
+		kh_destroy(id2image, images);
+		images = NULL;
+	}
 }
 
 /// Executes `command` with the name of the file corresponding to `image_id` as
@@ -2061,8 +2053,6 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 	// update the whole range of rows occupied by the image to make sure
 	// all the rows are updated at the same time.
 	if (img->next_redraw) {
-		fprintf(stderr, "Next redraw in %ld ms\n",
-			img->next_redraw - drawing_start_time);
 		for (int row = img->min_row;
 		     row <= img->max_row; ++row) {
 			gr_update_next_redraw_time(
@@ -2179,13 +2169,12 @@ void gr_finish_drawing(Drawable buf) {
 	for (int row = 0; row < kv_size(next_redraw_times); ++row) {
 		Milliseconds row_next_redraw = kv_A(next_redraw_times, row);
 		if (row_next_redraw > 0) {
-			int delay = MAX(1, row_next_redraw - drawing_end_time);
+			int delay = MAX(graphics_animation_min_delay,
+					row_next_redraw - drawing_end_time);
 			graphics_next_redraw_delay =
 				MIN(graphics_next_redraw_delay, delay);
-			fprintf(stderr, "%d: %d ", row, delay);
 		}
 	}
-	fprintf(stderr, "\n");
 
 	// In debug mode display additional info.
 	if (graphics_debug_mode) {
@@ -2296,14 +2285,12 @@ void gr_append_imagerect(Drawable buf, uint32_t image_id, uint32_t placement_id,
 /// Mark rows containing animations as dirty if it's time to redraw them. Must
 /// be called right after `gr_start_drawing`.
 void gr_mark_dirty_animations(int *dirty, int rows) {
-	fprintf(stderr, "rows %d\n", rows);
 	if (rows < kv_size(next_redraw_times))
 		kv_size(next_redraw_times) = rows;
 	if (rows * 2 < kv_max(next_redraw_times))
 		kv_resize(Milliseconds, next_redraw_times, rows);
 	for (int i = 0; i < MIN(rows, kv_size(next_redraw_times)); ++i) {
 		if (dirty[i]) {
-			fprintf(stderr, "d %d ", i);
 			kv_A(next_redraw_times, i) = 0;
 			continue;
 		}
@@ -2313,7 +2300,6 @@ void gr_mark_dirty_animations(int *dirty, int rows) {
 			kv_A(next_redraw_times, i) = 0;
 		}
 	}
-	fprintf(stderr, "\n");
 }
 
 ////////////////////////////////////////////////////////////////////////////////
