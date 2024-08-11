@@ -734,396 +734,6 @@ static void gr_delete_all_images() {
 	kh_clear(id2image, images);
 }
 
-/// A helper to compare frames by atime for qsort.
-static int gr_cmp_frames_by_atime(const void *a, const void *b) {
-	ImageFrame *frame_a = *(ImageFrame *const *)a;
-	ImageFrame *frame_b = *(ImageFrame *const *)b;
-	return frame_a->atime - frame_b->atime;
-}
-
-/// A helper to compare images by atime for qsort.
-static int gr_cmp_images_by_atime(const void *a, const void *b) {
-	Image *img_a = *(Image *const *)a;
-	Image *img_b = *(Image *const *)b;
-	return img_a->atime - img_b->atime;
-}
-
-/// A helper to compare placements by atime for qsort.
-static int gr_cmp_placements_by_atime(const void *a, const void *b) {
-	ImagePlacement *p_a = *(ImagePlacement **)a;
-	ImagePlacement *p_b = *(ImagePlacement **)b;
-	return p_a->atime - p_b->atime;
-}
-
-typedef kvec_t(Image *) ImageVec;
-typedef kvec_t(ImagePlacement *) ImagePlacementVec;
-typedef kvec_t(ImageFrame *) ImageFrameVec;
-
-/// Returns an array of pointers to all images sorted by atime.
-static ImageVec gr_get_images_sorted_by_atime() {
-	ImageVec vec;
-	kv_init(vec);
-	if (kh_size(images) == 0)
-		return vec;
-	kv_resize(Image *, vec, kh_size(images));
-	Image *img = NULL;
-	kh_foreach_value(images, img, { kv_push(Image *, vec, img); });
-	qsort(vec.a, kv_size(vec), sizeof(Image *), gr_cmp_images_by_atime);
-	return vec;
-}
-
-/// Returns an array of pointers to all placements sorted by atime.
-static ImagePlacementVec gr_get_placements_sorted_by_atime() {
-	ImagePlacementVec vec;
-	kv_init(vec);
-	if (total_placement_count == 0)
-		return vec;
-	kv_resize(ImagePlacement *, vec, total_placement_count);
-	Image *img = NULL;
-	ImagePlacement *placement = NULL;
-	kh_foreach_value(images, img, {
-		kh_foreach_value(img->placements, placement, {
-			kv_push(ImagePlacement *, vec, placement);
-		});
-	});
-	qsort(vec.a, kv_size(vec), sizeof(ImagePlacement *),
-	      gr_cmp_placements_by_atime);
-	return vec;
-}
-
-/// Returns an array of pointers to all frames sorted by atime.
-static ImageFrameVec gr_get_frames_sorted_by_atime() {
-	ImageFrameVec frames;
-	kv_init(frames);
-	Image *img = NULL;
-	kh_foreach_value(images, img, {
-		foreach_frame(*img, frame, {
-			kv_push(ImageFrame *, frames, frame);
-		});
-	});
-	qsort(frames.a, kv_size(frames), sizeof(ImageFrame *),
-	      gr_cmp_frames_by_atime);
-	return frames;
-}
-
-/// An object that can be unloaded from RAM.
-typedef struct {
-	/// Some score, probably based on access time. The lower the score, the
-	/// more likely the object should be unloaded.
-	int64_t score;
-	union {
-		ImagePlacement *placement;
-		ImageFrame *frame;
-	};
-	/// If zero, the object is the original image of `frame`, if non-zero,
-	/// the object is a pixmap of `frameidx`-th frame of `placement`.
-	int frameidx;
-} UnloadableObject;
-
-/// A helper to compare unloadable objects by score for qsort.
-static int gr_cmp_unloadable_objects(const void *a, const void *b) {
-	UnloadableObject *obj_a = (UnloadableObject *)a;
-	UnloadableObject *obj_b = (UnloadableObject *)b;
-	return obj_a->score - obj_b->score;
-}
-
-static void gr_unload_object(UnloadableObject *obj) {
-	if (obj->frameidx) {
-		if (obj->placement->protected_frame == obj->frameidx)
-			return;
-		gr_unload_pixmap(obj->placement, obj->frameidx);
-	} else {
-		gr_unload_frame(obj->frame);
-	}
-}
-
-typedef kvec_t(UnloadableObject) UnloadableObjectVec;
-
-static UnloadableObject gr_unloadable_object_for_frame(Milliseconds now,
-							ImageFrame *frame) {
-	UnloadableObject obj = {0};
-	obj.frameidx = 0;
-	obj.frame = frame;
-	Milliseconds atime = frame->atime;
-	obj.score = atime;
-	if (atime >= now - frame->image->total_duration * 2) {
-		
-		// TODO: Unclear what to do. My current thoughts:
-		// - Frame imlib objects should have their own atime, the time
-		// when they were actually used to create other frames or
-		// pixmaps. We sort them by this atime.
-		// - Pixmaps of active animations should be sorted approximately
-		// by the time when they are expected to be used.
-		// - We might want to introduce a separate limit for current
-		// animations. Do not unload active pixmaps until this limit
-		// is reached.
-		// - I still don't know if we want to unload frame imlib objects
-		// or pixmaps. Imlib objects may be expensive to restore, but
-		// they are not required if there is a pixmap. If pixmaps are
-		// large, we should sacrifice them first. If pixmaps are small,
-		// we should do the opposite. What if they are approximately the
-		// same size?
-		// - We should try to upload smaller pixmaps and transform them
-		// with xrender.
-		
-		// This is a recent frame, adjust its score so that we are more
-		// likely to unload newer, not older frames.
-		/* obj.score = now + (now - atime); */
-	}
-	obj.score += 100000;
-	return obj;
-}
-
-static UnloadableObject gr_unloadable_object_for_pixmap(Milliseconds now, ImageFrame *frame,
-							    ImagePlacement *placement) {
-	UnloadableObject obj = {0};
-	obj.frameidx = frame->index;
-	obj.placement = placement;
-	obj.score = placement->atime;
-	// Since we don't store pixmap atimes, use the
-	// oldest atime of the frame and the placement.
-	Milliseconds atime = MIN(placement->atime, frame->atime);
-	obj.score = atime;
-	if (atime >= now - frame->image->total_duration * 2) {
-		int dist = frame->index - frame->image->current_frame;
-		if (dist < 0)
-			dist += gr_last_frame_index(frame->image);
-		// This is a recent frame, adjust its score so that we are more
-		// likely to unload newer, not older frames.
-		obj.score = now + (frame->image->total_duration - dist);
-	}
-	return obj;
-}
-
-static UnloadableObjectVec gr_get_unloadable_objects_sorted_by_score(Milliseconds now) {
-	UnloadableObjectVec objects;
-	kv_init(objects);
-	Image *img = NULL;
-	ImagePlacement *placement = NULL;
-	kh_foreach_value(images, img, {
-		foreach_frame(*img, frame, {
-			if (!frame->original_image)
-				continue;
-			kv_push(UnloadableObject, objects,
-				gr_unloadable_object_for_frame(now, frame));
-			int frameidx = frame->index;
-			kh_foreach_value(img->placements, placement, {
-				if (!gr_get_frame_pixmap(placement, frameidx))
-					continue;
-				kv_push(UnloadableObject, objects,
-					gr_unloadable_object_for_pixmap(
-						now, frame, placement));
-			});
-		});
-	});
-	qsort(objects.a, kv_size(objects), sizeof(UnloadableObject),
-	      gr_cmp_unloadable_objects);
-	return objects;
-}
-
-/// A pixmap (defined by a placement and a frame index) and a delay.
-typedef struct {
-	ImagePlacement *placement;
-	int frameidx;
-	Milliseconds delay;
-} PixmapPtrAndDelay;
-
-/// A helper to compare pixmaps with delays. Pixmaps with higher delays come
-/// first.
-static int gr_cmp_pixmaps_with_delays(const void *a, const void *b) {
-	PixmapPtrAndDelay *p_a = (PixmapPtrAndDelay *)a;
-	PixmapPtrAndDelay *p_b = (PixmapPtrAndDelay *)b;
-	return p_b->delay - p_a->delay;
-}
-
-/// Unloads pixmaps of placements considered recent until the RAM usage is
-/// within the limit. Pixmaps are deleted based on how soon they are expected to
-/// be used again by animations.
-static void gr_unload_recent_pixmaps(ImagePlacement **placements, size_t size) {
-	kvec_t(PixmapPtrAndDelay) pixmaps;
-	kv_init(pixmaps);
-	kv_resize(PixmapPtrAndDelay, pixmaps, size);
-	for (size_t i = 0; i < size; i++) {
-		ImagePlacement *placement = placements[i];
-		int current_frameidx = placement->image->current_frame;
-		int frameidx = current_frameidx;
-		Milliseconds delay = 0;
-		while (1) {
-			if (gr_get_frame_pixmap(placement, frameidx)) {
-				PixmapPtrAndDelay entry = {placement, frameidx, delay};
-				kv_push(PixmapPtrAndDelay, pixmaps, entry);
-			}
-			delay += gr_get_frame(placement->image, frameidx)->gap;
-			frameidx = gr_wrap_frame_index(placement->image,
-							frameidx + 1);
-			if (frameidx == current_frameidx)
-				break;
-		}
-	}
-	qsort(pixmaps.a, kv_size(pixmaps), sizeof(PixmapPtrAndDelay),
-	      gr_cmp_pixmaps_with_delays);
-	for (int i = 0; i < kv_size(pixmaps); i++) {
-		if (images_ram_size <= graphics_max_total_ram_size)
-			break;
-		PixmapPtrAndDelay entry = kv_A(pixmaps, i);
-		gr_unload_pixmap(entry.placement, entry.frameidx);
-	}
-}
-
-/// Returns the limit adjusted by the excess tolerance ratio.
-static inline unsigned apply_tolerance(unsigned limit) {
-	return limit + (unsigned)(limit * graphics_excess_tolerance_ratio);
-}
-
-/// Checks RAM and disk cache limits and deletes/unloads some images.
-static void gr_check_limits() {
-	Milliseconds now = gr_now_ms();
-	ImageVec images_sorted = {0};
-	ImagePlacementVec placements_sorted = {0};
-	ImageFrameVec frames_sorted = {0};
-	UnloadableObjectVec objects_sorted = {0};
-	int images_begin = 0;
-	int placements_begin = 0;
-	char changed = 0;
-	// First reduce the number of images if there are too many.
-	if (kh_size(images) > apply_tolerance(graphics_max_total_placements)) {
-		GR_LOG("Too many images: %d\n", kh_size(images));
-		changed = 1;
-		images_sorted = gr_get_images_sorted_by_atime();
-		int to_delete = kv_size(images_sorted) -
-				graphics_max_total_placements;
-		for (; images_begin < to_delete; images_begin++)
-			gr_delete_image(images_sorted.a[images_begin]);
-	}
-	// Then reduce the number of placements if there are too many.
-	if (total_placement_count >
-	    apply_tolerance(graphics_max_total_placements)) {
-		GR_LOG("Too many placements: %d\n", total_placement_count);
-		changed = 1;
-		placements_sorted = gr_get_placements_sorted_by_atime();
-		int to_delete = kv_size(placements_sorted) -
-				graphics_max_total_placements;
-		for (; placements_begin < to_delete; placements_begin++) {
-			ImagePlacement *placement = placements_sorted.a[placements_begin];
-			if (placement->protected_frame)
-				break;
-			gr_delete_placement(placement);
-		}
-	}
-	// Then reduce the size of the image file cache. The files correspond to
-	// image frames.
-	if (images_disk_size >
-	    apply_tolerance(graphics_total_file_cache_size)) {
-		GR_LOG("Too big disk cache: %ld KiB\n",
-		       images_disk_size / 1024);
-		changed = 1;
-		frames_sorted = gr_get_frames_sorted_by_atime();
-		for (int i = 0; i < kv_size(frames_sorted); i++) {
-			if (images_disk_size <= graphics_total_file_cache_size)
-				break;
-			gr_delete_imagefile(kv_A(frames_sorted, i));
-		}
-	}
-	// Then unload images from RAM.
-	if (images_ram_size > apply_tolerance(graphics_max_total_ram_size)) {
-		changed = 1;
-		int frames_begin = 0;
-		GR_LOG("Too much ram: %ld KiB\n", images_ram_size / 1024);
-		objects_sorted = gr_get_unloadable_objects_sorted_by_score(now);
-		for (int i = 0; i < kv_size(objects_sorted); i++) {
-			if (images_ram_size <= graphics_max_total_ram_size)
-				break;
-			gr_unload_object(&kv_A(objects_sorted, i));
-		}
-		/* // Remove original images (imlib objects) of frames that are old */
-		/* // enough. */
-		/* GR_LOG("Too much ram: %ld KiB  Removing original images\n", */
-		/*        images_ram_size / 1024); */
-		/* if (!frames_sorted.a) */
-		/*         frames_sorted = gr_get_frames_sorted_by_atime(); */
-		/* for (; frames_begin < kv_size(frames_sorted); frames_begin++) { */
-		/*         if (images_ram_size <= graphics_max_total_ram_size) */
-		/*                 break; */
-		/*         if (frames_sorted.a[frames_begin]->atime > */
-		/*             recency_cutoff) */
-		/*                 break; */
-		/*         gr_unload_frame(frames_sorted.a[frames_begin]); */
-		/* } */
-		/* // Remove pixmaps of placements that are old enough. For */
-		/* // simplicity we remove all frames of a placement at once. */
-		/* if (images_ram_size > graphics_max_total_ram_size) { */
-		/*         GR_LOG("Too much ram: %ld KiB  Removing placement " */
-		/*                "pixmaps\n", */
-		/*                images_ram_size / 1024); */
-		/*         if (!placements_sorted.a) */
-		/*                 placements_sorted = */
-		/*                         gr_get_placements_sorted_by_atime(); */
-		/*         for (; placements_begin < kv_size(placements_sorted); */
-		/*              placements_begin++) { */
-		/*                 if (images_ram_size <= */
-		/*                     graphics_max_total_ram_size) */
-		/*                         break; */
-		/*                 ImagePlacement *placement = */
-		/*                         placements_sorted.a[placements_begin]; */
-		/*                 if (placement->atime > recency_cutoff) */
-		/*                         break; */
-		/*                 if (placement->protected) */
-		/*                         continue; */
-		/*                 gr_unload_placement(placement); */
-		/*         } */
-		/* } */
-		/* // If we still use too much RAM, unload recent images and */
-		/* // pixmaps. Start with original images of recent frames. */
-		/* if (images_ram_size > graphics_max_total_ram_size) { */
-		/*         GR_LOG("Too much ram: %ld KiB  Removing recent " */
-		/*                "images\n", */
-		/*                images_ram_size / 1024); */
-		/*         for (; frames_begin < kv_size(frames_sorted); */
-		/*              frames_begin++) { */
-		/*                 if (images_ram_size <= */
-		/*                     graphics_max_total_ram_size) */
-		/*                         break; */
-		/*                 gr_unload_frame(frames_sorted.a[frames_begin]); */
-		/*         } */
-		/* } */
-		/* // If we still use too much RAM, unload recent pixmaps. We */
-		/* // should avoid unloading pixmaps that will be used soon by */
-		/* // animations. */
-		/* if (images_ram_size > graphics_max_total_ram_size) { */
-		/*         GR_LOG("Too much ram: %ld KiB  Removing recent " */
-		/*                "pixmaps\n", */
-		/*                images_ram_size / 1024); */
-		/*         gr_unload_recent_pixmaps( */
-		/*                 placements_sorted.a + placements_begin, */
-		/*                 kv_size(placements_sorted) - placements_begin); */
-		/* } */
-	}
-	if (changed) {
-		GR_LOG("After cleaning:  ram: %ld KiB  disk: %ld KiB  "
-		       "img count: %d  placement count: %d\n",
-		       images_ram_size / 1024, images_disk_size / 1024,
-		       kh_size(images), total_placement_count);
-	}
-	kv_destroy(images_sorted);
-	kv_destroy(placements_sorted);
-	kv_destroy(frames_sorted);
-	kv_destroy(objects_sorted);
-}
-
-/// Unloads all images by user request.
-void gr_unload_images_to_reduce_ram() {
-	Image *img = NULL;
-	ImagePlacement *placement = NULL;
-	kh_foreach_value(images, img, {
-		kh_foreach_value(img->placements, placement, {
-			if (placement->protected_frame)
-				continue;
-			gr_unload_placement(placement);
-		});
-		gr_unload_all_frames(img);
-	});
-}
-
 /// Update the atime of the image.
 static void gr_touch_image(Image *img) {
 	img->atime = gr_now_ms();
@@ -1390,6 +1000,291 @@ static void gr_update_frame_index(Image *img, Milliseconds now) {
 		// be set in the next iteration.
 		img->current_frame_time += MAX(0, frame->gap);
 	}
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Unloading and deleting images to save resources.
+////////////////////////////////////////////////////////////////////////////////
+
+/// A helper to compare frames by atime for qsort.
+static int gr_cmp_frames_by_atime(const void *a, const void *b) {
+	ImageFrame *frame_a = *(ImageFrame *const *)a;
+	ImageFrame *frame_b = *(ImageFrame *const *)b;
+	return frame_a->atime - frame_b->atime;
+}
+
+/// A helper to compare images by atime for qsort.
+static int gr_cmp_images_by_atime(const void *a, const void *b) {
+	Image *img_a = *(Image *const *)a;
+	Image *img_b = *(Image *const *)b;
+	return img_a->atime - img_b->atime;
+}
+
+/// A helper to compare placements by atime for qsort.
+static int gr_cmp_placements_by_atime(const void *a, const void *b) {
+	ImagePlacement *p_a = *(ImagePlacement **)a;
+	ImagePlacement *p_b = *(ImagePlacement **)b;
+	return p_a->atime - p_b->atime;
+}
+
+typedef kvec_t(Image *) ImageVec;
+typedef kvec_t(ImagePlacement *) ImagePlacementVec;
+typedef kvec_t(ImageFrame *) ImageFrameVec;
+
+/// Returns an array of pointers to all images sorted by atime.
+static ImageVec gr_get_images_sorted_by_atime() {
+	ImageVec vec;
+	kv_init(vec);
+	if (kh_size(images) == 0)
+		return vec;
+	kv_resize(Image *, vec, kh_size(images));
+	Image *img = NULL;
+	kh_foreach_value(images, img, { kv_push(Image *, vec, img); });
+	qsort(vec.a, kv_size(vec), sizeof(Image *), gr_cmp_images_by_atime);
+	return vec;
+}
+
+/// Returns an array of pointers to all placements sorted by atime.
+static ImagePlacementVec gr_get_placements_sorted_by_atime() {
+	ImagePlacementVec vec;
+	kv_init(vec);
+	if (total_placement_count == 0)
+		return vec;
+	kv_resize(ImagePlacement *, vec, total_placement_count);
+	Image *img = NULL;
+	ImagePlacement *placement = NULL;
+	kh_foreach_value(images, img, {
+		kh_foreach_value(img->placements, placement, {
+			kv_push(ImagePlacement *, vec, placement);
+		});
+	});
+	qsort(vec.a, kv_size(vec), sizeof(ImagePlacement *),
+	      gr_cmp_placements_by_atime);
+	return vec;
+}
+
+/// Returns an array of pointers to all frames sorted by atime.
+static ImageFrameVec gr_get_frames_sorted_by_atime() {
+	ImageFrameVec frames;
+	kv_init(frames);
+	Image *img = NULL;
+	kh_foreach_value(images, img, {
+		foreach_frame(*img, frame, {
+			kv_push(ImageFrame *, frames, frame);
+		});
+	});
+	qsort(frames.a, kv_size(frames), sizeof(ImageFrame *),
+	      gr_cmp_frames_by_atime);
+	return frames;
+}
+
+/// An object that can be unloaded from RAM.
+typedef struct {
+	/// Some score, probably based on access time. The lower the score, the
+	/// more likely that the object should be unloaded.
+	int64_t score;
+	union {
+		ImagePlacement *placement;
+		ImageFrame *frame;
+	};
+	/// If zero, the object is the original image of `frame`, if non-zero,
+	/// the object is a pixmap of `frameidx`-th frame of `placement`.
+	int frameidx;
+} UnloadableObject;
+
+typedef kvec_t(UnloadableObject) UnloadableObjectVec;
+
+/// A helper to compare unloadable objects by score for qsort.
+static int gr_cmp_unloadable_objects(const void *a, const void *b) {
+	UnloadableObject *obj_a = (UnloadableObject *)a;
+	UnloadableObject *obj_b = (UnloadableObject *)b;
+	return obj_a->score - obj_b->score;
+}
+
+/// Unloads an unloadable object from RAM.
+static void gr_unload_object(UnloadableObject *obj) {
+	if (obj->frameidx) {
+		if (obj->placement->protected_frame == obj->frameidx)
+			return;
+		gr_unload_pixmap(obj->placement, obj->frameidx);
+	} else {
+		gr_unload_frame(obj->frame);
+	}
+}
+
+/// Creates an unloadable object for the imlib object of a frame.
+static UnloadableObject gr_unloadable_object_for_frame(Milliseconds now,
+						       ImageFrame *frame) {
+	UnloadableObject obj = {0};
+	obj.frameidx = 0;
+	obj.frame = frame;
+	Milliseconds atime = frame->atime;
+	obj.score = atime;
+	if (atime >= now - frame->image->total_duration * 2) {
+		// This is a recent frame, probably from an active animation.
+		// Score it above `now` to prefer unloading non-active frames.
+		// Randomize the score because it's not very clear in which
+		// order we want to unload them: reloading a frame may require
+		// reloading other frames.
+		obj.score = now + 1000 + rand() % 1000;
+	}
+	return obj;
+}
+
+/// Creates an unloadable object for a pixmap.
+static UnloadableObject
+gr_unloadable_object_for_pixmap(Milliseconds now, ImageFrame *frame,
+				ImagePlacement *placement) {
+	UnloadableObject obj = {0};
+	obj.frameidx = frame->index;
+	obj.placement = placement;
+	obj.score = placement->atime;
+	// Since we don't store pixmap atimes, use the
+	// oldest atime of the frame and the placement.
+	Milliseconds atime = MIN(placement->atime, frame->atime);
+	obj.score = atime;
+	if (atime >= now - frame->image->total_duration * 2) {
+		// This is a recent pixmap, probably from an active animation.
+		// Score it above `now` to prefer unloading non-active frames.
+		// Also assign higher scores to frames that are closer to the
+		// current frame (more likely to be used soon).
+		int num_frames = gr_last_frame_index(frame->image);
+		int dist = frame->index - frame->image->current_frame;
+		if (dist < 0)
+			dist += num_frames;
+		obj.score =
+			now + 1000 + (num_frames - dist) * 1000 / num_frames;
+		// If the pixmap is much larger than the imlib image, prefer to
+		// unload the pixmap by adding up to -1000 to the score. If the
+		// imlib image is larger, add up to +1000.
+		float imlib_size = gr_frame_current_ram_size(frame);
+		float pixmap_size =
+			gr_placement_single_frame_ram_size(placement);
+		obj.score +=
+			2000 * (imlib_size / (imlib_size + pixmap_size) - 0.5);
+	}
+	return obj;
+}
+
+/// Returns an array of unloadable objects sorted by score.
+static UnloadableObjectVec
+gr_get_unloadable_objects_sorted_by_score(Milliseconds now) {
+	UnloadableObjectVec objects;
+	kv_init(objects);
+	Image *img = NULL;
+	ImagePlacement *placement = NULL;
+	kh_foreach_value(images, img, {
+		foreach_frame(*img, frame, {
+			if (!frame->original_image)
+				continue;
+			kv_push(UnloadableObject, objects,
+				gr_unloadable_object_for_frame(now, frame));
+			int frameidx = frame->index;
+			kh_foreach_value(img->placements, placement, {
+				if (!gr_get_frame_pixmap(placement, frameidx))
+					continue;
+				kv_push(UnloadableObject, objects,
+					gr_unloadable_object_for_pixmap(
+						now, frame, placement));
+			});
+		});
+	});
+	qsort(objects.a, kv_size(objects), sizeof(UnloadableObject),
+	      gr_cmp_unloadable_objects);
+	return objects;
+}
+
+/// Returns the limit adjusted by the excess tolerance ratio.
+static inline unsigned apply_tolerance(unsigned limit) {
+	return limit + (unsigned)(limit * graphics_excess_tolerance_ratio);
+}
+
+/// Checks RAM and disk cache limits and deletes/unloads some images.
+static void gr_check_limits() {
+	Milliseconds now = gr_now_ms();
+	ImageVec images_sorted = {0};
+	ImagePlacementVec placements_sorted = {0};
+	ImageFrameVec frames_sorted = {0};
+	UnloadableObjectVec objects_sorted = {0};
+	int images_begin = 0;
+	int placements_begin = 0;
+	char changed = 0;
+	// First reduce the number of images if there are too many.
+	if (kh_size(images) > apply_tolerance(graphics_max_total_placements)) {
+		GR_LOG("Too many images: %d\n", kh_size(images));
+		changed = 1;
+		images_sorted = gr_get_images_sorted_by_atime();
+		int to_delete = kv_size(images_sorted) -
+				graphics_max_total_placements;
+		for (; images_begin < to_delete; images_begin++)
+			gr_delete_image(images_sorted.a[images_begin]);
+	}
+	// Then reduce the number of placements if there are too many.
+	if (total_placement_count >
+	    apply_tolerance(graphics_max_total_placements)) {
+		GR_LOG("Too many placements: %d\n", total_placement_count);
+		changed = 1;
+		placements_sorted = gr_get_placements_sorted_by_atime();
+		int to_delete = kv_size(placements_sorted) -
+				graphics_max_total_placements;
+		for (; placements_begin < to_delete; placements_begin++) {
+			ImagePlacement *placement =
+				placements_sorted.a[placements_begin];
+			if (placement->protected_frame)
+				break;
+			gr_delete_placement(placement);
+		}
+	}
+	// Then reduce the size of the image file cache. The files correspond to
+	// image frames.
+	if (images_disk_size >
+	    apply_tolerance(graphics_total_file_cache_size)) {
+		GR_LOG("Too big disk cache: %ld KiB\n",
+		       images_disk_size / 1024);
+		changed = 1;
+		frames_sorted = gr_get_frames_sorted_by_atime();
+		for (int i = 0; i < kv_size(frames_sorted); i++) {
+			if (images_disk_size <= graphics_total_file_cache_size)
+				break;
+			gr_delete_imagefile(kv_A(frames_sorted, i));
+		}
+	}
+	// Then unload images from RAM.
+	if (images_ram_size > apply_tolerance(graphics_max_total_ram_size)) {
+		changed = 1;
+		int frames_begin = 0;
+		GR_LOG("Too much ram: %ld KiB\n", images_ram_size / 1024);
+		objects_sorted = gr_get_unloadable_objects_sorted_by_score(now);
+		for (int i = 0; i < kv_size(objects_sorted); i++) {
+			if (images_ram_size <= graphics_max_total_ram_size)
+				break;
+			gr_unload_object(&kv_A(objects_sorted, i));
+		}
+	}
+	if (changed) {
+		GR_LOG("After cleaning:  ram: %ld KiB  disk: %ld KiB  "
+		       "img count: %d  placement count: %d\n",
+		       images_ram_size / 1024, images_disk_size / 1024,
+		       kh_size(images), total_placement_count);
+	}
+	kv_destroy(images_sorted);
+	kv_destroy(placements_sorted);
+	kv_destroy(frames_sorted);
+	kv_destroy(objects_sorted);
+}
+
+/// Unloads all images by user request.
+void gr_unload_images_to_reduce_ram() {
+	Image *img = NULL;
+	ImagePlacement *placement = NULL;
+	kh_foreach_value(images, img, {
+		kh_foreach_value(img->placements, placement, {
+			if (placement->protected_frame)
+				continue;
+			gr_unload_placement(placement);
+		});
+		gr_unload_all_frames(img);
+	});
 }
 
 ////////////////////////////////////////////////////////////////////////////////
