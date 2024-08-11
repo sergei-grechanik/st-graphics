@@ -1010,6 +1010,9 @@ static void gr_update_frame_index(Image *img, Milliseconds now) {
 static int gr_cmp_frames_by_atime(const void *a, const void *b) {
 	ImageFrame *frame_a = *(ImageFrame *const *)a;
 	ImageFrame *frame_b = *(ImageFrame *const *)b;
+	if (frame_a->atime == frame_b->atime)
+		return frame_a->image->global_command_index -
+		       frame_b->image->global_command_index;
 	return frame_a->atime - frame_b->atime;
 }
 
@@ -1017,6 +1020,9 @@ static int gr_cmp_frames_by_atime(const void *a, const void *b) {
 static int gr_cmp_images_by_atime(const void *a, const void *b) {
 	Image *img_a = *(Image *const *)a;
 	Image *img_b = *(Image *const *)b;
+	if (img_a->atime == img_b->atime)
+		return img_a->global_command_index -
+		       img_b->global_command_index;
 	return img_a->atime - img_b->atime;
 }
 
@@ -1024,6 +1030,9 @@ static int gr_cmp_images_by_atime(const void *a, const void *b) {
 static int gr_cmp_placements_by_atime(const void *a, const void *b) {
 	ImagePlacement *p_a = *(ImagePlacement **)a;
 	ImagePlacement *p_b = *(ImagePlacement **)b;
+	if (p_a->atime == p_b->atime)
+		return p_a->image->global_command_index -
+		       p_b->image->global_command_index;
 	return p_a->atime - p_b->atime;
 }
 
@@ -1120,7 +1129,8 @@ static UnloadableObject gr_unloadable_object_for_frame(Milliseconds now,
 	obj.frame = frame;
 	Milliseconds atime = frame->atime;
 	obj.score = atime;
-	if (atime >= now - frame->image->total_duration * 2) {
+	if (frame->image->total_duration &&
+	    atime >= now - frame->image->total_duration * 2) {
 		// This is a recent frame, probably from an active animation.
 		// Score it above `now` to prefer unloading non-active frames.
 		// Randomize the score because it's not very clear in which
@@ -1143,7 +1153,8 @@ gr_unloadable_object_for_pixmap(Milliseconds now, ImageFrame *frame,
 	// oldest atime of the frame and the placement.
 	Milliseconds atime = MIN(placement->atime, frame->atime);
 	obj.score = atime;
-	if (atime >= now - frame->image->total_duration * 2) {
+	if (frame->image->total_duration &&
+	    atime >= now - frame->image->total_duration * 2) {
 		// This is a recent pixmap, probably from an active animation.
 		// Score it above `now` to prefer unloading non-active frames.
 		// Also assign higher scores to frames that are closer to the
@@ -3581,19 +3592,19 @@ int gr_parse_command(char *buf, size_t len) {
 	}
 
 	// Set the action key ('a=') first because we need it to disambiguate
-	// some keys.
+	// some keys. Also set 'i=' and 'I=' for better error reporting.
 	for (unsigned i = 0; i < key_vals_count; ++i) {
-		if (*key_vals[i].key_start == 'a' && key_vals[i].key_len == 1) {
-			gr_set_keyvalue(&cmd, &key_vals[i]);
-			break;
+		if (key_vals[i].key_len == 1) {
+			char *start = key_vals[i].key_start;
+			if (*start == 'a' || *start == 'i' || *start == 'I') {
+				gr_set_keyvalue(&cmd, &key_vals[i]);
+				break;
+			}
 		}
 	}
 	// Set the rest of the keys.
-	for (unsigned i = 0; i < key_vals_count; ++i) {
-		if (*key_vals[i].key_start == 'a' && key_vals[i].key_len == 1)
-			continue;
+	for (unsigned i = 0; i < key_vals_count; ++i)
 		gr_set_keyvalue(&cmd, &key_vals[i]);
-	}
 
 	if (!cmd.payload)
 		cmd.payload = buf + len;
