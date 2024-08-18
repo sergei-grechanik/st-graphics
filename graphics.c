@@ -3495,7 +3495,7 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, KeyAndValue *kv) {
 			break; /*ignore*/
 		break;
 	case 'z':
-		if (cmd->action == 'f')
+		if (cmd->action == 'f' || cmd->action == 'a')
 			cmd->gap = num;
 		else
 			break; /*ignore*/
