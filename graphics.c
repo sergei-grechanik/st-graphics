@@ -397,16 +397,11 @@ static void gr_image_reset_row_range(Image *img) {
 	img->max_row = INT_MIN;
 }
 
-/// Returns the 1-based index of the last frame.
+/// Returns the 1-based index of the last frame. Note that you may want to use
+/// `gr_last_uploaded_frame_index` instead since the last frame may be not
+/// fully uploaded yet.
 static inline int gr_last_frame_index(Image *img) {
 	return kv_size(img->frames_beyond_the_first) + 1;
-}
-
-/// Normalize a potentially out-of-bounds frame index.
-static int gr_wrap_frame_index(Image *img, int index) {
-	if (index < 1)
-		return 1;
-	return (index - 1) % gr_last_frame_index(img) + 1;
 }
 
 /// Returns the frame with the given index. Returns NULL if the index is out of
@@ -426,6 +421,16 @@ static ImageFrame *gr_get_last_frame(Image *img) {
 	if (!img)
 		return NULL;
 	return gr_get_frame(img, gr_last_frame_index(img));
+}
+
+/// Returns the 1-based index of the last frame or the second-to-last frame if
+/// the last frame is not fully uploaded yet.
+static inline int gr_last_uploaded_frame_index(Image *img) {
+	int last_index = gr_last_frame_index(img);
+	if (last_index > 1 &&
+	    gr_get_frame(img, last_index)->status < STATUS_UPLOADING_SUCCESS)
+		return last_index - 1;
+	return last_index;
 }
 
 /// Returns the pixmap for the frame with the given index. Returns 0 if the
@@ -933,7 +938,7 @@ static void gr_update_frame_index(Image *img, Milliseconds now) {
 	}
 	// If we are loading and we reached the last frame, show the last frame.
 	if (img->animation_state == ANIMATION_STATE_LOADING &&
-	    img->current_frame == gr_last_frame_index(img)) {
+	    img->current_frame == gr_last_uploaded_frame_index(img)) {
 		// The next redraw is never (unless the state is changed).
 		img->next_redraw = 0;
 		return;
@@ -969,7 +974,7 @@ static void gr_update_frame_index(Image *img, Milliseconds now) {
 		}
 		// Otherwise go to the next frame.
 		passed_ms -= MAX(0, frame->gap);
-		if (img->current_frame >= gr_last_frame_index(img)) {
+		if (img->current_frame >= gr_last_uploaded_frame_index(img)) {
 			// It's the last frame, if the animation is loading,
 			// remain on it.
 			if (img->animation_state == ANIMATION_STATE_LOADING) {
@@ -989,7 +994,8 @@ static void gr_update_frame_index(Image *img, Milliseconds now) {
 			// passed since the last redraw or all the frames are
 			// gapless. Just move on to the next frame.
 			img->current_frame++;
-			if (img->current_frame > gr_last_frame_index(img))
+			if (img->current_frame >
+			    gr_last_uploaded_frame_index(img))
 				img->current_frame = 1;
 			img->current_frame_time = now;
 			img->next_redraw = now + MAX(
@@ -2030,6 +2036,8 @@ void gr_dump_state() {
 		fprintf(stderr, "    total duration: %d\n", img->total_duration);
 		fprintf(stderr, "    frames: %d\n", gr_last_frame_index(img));
 		fprintf(stderr, "    cur frame: %d\n", img->current_frame);
+		fprintf(stderr, "    animation state: %d\n",
+			img->animation_state);
 		fprintf(stderr, "    row range: %d..%d\n", img->min_row,
 			img->max_row);
 		int64_t total_disk_size_computed = 0;
@@ -2766,6 +2774,14 @@ static void gr_display_nonvirtual_placement(ImagePlacement *placement) {
 	       placement->cols, placement->rows);
 }
 
+/// Marks the rows that are occupied by the image as dirty.
+static void gr_schedule_image_redraw(Image *img) {
+	if (!img)
+		return;
+	gr_schedule_image_redraw_by_id(img->image_id, img->min_row,
+				       img->max_row);
+}
+
 /// Appends data from `payload` to the frame `frame` when using direct
 /// transmission. Note that we report errors only for the final command
 /// (`!more`) to avoid spamming the client. If the frame is not specified, use
@@ -2861,6 +2877,8 @@ static void gr_append_data(ImageFrame *frame, const char *payload, int more) {
 			frame->uploading_failure = ERROR_UNEXPECTED_SIZE;
 			gr_reportuploaderror(frame);
 		} else {
+			// Make sure to redraw all existing image instances.
+			gr_schedule_image_redraw(frame->image);
 			// Try to load the image into ram and report the result.
 			frame = gr_loadimage_and_report(frame);
 			// If there is a non-virtual image placement, we may
@@ -3066,7 +3084,9 @@ static ImageFrame *gr_handle_transmit_command(GraphicsCommand *cmd) {
 						ERROR_UNEXPECTED_SIZE;
 					gr_reportuploaderror(frame);
 				} else {
-					// Everything seems fine, try to load.
+					// Everything seems fine, try to load
+					// and redraw existing instances.
+					gr_schedule_image_redraw(frame->image);
 					frame = gr_loadimage_and_report(frame);
 				}
 			}
@@ -3289,6 +3309,9 @@ static void gr_handle_animation_control_command(GraphicsCommand *cmd) {
 		}
 	}
 	// TODO: Set the number of loops to cmd->loops
+
+	// Make sure we redraw all instances of the image.
+	gr_schedule_image_redraw(img);
 }
 
 /// Handles a command.

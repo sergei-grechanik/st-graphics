@@ -1389,6 +1389,23 @@ void gr_for_each_image_cell(int (*callback)(void *data, uint32_t image_id,
 	}
 }
 
+void gr_schedule_image_redraw_by_id(uint32_t image_id, int minrow, int maxrow) {
+	for (int row = MAX(0, minrow); row < MIN(term.row, maxrow + 1); ++row) {
+		if (term.dirty[row])
+			continue;
+		for (int col = 0; col < term.col; ++col) {
+			Glyph *gp = &term.line[row][col];
+			if (gp->mode & ATTR_IMAGE) {
+				uint32_t cell_image_id = tgetimgid(gp);
+				if (cell_image_id == image_id) {
+					term.dirty[row] = 1;
+					break;
+				}
+			}
+		}
+	}
+}
+
 void
 tdeletechar(int n)
 {

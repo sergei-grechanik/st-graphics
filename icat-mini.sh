@@ -400,11 +400,11 @@ upload_image_and_print_placeholder() {
                 gr_upload "q=2,a=f,i=${image_id},z=${delay}" "$frame"
             fi
 
-            # Play the animation in loop mode (s=3).
-            gr_command "a=a,v=1,s=3,i=${image_id}"
-
             frame_number=$((frame_number + 1))
         done
+
+        # Play the animation in loop mode (s=3).
+        gr_command "a=a,v=1,s=3,i=${image_id}"
 
         # Remove the temporary directory, but do it in the background with a
         # delay to avoid removing files before they are loaded by the terminal.

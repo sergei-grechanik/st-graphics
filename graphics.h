@@ -58,6 +58,10 @@ void gr_for_each_image_cell(int (*callback)(void *data, uint32_t image_id,
 					    int row, char is_classic),
 			    void *data);
 
+/// Marks all the rows containing the image with `image_id` as dirty. The rows
+/// to search are limited to the ones between `minrow` and `maxrow` (inclusive).
+void gr_schedule_image_redraw_by_id(uint32_t image_id, int minrow, int maxrow);
+
 typedef enum {
 	GRAPHICS_DEBUG_NONE = 0,
 	GRAPHICS_DEBUG_LOG = 1,
