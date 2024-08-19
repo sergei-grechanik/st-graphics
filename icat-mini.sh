@@ -128,7 +128,6 @@ if [ -n "$TMUX" ]; then
     esac
 fi
 
-
 #####################################################################
 # Compute the number of rows and columns
 #####################################################################
@@ -388,7 +387,7 @@ upload_image_and_print_placeholder() {
 
             if [ "$frame_number" -eq 1 ]; then
                 # Upload the first frame with a=T
-                gr_upload "q=2,a=T,U=1,i=${image_id},f=100,c=${cols},r=${rows}" "$frame"
+                gr_upload "q=2,a=T,f=100,U=1,i=${image_id},c=${cols},r=${rows}" "$frame"
                 # Set the delay for the first frame and also play the animation
                 # in loading mode (s=2).
                 gr_command "a=a,v=1,s=2,r=${frame_number},z=${delay},i=${image_id}"
@@ -397,7 +396,7 @@ upload_image_and_print_placeholder() {
                 print_placeholder
             else
                 # Upload subsequent frames with a=f
-                gr_upload "q=2,a=f,i=${image_id},z=${delay}" "$frame"
+                gr_upload "q=2,a=f,f=100,i=${image_id},z=${delay}" "$frame"
             fi
 
             frame_number=$((frame_number + 1))
