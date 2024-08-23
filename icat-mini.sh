@@ -293,17 +293,21 @@ gr_command() {
     end_gr_command
 }
 
-# Send an uploading command. Usage: gr_upload <command> <file>
-# The <command> part must not include the transmission method or ';'.
+# Send an uploading command. Usage: gr_upload <action> <command> <file>
+# Where <action> is a part of command that specifies the action, it will be
+# repeated for every chunk (if the method is direct), and <command> is the rest
+# of the command that specifies the image parameters. <action> and <command>
+# must not include the transmission method or ';'.
 # Example:
-# gr_upload "q=2,a=T,U=1,i=${image_id},f=100,c=${cols},r=${rows}" "$file"
+# gr_upload "a=T,q=2" "U=1,i=${image_id},f=100,c=${cols},r=${rows}" "$file"
 gr_upload() {
-    arg_command="$1"
-    arg_file="$2"
+    arg_action="$1"
+    arg_command="$2"
+    arg_file="$3"
     if [ "$uploading_method" = "file" ]; then
         # base64-encode the filename
         encoded_filename=$(printf '%s' "$arg_file" | base64 -w0)
-        gr_command "${arg_command},t=f;${encoded_filename}"
+        gr_command "${arg_action},${arg_command},t=f;${encoded_filename}"
     fi
     if [ "$uploading_method" = "direct" ]; then
         # Create a temporary directory to store the chunked image.
@@ -320,19 +324,19 @@ gr_upload() {
 
         # Issue a command indicating that we want to start data transmission for
         # a new image.
-        gr_command "${arg_command},t=d,m=1"
+        gr_command "${arg_action},${arg_command},t=d,m=1"
 
         # Transmit chunks.
         for chunk in "$chunkdir/chunk_"*; do
             start_gr_command
-            printf '%s' "i=${image_id},m=1;" >> "$tty"
+            printf '%s' "${arg_action},i=${image_id},m=1;" >> "$tty"
             cat "$chunk" >> "$tty"
             end_gr_command
             rm "$chunk"
         done
 
         # Tell the terminal that we are done.
-        gr_command "i=$image_id,m=0"
+        gr_command "${arg_action},i=$image_id,m=0"
 
         # Remove the temporary directory.
         rmdir "$chunkdir"
@@ -387,7 +391,7 @@ upload_image_and_print_placeholder() {
 
             if [ "$frame_number" -eq 1 ]; then
                 # Upload the first frame with a=T
-                gr_upload "q=2,a=T,f=100,U=1,i=${image_id},c=${cols},r=${rows}" "$frame"
+                gr_upload "q=2,a=T" "f=100,U=1,i=${image_id},c=${cols},r=${rows}" "$frame"
                 # Set the delay for the first frame and also play the animation
                 # in loading mode (s=2).
                 gr_command "a=a,v=1,s=2,r=${frame_number},z=${delay},i=${image_id}"
@@ -396,7 +400,7 @@ upload_image_and_print_placeholder() {
                 print_placeholder
             else
                 # Upload subsequent frames with a=f
-                gr_upload "q=2,a=f,f=100,i=${image_id},z=${delay}" "$frame"
+                gr_upload "q=2,a=f" "f=100,i=${image_id},z=${delay}" "$frame"
             fi
 
             frame_number=$((frame_number + 1))
@@ -410,7 +414,7 @@ upload_image_and_print_placeholder() {
         delayed_frame_dir_cleanup "$frame_dir" 2> /dev/null &
     else
         # The file is not an animation, upload it directly
-        gr_upload "q=2,a=T,U=1,i=${image_id},f=100,c=${cols},r=${rows}" "$file"
+        gr_upload "q=2,a=T" "U=1,i=${image_id},f=100,c=${cols},r=${rows}" "$file"
         # Print the placeholder
         print_placeholder
     fi
