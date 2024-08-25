@@ -115,6 +115,20 @@ restore_echo() {
 trap restore_echo EXIT TERM
 
 #####################################################################
+# Detect imagemagick
+#####################################################################
+
+# If there is the 'magick' command, use it instead of separate 'convert' and
+# 'identify' commands.
+if command -v magick > /dev/null; then
+    identify="magick identify"
+    convert="magick"
+else
+    identify="identify"
+    convert="convert"
+fi
+
+#####################################################################
 # Detect tmux
 #####################################################################
 
@@ -202,7 +216,7 @@ bc_round() {
 if [ -z "$cols" ] || [ -z "$rows" ]; then
     # Get the size of the image and its resolution. If it's an animation, use
     # the first frame.
-    format_output="$(identify -format '%w %h\n' "$file" | head -1)"
+    format_output="$($identify -format '%w %h\n' "$file" | head -1)"
     img_width="$(printf '%s' "$format_output" | cut -d ' ' -f 1)"
     img_height="$(printf '%s' "$format_output" | cut -d ' ' -f 2)"
     if ! is_decimal "$img_width" || ! is_decimal "$img_height"; then
@@ -356,7 +370,7 @@ delayed_frame_dir_cleanup() {
 
 upload_image_and_print_placeholder() {
     # Check if the file is an animation.
-    frame_count=$(identify -format '%n\n' "$file" | head -n 1)
+    frame_count=$($identify -format '%n\n' "$file" | head -n 1)
     if [ "$frame_count" -gt 1 ]; then
         # The file is an animation, decompose into frames and upload each frame.
         frame_dir="$(mktemp -d)"
@@ -368,11 +382,11 @@ upload_image_and_print_placeholder() {
         fi
 
         # Decompose the animation into separate frames.
-        convert -coalesce "$file" "$frame_dir/frame_%06d.png"
+        $convert "$file" -coalesce "$frame_dir/frame_%06d.png"
 
         # Get all frame delays at once, in centiseconds, as a space-separated
         # string.
-        delays=$(identify -format "%T " "$file")
+        delays=$($identify -format "%T " "$file")
 
         frame_number=1
         for frame in "$frame_dir"/frame_*.png; do
