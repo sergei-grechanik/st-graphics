@@ -2300,10 +2300,9 @@ run(void)
 		/* Decrease the timeout if there are active animations. */
 		if (graphics_next_redraw_delay != INT_MAX &&
 		    IS_SET(MODE_VISIBLE))
-			timeout = timeout == -1
-					  ? graphics_next_redraw_delay
-					  : MIN(timeout,
-						graphics_next_redraw_delay);
+			timeout = timeout < 0 ? graphics_next_redraw_delay
+					      : MIN(timeout,
+						    graphics_next_redraw_delay);
 
 		seltv.tv_sec = timeout / 1E3;
 		seltv.tv_nsec = 1E6 * (timeout - 1E3 * seltv.tv_sec);

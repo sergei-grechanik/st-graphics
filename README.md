@@ -108,7 +108,6 @@ features.
     - ✅ Controlling animations (`a=a`)
       - ✅ Stop, run, and loading modes (`s`)
       - ❌ Number of loop (`v`)
-      - ✅ Stop, run, and loading modes (`s`)
       - ✅ Setting the delay (`z`)
     - ❌ Animation frame composition (`a=c`)
     - ❌ Frame deletion (`d=f`)

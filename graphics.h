@@ -11,18 +11,17 @@ void gr_deinit();
 /// Add an image rectangle to a list if rectangles to draw. This function may
 /// actually draw some rectangles, or it may wait till more rectangles are
 /// appended. Must be called between `gr_start_drawing` and `gr_finish_drawing`.
-/// - `start_col..end_col` and `start_row..end_row` define the part of the image
-///    to draw.
-/// - `start_col` and `start_row` are zero-based.
-/// - `end_col` and `end_row` are exclusive (beyond the last col/row).
+/// - `img_start_col..img_end_col` and `img_start_row..img_end_row` define the
+///   part of the image to draw (row/col indices are zero-based, ends are
+///   excluded).
 /// - `x_col` and `y_row` are the coordinates of the top-left corner of the
 ///   image in the terminal grid.
 /// - `x_pix` and `y_pix` are the same but in pixels.
 /// - `reverse` indicates whether colors should be inverted.
 void gr_append_imagerect(Drawable buf, uint32_t image_id, uint32_t placement_id,
-			 int start_col, int end_col, int start_row, int end_row,
-			 int x_col, int y_row, int x_pix, int y_pix, int cw,
-			 int ch, int reverse);
+			 int img_start_col, int img_end_col, int img_start_row,
+			 int img_end_row, int x_col, int y_row, int x_pix,
+			 int y_pix, int cw, int ch, int reverse);
 /// Prepare for image drawing. `cw` and `ch` are dimensions of the cell.
 void gr_start_drawing(Drawable buf, int cw, int ch);
 /// Finish image drawing. This functions will draw all the rectangles left to
@@ -58,9 +57,8 @@ void gr_for_each_image_cell(int (*callback)(void *data, uint32_t image_id,
 					    int row, char is_classic),
 			    void *data);
 
-/// Marks all the rows containing the image with `image_id` as dirty. The rows
-/// to search are limited to the ones between `minrow` and `maxrow` (inclusive).
-void gr_schedule_image_redraw_by_id(uint32_t image_id, int minrow, int maxrow);
+/// Marks all the rows containing the image with `image_id` as dirty.
+void gr_schedule_image_redraw_by_id(uint32_t image_id);
 
 typedef enum {
 	GRAPHICS_DEBUG_NONE = 0,

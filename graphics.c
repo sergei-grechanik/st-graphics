@@ -92,8 +92,8 @@ enum ImageStatus {
 	STATUS_UPLOADING_ERROR = 2,
 	STATUS_UPLOADING_SUCCESS = 3,
 	STATUS_RAM_LOADING_ERROR = 4,
-	STATUS_RAM_LOADING_SUCCESS = 5,
-	STATUS_RAM_LOADING_IN_PROGRESS = 6,
+	STATUS_RAM_LOADING_IN_PROGRESS = 5,
+	STATUS_RAM_LOADING_SUCCESS = 6,
 };
 
 const char *image_status_strings[6] = {
@@ -120,6 +120,43 @@ const char *image_uploading_failure_strings[5] = {
 	"ERROR_CANNOT_COPY_FILE",
 };
 
+////////////////////////////////////////////////////////////////////////////////
+//
+// We use the following structures to represent images and placements:
+//
+//   - Image: this is the main structure representing an image, usually created
+//     by actions 'a=t', 'a=T`. Each image has an id (image id aka client id,
+//     specified by 'i='). An image may have multiple frames (ImageFrame) and
+//     placements (ImagePlacement).
+//
+//   - ImageFrame: represents a single frame of an image, usually created by
+//     the action 'a=f' (and the first frame is created with the image itself).
+//     Each frame has an index and also:
+//     - a file containing the frame data (considered to be "on disk", although
+//       it's probably in tmpfs),
+//     - an imlib object containing the fully composed frame (i.e. the frame
+//       data from the file composed onto the background frame or color). It is
+//       not ready for display yet, because it needs to be scaled and uploaded
+//       to the X server.
+//
+//   - ImagePlacement: represents a placement of an image, created by 'a=p' and
+//     'a=T'. Each placement has an id (placement id, specified by 'p='). Also
+//     each placement has an array of pixmaps: one for each frame of the image.
+//     Each pixmap is a scaled and uploaded image ready to be displayed.
+//
+// Images are store in the `images` hash table, mapping image ids to Image
+// objects (allocated on the heap).
+//
+// Placements are stored in the `placements` hash table of each Image object,
+// mapping placement ids to ImagePlacement objects (also allocated on the heap).
+//
+// ImageFrames are stored in the `first_frame` field and in the
+// `frames_beyond_the_first` array of each Image object. They are stored by
+// value, so ImageFrame pointer may be invalidated when frames are
+// added/deleted, be careful.
+//
+////////////////////////////////////////////////////////////////////////////////
+
 struct Image;
 struct ImageFrame;
 struct ImagePlacement;
@@ -128,7 +165,7 @@ KHASH_MAP_INIT_INT(id2image, struct Image *)
 KHASH_MAP_INIT_INT(id2placement, struct ImagePlacement *)
 
 typedef struct ImageFrame {
-	/// The original image.
+	/// The image this frame belongs to.
 	struct Image *image;
 	/// The 1-based index of the frame. Zero if the frame isn't initialized.
 	int index;
@@ -141,12 +178,12 @@ typedef struct ImageFrame {
 	/// The duration of the frame in milliseconds.
 	int gap;
 	/// The expected size of the frame image file (specified with 'S='),
-	/// used to check if uploading uploading succeeded.
+	/// used to check if uploading succeeded.
 	unsigned expected_size;
 	/// Format specification (see the `f=` key).
 	int format;
-	/// Pixel width and height of the original frame data. May differ from
-	/// the image (i.e. first frame) dimensions.
+	/// Pixel width and height of the non-composed (on-disk) frame data. May
+	/// differ from the image (i.e. first frame) dimensions.
 	int data_pix_width, data_pix_height;
 	/// The offset of the frame relative to the first frame.
 	int x, y;
@@ -164,8 +201,9 @@ typedef struct ImageFrame {
 	FILE *open_file;
 	/// The size of the corresponding file cached on disk.
 	unsigned disk_size;
-	/// The original (not scaled) frame image loaded into RAM.
-	Imlib_Image original_image;
+	/// The imlib object containing the fully composed frame. It's not
+	/// scaled for screen display yet.
+	Imlib_Image imlib_object;
 } ImageFrame;
 
 typedef struct Image {
@@ -195,13 +233,12 @@ typedef struct Image {
 	/// frame (in ms since initialization).
 	Milliseconds current_frame_time;
 	/// The absolute time of the last redraw (in ms since initialization).
+	/// Used to check whether it's the first time we draw the image in the
+	/// current redraw cycle.
 	Milliseconds last_redraw;
 	/// The absolute time of the next redraw (in ms since initialization).
 	/// 0 means no redraw is scheduled.
 	Milliseconds next_redraw;
-	/// The range of terminal rows this image occupies, both ends are
-	/// inclusive. This may be an overapproximation.
-	int min_row, max_row;
 	/// The unscaled pixel width and height of the image. Usually inherited
 	/// from the first frame.
 	int pix_width, pix_height;
@@ -219,13 +256,14 @@ typedef struct Image {
 } Image;
 
 typedef struct ImagePlacement {
-	/// The original image.
+	/// The image this placement belongs to.
 	Image *image;
 	/// The id of the placement. Must be nonzero.
 	uint32_t placement_id;
 	/// The last time when the placement was displayed or otherwise touched.
 	Milliseconds atime;
-	/// The 1-based index of the protected pixmap index.
+	/// The 1-based index of the protected pixmap. We protect a pixmap in
+	/// gr_load_pixmap to avoid unloading it right after it was loaded.
 	int protected_frame;
 	/// Whether the placement is used only for Unicode placeholders.
 	char virtual;
@@ -255,12 +293,12 @@ typedef struct {
 	uint32_t image_id;
 	uint32_t placement_id;
 	/// The position of the rectangle in pixels.
-	int x_pix, y_pix;
+	int screen_x_pix, screen_y_pix;
 	/// The starting row on the screen.
-	int y_row;
+	int screen_y_row;
 	/// The part of the whole image to be drawn, in cells. Starts are
 	/// zero-based, ends are exclusive.
-	int start_col, end_col, start_row, end_row;
+	int img_start_col, img_end_col, img_start_row, img_end_row;
 	/// The current cell width and height in pixels.
 	int cw, ch;
 	/// Whether colors should be inverted.
@@ -330,6 +368,7 @@ static Milliseconds drawing_start_time;
 /// The global index of the current command.
 static uint64_t global_command_counter = 0;
 /// The next redraw times for each row of the terminal. Used for animations.
+/// 0 means no redraw is scheduled.
 static kvec_t(Milliseconds) next_redraw_times = {0, 0, NULL};
 /// The number of files loaded in the current redraw cycle.
 static int this_redraw_cycle_loaded_files = 0;
@@ -390,12 +429,6 @@ static Milliseconds gr_now_ms() {
 ////////////////////////////////////////////////////////////////////////////////
 // Basic image management functions (create, delete, find, etc).
 ////////////////////////////////////////////////////////////////////////////////
-
-/// Resets the row range of the image to the empty range.
-static void gr_image_reset_row_range(Image *img) {
-	img->min_row = INT_MAX;
-	img->max_row = INT_MIN;
-}
 
 /// Returns the 1-based index of the last frame. Note that you may want to use
 /// `gr_last_uploaded_frame_index` instead since the last frame may be not
@@ -537,7 +570,7 @@ static void gr_get_frame_filename(ImageFrame *frame, char *out,
 
 /// Returns the (estimation) of the RAM size used by the frame right now.
 static unsigned gr_frame_current_ram_size(ImageFrame *frame) {
-	if (!frame->original_image)
+	if (!frame->imlib_object)
 		return 0;
 	return (unsigned)frame->image->pix_width * frame->image->pix_height * 4;
 }
@@ -563,15 +596,15 @@ static unsigned gr_placement_current_ram_size(ImagePlacement *placement) {
 /// Unload the frame from RAM (i.e. delete the corresponding imlib object).
 /// If the on-disk file of the frame is preserved, it can be reloaded later.
 static void gr_unload_frame(ImageFrame *frame) {
-	if (!frame->original_image)
+	if (!frame->imlib_object)
 		return;
 
 	unsigned frame_ram_size = gr_frame_current_ram_size(frame);
 	images_ram_size -= frame_ram_size;
 
-	imlib_context_set_image(frame->original_image);
+	imlib_context_set_image(frame->imlib_object);
 	imlib_free_image_and_decache();
-	frame->original_image = NULL;
+	frame->imlib_object = NULL;
 
 	GR_LOG("After unloading image %u frame %u (atime %ld ms ago) "
 	       "ram: %ld KiB  (- %u KiB)\n",
@@ -771,7 +804,6 @@ static Image *gr_new_image(uint32_t id) {
 	GR_LOG("Creating image %u\n", id);
 	img = malloc(sizeof(Image));
 	memset(img, 0, sizeof(Image));
-	gr_image_reset_row_range(img);
 	img->placements = kh_init(id2placement);
 	int ret;
 	khiter_t k = kh_put(id2image, images, id, &ret);
@@ -919,9 +951,9 @@ static void gr_infer_placement_size_maybe(ImagePlacement *placement) {
 }
 
 /// Adjusts the current frame index if enough time has passed since the display
-/// of the current frame. Also computes the delay until the next redraw of this
-/// image. The current time is passed as an argument so that all animations are
-/// in sync.
+/// of the current frame. Also computes the time of the next redraw of this
+/// image (`img->next_redraw`). The current time is passed as an argument so
+/// that all animations are in sync.
 static void gr_update_frame_index(Image *img, Milliseconds now) {
 	if (img->current_frame == 0) {
 		img->current_frame_time = now;
@@ -931,15 +963,18 @@ static void gr_update_frame_index(Image *img, Milliseconds now) {
 	}
 	// If the animation is stopped, show the current frame.
 	if (!img->animation_state ||
-	    img->animation_state == ANIMATION_STATE_STOPPED) {
+	    img->animation_state == ANIMATION_STATE_STOPPED ||
+	    img->animation_state == ANIMATION_STATE_UNSET) {
 		// The next redraw is never (unless the state is changed).
 		img->next_redraw = 0;
 		return;
 	}
+	int last_uploaded_frame_index = gr_last_uploaded_frame_index(img);
 	// If we are loading and we reached the last frame, show the last frame.
 	if (img->animation_state == ANIMATION_STATE_LOADING &&
-	    img->current_frame == gr_last_uploaded_frame_index(img)) {
-		// The next redraw is never (unless the state is changed).
+	    img->current_frame == last_uploaded_frame_index) {
+		// The next redraw is never (unless the state is changed or
+		// frames are added).
 		img->next_redraw = 0;
 		return;
 	}
@@ -951,8 +986,7 @@ static void gr_update_frame_index(Image *img, Milliseconds now) {
 	if (img->animation_state == ANIMATION_STATE_LOOPING &&
 	    img->total_duration > 0 && passed_ms >= img->total_duration) {
 		passed_ms %= img->total_duration;
-		img->current_frame_time =
-			now - (img->total_duration - passed_ms);
+		img->current_frame_time = now - passed_ms;
 	}
 	// Find the next frame.
 	int original_frame_index = img->current_frame;
@@ -974,7 +1008,7 @@ static void gr_update_frame_index(Image *img, Milliseconds now) {
 		}
 		// Otherwise go to the next frame.
 		passed_ms -= MAX(0, frame->gap);
-		if (img->current_frame >= gr_last_uploaded_frame_index(img)) {
+		if (img->current_frame >= last_uploaded_frame_index) {
 			// It's the last frame, if the animation is loading,
 			// remain on it.
 			if (img->animation_state == ANIMATION_STATE_LOADING) {
@@ -995,7 +1029,7 @@ static void gr_update_frame_index(Image *img, Milliseconds now) {
 			// gapless. Just move on to the next frame.
 			img->current_frame++;
 			if (img->current_frame >
-			    gr_last_uploaded_frame_index(img))
+			    last_uploaded_frame_index)
 				img->current_frame = 1;
 			img->current_frame_time = now;
 			img->next_redraw = now + MAX(
@@ -1102,7 +1136,7 @@ typedef struct {
 		ImagePlacement *placement;
 		ImageFrame *frame;
 	};
-	/// If zero, the object is the original image of `frame`, if non-zero,
+	/// If zero, the object is the imlib object of `frame`, if non-zero,
 	/// the object is a pixmap of `frameidx`-th frame of `placement`.
 	int frameidx;
 } UnloadableObject;
@@ -1127,6 +1161,13 @@ static void gr_unload_object(UnloadableObject *obj) {
 	}
 }
 
+/// Returns the recency threshold for an image. Frames that were accessed within
+/// this threshold from now are considered recent and may be handled
+/// differently because we may need them again very soon.
+static Milliseconds gr_recency_threshold(Image *img) {
+	return img->total_duration * 2 + 1000;
+}
+
 /// Creates an unloadable object for the imlib object of a frame.
 static UnloadableObject gr_unloadable_object_for_frame(Milliseconds now,
 						       ImageFrame *frame) {
@@ -1135,8 +1176,7 @@ static UnloadableObject gr_unloadable_object_for_frame(Milliseconds now,
 	obj.frame = frame;
 	Milliseconds atime = frame->atime;
 	obj.score = atime;
-	if (frame->image->total_duration &&
-	    atime >= now - frame->image->total_duration * 2) {
+	if (atime >= now - gr_recency_threshold(frame->image)) {
 		// This is a recent frame, probably from an active animation.
 		// Score it above `now` to prefer unloading non-active frames.
 		// Randomize the score because it's not very clear in which
@@ -1159,8 +1199,7 @@ gr_unloadable_object_for_pixmap(Milliseconds now, ImageFrame *frame,
 	// oldest atime of the frame and the placement.
 	Milliseconds atime = MIN(placement->atime, frame->atime);
 	obj.score = atime;
-	if (frame->image->total_duration &&
-	    atime >= now - frame->image->total_duration * 2) {
+	if (atime >= now - gr_recency_threshold(frame->image)) {
 		// This is a recent pixmap, probably from an active animation.
 		// Score it above `now` to prefer unloading non-active frames.
 		// Also assign higher scores to frames that are closer to the
@@ -1192,7 +1231,7 @@ gr_get_unloadable_objects_sorted_by_score(Milliseconds now) {
 	ImagePlacement *placement = NULL;
 	kh_foreach_value(images, img, {
 		foreach_frame(*img, frame, {
-			if (!frame->original_image)
+			if (!frame->imlib_object)
 				continue;
 			kv_push(UnloadableObject, objects,
 				gr_unloadable_object_for_frame(now, frame));
@@ -1506,11 +1545,12 @@ static Imlib_Image gr_load_raw_pixel_data(ImageFrame *frame,
 	return image;
 }
 
-/// Loads the original frame image into RAM by creating an imlib object. If the
-/// image is already loaded, does nothing. Loading may fail, in which case
-/// the status of the frame will be set to STATUS_RAM_LOADING_ERROR.
-static void gr_load_original_image(ImageFrame *frame) {
-	if (frame->original_image)
+/// Loads the unscaled frame into RAM as an imlib object. The frame imlib object
+/// is fully composed on top of the background frame. If the frame is already
+/// loaded, does nothing. Loading may fail, in which case the status of the
+/// frame will be set to STATUS_RAM_LOADING_ERROR.
+static void gr_load_imlib_object(ImageFrame *frame) {
+	if (frame->imlib_object)
 		return;
 
 	// If the image is uninitialized or uploading has failed, or the file
@@ -1551,8 +1591,8 @@ static void gr_load_original_image(ImageFrame *frame) {
 			frame->status = STATUS_RAM_LOADING_ERROR;
 			return;
 		}
-		gr_load_original_image(bg_frame);
-		if (!bg_frame->original_image) {
+		gr_load_imlib_object(bg_frame);
+		if (!bg_frame->imlib_object) {
 			fprintf(stderr,
 				"error: could not load background frame %d for "
 				"image %u frame %d\n",
@@ -1614,9 +1654,9 @@ static void gr_load_original_image(ImageFrame *frame) {
 
 		// Start with the background frame or color.
 		imlib_context_set_blend(0);
-		if (bg_frame && bg_frame->original_image) {
+		if (bg_frame && bg_frame->imlib_object) {
 			imlib_blend_image_onto_image(
-				bg_frame->original_image, 1, 0, 0,
+				bg_frame->imlib_object, 1, 0, 0,
 				image_width, image_height, 0, 0,
 				image_width, image_height);
 		} else {
@@ -1643,7 +1683,7 @@ static void gr_load_original_image(ImageFrame *frame) {
 		frame_data_image = composed_image;
 	}
 
-	frame->original_image = frame_data_image;
+	frame->imlib_object = frame_data_image;
 
 	images_ram_size += gr_frame_current_ram_size(frame);
 	frame->status = STATUS_RAM_LOADING_SUCCESS;
@@ -1670,19 +1710,19 @@ static void gr_premultiply_alpha(DATA32 *data, size_t num_pixels) {
 	}
 }
 
-/// Loads the image placement into RAM by creating an imlib object. The in-ram
-/// image is correctly fit to the box defined by the number of rows/columns of
-/// the image placement and the provided cell dimensions in pixels. If the
-/// placement is already loaded, it will be reloaded only if the cell dimensions
-/// have changed.
-Pixmap gr_load_placement(ImagePlacement *placement, int frameidx, int cw, int ch) {
+/// Creates a pixmap for the frame of an image placement. The pixmap contain the
+/// image data correctly scaled and fit to the box defined by the number of
+/// rows/columns of the image placement and the provided cell dimensions in
+/// pixels. If the placement is already loaded, it will be reloaded only if the
+/// cell dimensions have changed.
+Pixmap gr_load_pixmap(ImagePlacement *placement, int frameidx, int cw, int ch) {
 	Image *img = placement->image;
 	ImageFrame *frame = gr_get_frame(img, frameidx);
 
 	// Update the atime uncoditionally.
 	gr_touch_placement(placement);
 	if (frame)
-		gr_touch_frame(gr_get_frame(placement->image, frameidx));
+		gr_touch_frame(frame);
 
 	// If cw or ch are different, unload all the pixmaps.
 	if (placement->scaled_cw != cw || placement->scaled_ch != ch) {
@@ -1706,8 +1746,8 @@ Pixmap gr_load_placement(ImagePlacement *placement, int frameidx, int cw, int ch
 			frameidx, img->image_id);
 		return 0;
 	}
-	gr_load_original_image(frame);
-	if (!frame->original_image)
+	gr_load_imlib_object(frame);
+	if (!frame->imlib_object)
 		return 0;
 
 	// Infer the placement size if needed.
@@ -1756,12 +1796,12 @@ Pixmap gr_load_placement(ImagePlacement *placement, int frameidx, int cw, int ch
 	if (src_w <= 0 || src_h <= 0) {
 		fprintf(stderr, "warning: image of zero size\n");
 	} else if (mode == SCALE_MODE_FILL) {
-		imlib_blend_image_onto_image(frame->original_image, 1, src_x,
+		imlib_blend_image_onto_image(frame->imlib_object, 1, src_x,
 					     src_y, src_w, src_h, 0, 0,
 					     scaled_w, scaled_h);
 	} else if (mode == SCALE_MODE_NONE ||
 		   (mode == SCALE_MODE_NONE_OR_CONTAIN && !box_too_small)) {
-		imlib_blend_image_onto_image(frame->original_image, 1, src_x,
+		imlib_blend_image_onto_image(frame->imlib_object, 1, src_x,
 					     src_y, src_w, src_h, 0, 0, src_w,
 					     src_h);
 	} else {
@@ -1788,7 +1828,7 @@ Pixmap gr_load_placement(ImagePlacement *placement, int frameidx, int cw, int ch
 			dest_h = src_h * scaled_w / src_w;
 			dest_y = (scaled_h - dest_h) / 2;
 		}
-		imlib_blend_image_onto_image(frame->original_image, 1, src_x,
+		imlib_blend_image_onto_image(frame->imlib_object, 1, src_x,
 					     src_y, src_w, src_h, dest_x,
 					     dest_y, dest_w, dest_h);
 	}
@@ -1973,7 +2013,7 @@ void gr_get_placement_description(uint32_t image_id, uint32_t placement_id,
 		 "all frames disk size: %u KiB\n"
 		 "(frame 1) uploading status: %s\n"
 		 "(frame 1) placement pixmap is %s\n"
-		 "(frame 1) original image as imlib object is %s\n",
+		 "(frame 1) imlib object is %s\n",
 		 image_id, placement_id, placement->cols, placement->rows,
 		 img->pix_width, img->pix_height,
 		 placement->scaled_cw, placement->scaled_ch,
@@ -1983,7 +2023,7 @@ void gr_get_placement_description(uint32_t image_id, uint32_t placement_id,
 		 image_uploading_failure_strings[img->first_frame
 							 .uploading_failure],
 		 placement->first_pixmap ? "loaded" : "not loaded",
-		 img->first_frame.original_image ? "loaded" : "not loaded");
+		 img->first_frame.imlib_object ? "loaded" : "not loaded");
 }
 
 /// Prints a time difference in a human-readable format.
@@ -2007,6 +2047,10 @@ static void gr_print_ago(Milliseconds diff) {
 /// Dumps the internal state (images and placements) to stderr.
 void gr_dump_state() {
 	fprintf(stderr, "======== Graphics module state dump ========\n");
+	fprintf(stderr,
+		"sizeof(Image) = %lu  sizeof(ImageFrame) = %lu  "
+		"sizeof(ImagePlacement) = %lu\n",
+		sizeof(Image), sizeof(ImageFrame), sizeof(ImagePlacement));
 	fprintf(stderr, "Image count: %u\n", kh_size(images));
 	fprintf(stderr, "Placement count: %u\n", total_placement_count);
 	fprintf(stderr, "Estimated RAM usage: %ld KiB\n",
@@ -2038,8 +2082,6 @@ void gr_dump_state() {
 		fprintf(stderr, "    cur frame: %d\n", img->current_frame);
 		fprintf(stderr, "    animation state: %d\n",
 			img->animation_state);
-		fprintf(stderr, "    row range: %d..%d\n", img->min_row,
-			img->max_row);
 		int64_t total_disk_size_computed = 0;
 		int total_duration_computed = 0;
 		foreach_frame(*img, frame, {
@@ -2074,7 +2116,7 @@ void gr_dump_state() {
 				frame->disk_size / 1024);
 			images_disk_size_computed += frame->disk_size;
 			total_disk_size_computed += frame->disk_size;
-			if (frame->original_image) {
+			if (frame->imlib_object) {
 				unsigned ram_size =
 					gr_frame_current_ram_size(frame);
 				fprintf(stderr,
@@ -2153,40 +2195,41 @@ void gr_dump_state() {
 /// Displays debug information in the rectangle using colors col1 and col2.
 static void gr_displayinfo(Drawable buf, ImageRect *rect, int col1, int col2,
 			   const char *message) {
-	int w_pix = (rect->end_col - rect->start_col) * rect->cw;
-	int h_pix = (rect->end_row - rect->start_row) * rect->ch;
+	int w_pix = (rect->img_end_col - rect->img_start_col) * rect->cw;
+	int h_pix = (rect->img_end_row - rect->img_start_row) * rect->ch;
 	Display *disp = imlib_context_get_display();
 	GC gc = XCreateGC(disp, buf, 0, NULL);
 	char info[MAX_INFO_LEN];
 	if (rect->placement_id)
 		snprintf(info, MAX_INFO_LEN, "%s%u/%u [%d:%d)x[%d:%d)", message,
-			 rect->image_id, rect->placement_id, rect->start_col,
-			 rect->end_col, rect->start_row, rect->end_row);
+			 rect->image_id, rect->placement_id,
+			 rect->img_start_col, rect->img_end_col,
+			 rect->img_start_row, rect->img_end_row);
 	else
 		snprintf(info, MAX_INFO_LEN, "%s%u [%d:%d)x[%d:%d)", message,
-			 rect->image_id, rect->start_col, rect->end_col,
-			 rect->start_row, rect->end_row);
+			 rect->image_id, rect->img_start_col, rect->img_end_col,
+			 rect->img_start_row, rect->img_end_row);
 	XSetForeground(disp, gc, col1);
-	XDrawString(disp, buf, gc, rect->x_pix + 4, rect->y_pix + h_pix - 3,
-		    info, strlen(info));
+	XDrawString(disp, buf, gc, rect->screen_x_pix + 4,
+		    rect->screen_y_pix + h_pix - 3, info, strlen(info));
 	XSetForeground(disp, gc, col2);
-	XDrawString(disp, buf, gc, rect->x_pix + 2, rect->y_pix + h_pix - 5,
-		    info, strlen(info));
+	XDrawString(disp, buf, gc, rect->screen_x_pix + 2,
+		    rect->screen_y_pix + h_pix - 5, info, strlen(info));
 	XFreeGC(disp, gc);
 }
 
 /// Draws a rectangle (bounding box) for debugging.
 static void gr_showrect(Drawable buf, ImageRect *rect) {
-	int w_pix = (rect->end_col - rect->start_col) * rect->cw;
-	int h_pix = (rect->end_row - rect->start_row) * rect->ch;
+	int w_pix = (rect->img_end_col - rect->img_start_col) * rect->cw;
+	int h_pix = (rect->img_end_row - rect->img_start_row) * rect->ch;
 	Display *disp = imlib_context_get_display();
 	GC gc = XCreateGC(disp, buf, 0, NULL);
 	XSetForeground(disp, gc, 0xFF00FF00);
-	XDrawRectangle(disp, buf, gc, rect->x_pix, rect->y_pix, w_pix - 1,
-		       h_pix - 1);
+	XDrawRectangle(disp, buf, gc, rect->screen_x_pix, rect->screen_y_pix,
+		       w_pix - 1, h_pix - 1);
 	XSetForeground(disp, gc, 0xFFFF0000);
-	XDrawRectangle(disp, buf, gc, rect->x_pix + 1, rect->y_pix + 1,
-		       w_pix - 3, h_pix - 3);
+	XDrawRectangle(disp, buf, gc, rect->screen_x_pix + 1,
+		       rect->screen_y_pix + 1, w_pix - 3, h_pix - 3);
 	XFreeGC(disp, gc);
 }
 
@@ -2228,33 +2271,21 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 		int old_frame = img->current_frame;
 		gr_update_frame_index(img, drawing_start_time);
 		img->last_redraw = drawing_start_time;
-		// If the frame changed, it means that we will redraw the whole
-		// image in this cycle and will be able to recompute the full
-		// row range. Erase the old row range.
-		if (old_frame != img->current_frame)
-			gr_image_reset_row_range(img);
 	}
 
-	// Add the rows occupied by this rect to the row range of the image.
-	img->min_row = MIN(img->min_row, rect->y_row);
-	img->max_row =
-		MAX(img->max_row,
-		    rect->y_row + rect->end_row - rect->start_row - 1);
-
-	// Adjust next redraw times for the rows of this image. We need to
-	// update the whole range of rows occupied by the image to make sure
-	// all the rows are updated at the same time.
+	// Adjust next redraw times for the rows of this image rect.
 	if (img->next_redraw) {
-		for (int row = img->min_row;
-		     row <= img->max_row; ++row) {
+		for (int row = rect->screen_y_row;
+		     row <= rect->screen_y_row + rect->img_end_row -
+					  rect->img_start_row - 1; ++row) {
 			gr_update_next_redraw_time(
 				row, img->next_redraw);
 		}
 	}
 
 	// Load the frame.
-	Pixmap pixmap = gr_load_placement(placement, img->current_frame,
-					  rect->cw, rect->ch);
+	Pixmap pixmap = gr_load_pixmap(placement, img->current_frame, rect->cw,
+				       rect->ch);
 
 	// If the image couldn't be loaded, display the bounding box.
 	if (!pixmap) {
@@ -2264,12 +2295,12 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 		return;
 	}
 
-	int src_x = rect->start_col * rect->cw;
-	int src_y = rect->start_row * rect->ch;
-	int width = (rect->end_col - rect->start_col) * rect->cw;
-	int height = (rect->end_row - rect->start_row) * rect->ch;
-	int dst_x = rect->x_pix;
-	int dst_y = rect->y_pix;
+	int src_x = rect->img_start_col * rect->cw;
+	int src_y = rect->img_start_row * rect->ch;
+	int width = (rect->img_end_col - rect->img_start_col) * rect->cw;
+	int height = (rect->img_end_row - rect->img_start_row) * rect->ch;
+	int dst_x = rect->screen_x_pix;
+	int dst_y = rect->screen_y_pix;
 
 	// Display the image.
 	Display *disp = imlib_context_get_display();
@@ -2290,7 +2321,8 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 			(unsigned)placement->cols * placement->scaled_cw;
 		unsigned pixmap_h =
 			(unsigned)placement->rows * placement->scaled_ch;
-		Pixmap invpixmap = XCreatePixmap(disp, buf, pixmap_w, pixmap_h, 32);
+		Pixmap invpixmap =
+			XCreatePixmap(disp, buf, pixmap_w, pixmap_h, 32);
 		XGCValues gcv = {.function = GXcopyInverted};
 		GC gc = XCreateGC(disp, invpixmap, GCFunction, &gcv);
 		XCopyArea(disp, pixmap, invpixmap, gc, 0, 0, pixmap_w,
@@ -2331,7 +2363,8 @@ static void gr_freerect(ImageRect *rect) { memset(rect, 0, sizeof(ImageRect)); }
 
 /// Returns the bottom coordinate of the rect.
 static int gr_getrectbottom(ImageRect *rect) {
-	return rect->y_pix + (rect->end_row - rect->start_row) * rect->ch;
+	return rect->screen_y_pix +
+	       (rect->img_end_row - rect->img_start_row) * rect->ch;
 }
 
 /// Prepare for image drawing. `cw` and `ch` are dimensions of the cell.
@@ -2409,22 +2442,22 @@ void gr_finish_drawing(Drawable buf) {
 
 // Add an image rectangle to the list of rectangles to draw.
 void gr_append_imagerect(Drawable buf, uint32_t image_id, uint32_t placement_id,
-			 int start_col, int end_col, int start_row, int end_row,
-			 int x_col, int y_row, int x_pix, int y_pix, int cw,
-			 int ch, int reverse) {
+			 int img_start_col, int img_end_col, int img_start_row,
+			 int img_end_row, int x_col, int y_row, int x_pix,
+			 int y_pix, int cw, int ch, int reverse) {
 	current_cw = cw;
 	current_ch = ch;
 
 	ImageRect new_rect;
 	new_rect.image_id = image_id;
 	new_rect.placement_id = placement_id;
-	new_rect.start_col = start_col;
-	new_rect.end_col = end_col;
-	new_rect.start_row = start_row;
-	new_rect.end_row = end_row;
-	new_rect.y_row = y_row;
-	new_rect.x_pix = x_pix;
-	new_rect.y_pix = y_pix;
+	new_rect.img_start_col = img_start_col;
+	new_rect.img_end_col = img_end_col;
+	new_rect.img_start_row = img_start_row;
+	new_rect.img_end_row = img_end_row;
+	new_rect.screen_y_row = y_row;
+	new_rect.screen_x_pix = x_pix;
+	new_rect.screen_y_pix = y_pix;
 	new_rect.ch = ch;
 	new_rect.cw = cw;
 	new_rect.reverse = reverse;
@@ -2435,8 +2468,8 @@ void gr_append_imagerect(Drawable buf, uint32_t image_id, uint32_t placement_id,
 
 	// If it's the empty image (image_id=0) or an empty rectangle, do
 	// nothing.
-	if (image_id == 0 || end_col - start_col <= 0 ||
-	    end_row - start_row <= 0)
+	if (image_id == 0 || img_end_col - img_start_col <= 0 ||
+	    img_end_row - img_start_row <= 0)
 		return;
 	// Try to find a rect to merge with.
 	ImageRect *free_rect = NULL;
@@ -2454,11 +2487,12 @@ void gr_append_imagerect(Drawable buf, uint32_t image_id, uint32_t placement_id,
 		// We only support the case when the new stripe is added to the
 		// bottom of an existing rectangle and they are perfectly
 		// aligned.
-		if (rect->end_row == start_row &&
+		if (rect->img_end_row == img_start_row &&
 		    gr_getrectbottom(rect) == y_pix) {
-			if (rect->start_col == start_col &&
-			    rect->end_col == end_col && rect->x_pix == x_pix) {
-				rect->end_row = end_row;
+			if (rect->img_start_col == img_start_col &&
+			    rect->img_end_col == img_end_col &&
+			    rect->screen_x_pix == x_pix) {
+				rect->img_end_row = img_end_row;
 				return;
 			}
 		}
@@ -2523,8 +2557,10 @@ typedef struct {
 	char transmission_medium;
 	/// 'd='
 	char delete_specifier;
-	/// 's=', 'v=', used only when 'f=24' or 'f=32'.
-	int image_pix_width, image_pix_height;
+	/// 's=', 'v=', if 'a=t' or 'a=T', used only when 'f=24' or 'f=32'.
+	/// When 'a=f', this is the size of the frame rectangle when composed on
+	/// top of another frame.
+	int frame_pix_width, frame_pix_height;
 	/// 'x=', 'y=' - top-left corner of the source rectangle.
 	int src_pix_x, src_pix_y;
 	/// 'w=', 'h=' - width and height of the source rectangle.
@@ -2560,9 +2596,6 @@ typedef struct {
 	// 'x=' and 'y=', the relative position of the frame image when it's
 	// composed on top of another frame.
 	int frame_dst_pix_x, frame_dst_pix_y;
-	/// (Only for 'a=f'). 's=', 'v=', the size of the frame rectangle when
-	/// composed on top of another frame.
-	int frame_pix_width, frame_pix_height;
 	/// 'X=', 'X=1' to replace colors instead of alpha blending on top of
 	/// the background color or frame.
 	char replace_instead_of_blending;
@@ -2711,8 +2744,8 @@ static void gr_reporterror_frame(ImageFrame *frame, const char *format, ...) {
 /// Loads an image and creates a success/failure response. Returns `frame`, or
 /// NULL if it's a query action and the image was deleted.
 static ImageFrame *gr_loadimage_and_report(ImageFrame *frame) {
-	gr_load_original_image(frame);
-	if (!frame->original_image) {
+	gr_load_imlib_object(frame);
+	if (!frame->imlib_object) {
 		gr_reporterror_frame(frame, "EBADF: could not load image");
 	} else {
 		gr_reportsuccess_frame(frame);
@@ -2778,8 +2811,7 @@ static void gr_display_nonvirtual_placement(ImagePlacement *placement) {
 static void gr_schedule_image_redraw(Image *img) {
 	if (!img)
 		return;
-	gr_schedule_image_redraw_by_id(img->image_id, img->min_row,
-				       img->max_row);
+	gr_schedule_image_redraw_by_id(img->image_id);
 }
 
 /// Appends data from `payload` to the frame `frame` when using direct
@@ -2959,16 +2991,11 @@ static ImageFrame *gr_new_image_or_frame_from_command(GraphicsCommand *cmd) {
 	frame->gap = cmd->gap;
 	img->total_duration += frame->gap;
 	frame->blend = !cmd->replace_instead_of_blending;
-	// Set the frame data dimensions. It comes from different fields for
-	// different actions.
+	frame->data_pix_width = cmd->frame_pix_width;
+	frame->data_pix_height = cmd->frame_pix_height;
 	if (cmd->action == 'f') {
-		frame->data_pix_width = cmd->frame_pix_width;
-		frame->data_pix_height = cmd->frame_pix_height;
 		frame->x = cmd->frame_dst_pix_x;
 		frame->y = cmd->frame_dst_pix_y;
-	} else {
-		frame->data_pix_width = cmd->image_pix_width;
-		frame->data_pix_height = cmd->image_pix_height;
 	}
 	// We save the quietness information in the frame because for direct
 	// transmission subsequent transmission command won't contain this info.
@@ -3441,20 +3468,16 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, KeyAndValue *kv) {
 		}
 		break;
 	case 's':
-		if (cmd->action == 'f')
-			cmd->frame_pix_width = num;
-		else if (cmd->action == 'a')
+		if (cmd->action == 'a')
 			cmd->animation_state = num;
 		else
-			cmd->image_pix_width = num;
+			cmd->frame_pix_width = num;
 		break;
 	case 'v':
-		if (cmd->action == 'f')
-			cmd->frame_pix_height = num;
-		else if (cmd->action == 'a')
+		if (cmd->action == 'a')
 			cmd->loops = num;
 		else
-			cmd->image_pix_height = num;
+			cmd->frame_pix_height = num;
 		break;
 	case 'i':
 		cmd->image_id = num;
