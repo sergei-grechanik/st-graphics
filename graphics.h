@@ -11,20 +11,28 @@ void gr_deinit();
 /// Add an image rectangle to a list if rectangles to draw. This function may
 /// actually draw some rectangles, or it may wait till more rectangles are
 /// appended. Must be called between `gr_start_drawing` and `gr_finish_drawing`.
-/// - `start_col` and `start_row` are zero-based.
-/// - `end_col` and `end_row` are exclusive (beyond the last col/row).
+/// - `img_start_col..img_end_col` and `img_start_row..img_end_row` define the
+///   part of the image to draw (row/col indices are zero-based, ends are
+///   excluded).
+/// - `x_col` and `y_row` are the coordinates of the top-left corner of the
+///   image in the terminal grid.
+/// - `x_pix` and `y_pix` are the same but in pixels.
 /// - `reverse` indicates whether colors should be inverted.
 void gr_append_imagerect(Drawable buf, uint32_t image_id, uint32_t placement_id,
-			 int start_col, int end_col, int start_row, int end_row,
-			 int x_pix, int y_pix, int cw, int ch, int reverse);
+			 int img_start_col, int img_end_col, int img_start_row,
+			 int img_end_row, int x_col, int y_row, int x_pix,
+			 int y_pix, int cw, int ch, int reverse);
 /// Prepare for image drawing. `cw` and `ch` are dimensions of the cell.
 void gr_start_drawing(Drawable buf, int cw, int ch);
 /// Finish image drawing. This functions will draw all the rectangles left to
 /// draw.
 void gr_finish_drawing(Drawable buf);
+/// Mark rows containing animations as dirty if it's time to redraw them. Must
+/// be called right after `gr_start_drawing`.
+void gr_mark_dirty_animations(int *dirty, int rows);
 
 /// Parse and execute a graphics command. `buf` must start with 'G' and contain
-/// at least `len + 1` characters (including '\0'). Returns 0 on success.
+/// at least `len + 1` characters (including '\0'). Returns 1 on success.
 /// Additional informations is returned through `graphics_command_result`.
 int gr_parse_command(char *buf, size_t len);
 
@@ -32,9 +40,13 @@ int gr_parse_command(char *buf, size_t len);
 /// the argument. Executes xmessage with an error message on failure.
 void gr_preview_image(uint32_t image_id, const char *command);
 
-/// Generates a human-readable description of the image placement.
-void gr_get_placement_description(uint32_t image_id, uint32_t placement_id,
-				  char *buf, size_t len);
+/// Executes `<st> -e less <file>` where <file> is the name of a temporary file
+/// containing the information about an image and placement, and <st> is
+/// specified with `st_executable`.
+void gr_show_image_info(uint32_t image_id, uint32_t placement_id,
+			uint32_t imgcol, uint32_t imgrow,
+			char is_classic_placeholder, int32_t diacritic_count,
+			char *st_executable);
 
 /// Dumps the internal state (images and placements) to stderr.
 void gr_dump_state();
@@ -49,6 +61,9 @@ void gr_for_each_image_cell(int (*callback)(void *data, uint32_t image_id,
 					    int row, char is_classic),
 			    void *data);
 
+/// Marks all the rows containing the image with `image_id` as dirty.
+void gr_schedule_image_redraw_by_id(uint32_t image_id);
+
 typedef enum {
 	GRAPHICS_DEBUG_NONE = 0,
 	GRAPHICS_DEBUG_LOG = 1,
@@ -60,6 +75,10 @@ extern GraphicsDebugMode graphics_debug_mode;
 
 /// Whether to display images or just draw bounding boxes.
 extern char graphics_display_images;
+
+/// The time in milliseconds until the next redraw to update animations.
+/// INT_MAX means no redraw is needed. Populated by `gr_finish_drawing`.
+extern int graphics_next_redraw_delay;
 
 #define MAX_GRAPHICS_RESPONSE_LEN 256
 

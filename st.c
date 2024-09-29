@@ -1389,6 +1389,23 @@ void gr_for_each_image_cell(int (*callback)(void *data, uint32_t image_id,
 	}
 }
 
+void gr_schedule_image_redraw_by_id(uint32_t image_id) {
+	for (int row = 0; row < term.row; ++row) {
+		if (term.dirty[row])
+			continue;
+		for (int col = 0; col < term.col; ++col) {
+			Glyph *gp = &term.line[row][col];
+			if (gp->mode & ATTR_IMAGE) {
+				uint32_t cell_image_id = tgetimgid(gp);
+				if (cell_image_id == image_id) {
+					term.dirty[row] = 1;
+					break;
+				}
+			}
+		}
+	}
+}
+
 void
 tdeletechar(int n)
 {
@@ -2875,7 +2892,7 @@ drawregion(int x1, int y1, int x2, int y2)
 {
 	int y;
 
-	xstartimagedraw();
+	xstartimagedraw(term.dirty, term.row);
 
 	for (y = y1; y < y2; y++) {
 		if (!term.dirty[y])
