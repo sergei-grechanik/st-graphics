@@ -140,7 +140,6 @@ extern unsigned int tabspaces;
 extern unsigned int defaultfg;
 extern unsigned int defaultbg;
 extern unsigned int defaultcs;
-extern float alpha;
 
 // Accessors to decoration properties stored in `decor`.
 // The 25-th bit is used to indicate if it's a 24-bit color.

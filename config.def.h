@@ -102,9 +102,6 @@ char *termname = "st-256color";
  */
 unsigned int tabspaces = 8;
 
-/* bg opacity */
-float alpha = 1.0;
-
 /* Terminal colors (16 first used in escape sequence) */
 static const char *colorname[] = {
 	// [> 8 normal colors <]
@@ -242,8 +239,6 @@ static Shortcut shortcuts[] = {
 	{ ControlMask,          XK_Print,       toggleprinter,  {.i =  0} },
 	{ ShiftMask,            XK_Print,       printscreen,    {.i =  0} },
 	{ XK_ANY_MOD,           XK_Print,       printsel,       {.i =  0} },
-	{ TERMMOD,              XK_braceright,  adjustalpha,    {.f = +0.02} },
-	{ TERMMOD,              XK_braceleft,   adjustalpha,    {.f = -0.02} },
 	{ TERMMOD,              XK_Prior,       zoom,           {.f = +1} },
 	{ TERMMOD,              XK_Next,        zoom,           {.f = -1} },
 	{ TERMMOD,              XK_Home,        zoomreset,      {.f =  0} },
