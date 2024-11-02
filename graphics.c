@@ -31,23 +31,27 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include "graphics.h"
+
 #include <zlib.h>
 #include <Imlib2.h>
 #include <X11/Xlib.h>
 #include <X11/extensions/Xrender.h>
+
 #include <assert.h>
 #include <ctype.h>
+#include <fcntl.h>
 #include <spawn.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 #include <errno.h>
 
-#include "graphics.h"
 #include "khash.h"
 #include "kvec.h"
 
@@ -113,14 +117,16 @@ enum ImageUploadingFailure {
 	ERROR_CANNOT_OPEN_CACHED_FILE = 2,
 	ERROR_UNEXPECTED_SIZE = 3,
 	ERROR_CANNOT_COPY_FILE = 4,
+	ERROR_CANNOT_OPEN_SHM = 5,
 };
 
-const char *image_uploading_failure_strings[5] = {
+const char *image_uploading_failure_strings[6] = {
 	"NO_ERROR",
 	"ERROR_OVER_SIZE_LIMIT",
 	"ERROR_CANNOT_OPEN_CACHED_FILE",
 	"ERROR_UNEXPECTED_SIZE",
 	"ERROR_CANNOT_COPY_FILE",
+	"ERROR_CANNOT_OPEN_SHM",
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -373,10 +379,10 @@ static uint64_t global_command_counter = 0;
 /// The next redraw times for each row of the terminal. Used for animations.
 /// 0 means no redraw is scheduled.
 static kvec_t(Milliseconds) next_redraw_times = {0, 0, NULL};
-/// The number of files loaded in the current redraw cycle.
-static int this_redraw_cycle_loaded_files = 0;
-/// The number of pixmaps loaded in the current redraw cycle.
-static int this_redraw_cycle_loaded_pixmaps = 0;
+/// The number of files loaded in the current redraw cycle or command execution.
+static int debug_loaded_files_counter = 0;
+/// The number of pixmaps loaded in the current redraw cycle or command execution.
+static int debug_loaded_pixmaps_counter = 0;
 
 /// The directory where the cache files are stored.
 static char cache_dir[MAX_FILENAME_SIZE - 16];
@@ -1234,10 +1240,11 @@ gr_get_unloadable_objects_sorted_by_score(Milliseconds now) {
 	ImagePlacement *placement = NULL;
 	kh_foreach_value(images, img, {
 		foreach_frame(*img, frame, {
-			if (!frame->imlib_object)
-				continue;
-			kv_push(UnloadableObject, objects,
-				gr_unloadable_object_for_frame(now, frame));
+			if (frame->imlib_object) {
+				kv_push(UnloadableObject, objects,
+					gr_unloadable_object_for_frame(now,
+								       frame));
+			}
 			int frameidx = frame->index;
 			kh_foreach_value(img->placements, placement, {
 				if (!gr_get_frame_pixmap(placement, frameidx))
@@ -1321,10 +1328,11 @@ static void gr_check_limits() {
 		}
 	}
 	if (changed) {
+		Milliseconds end = gr_now_ms();
 		GR_LOG("After cleaning:  ram: %ld KiB  disk: %ld KiB  "
-		       "img count: %d  placement count: %d\n",
+		       "img count: %d  placement count: %d  Took %ld ms\n",
 		       images_ram_size / 1024, images_disk_size / 1024,
-		       kh_size(images), total_placement_count);
+		       kh_size(images), total_placement_count, end - now);
 	}
 	kv_destroy(images_sorted);
 	kv_destroy(placements_sorted);
@@ -1526,15 +1534,12 @@ static Imlib_Image gr_load_raw_pixel_data(ImageFrame *frame,
 	imlib_image_set_has_alpha(1);
 	DATA32* data = imlib_image_get_data();
 
-	// The default format is 32.
-	int format = frame->format ? frame->format : 32;
-
 	if (frame->compression == 0) {
-		gr_load_raw_pixel_data_uncompressed(data, file, format,
+		gr_load_raw_pixel_data_uncompressed(data, file, frame->format,
 						    total_pixels);
 	} else {
-		int ret = gr_load_raw_pixel_data_compressed(data, file, format,
-							    total_pixels);
+		int ret = gr_load_raw_pixel_data_compressed(
+			data, file, frame->format, total_pixels);
 		if (ret != 0) {
 			imlib_image_put_back_data(data);
 			imlib_free_image();
@@ -1606,17 +1611,19 @@ static void gr_load_imlib_object(ImageFrame *frame) {
 		}
 	}
 
+	// We exclude background frames from the time to load the frame.
+	Milliseconds loading_start = gr_now_ms();
+
 	// Load the frame data image.
 	Imlib_Image frame_data_image = NULL;
 	char filename[MAX_FILENAME_SIZE];
 	gr_get_frame_filename(frame, filename, MAX_FILENAME_SIZE);
 	GR_LOG("Loading image: %s\n", sanitized_filename(filename));
-	if (frame->format == 100 || frame->format == 0)
+	if (frame->format == 100)
 		frame_data_image = imlib_load_image(filename);
-	if (frame->format == 32 || frame->format == 24 ||
-	    (!frame_data_image && frame->format == 0))
+	if (frame->format == 32 || frame->format == 24)
 		frame_data_image = gr_load_raw_pixel_data(frame, filename);
-	this_redraw_cycle_loaded_files++;
+	debug_loaded_files_counter++;
 
 	if (!frame_data_image) {
 		if (frame->status != STATUS_RAM_LOADING_ERROR) {
@@ -1691,9 +1698,12 @@ static void gr_load_imlib_object(ImageFrame *frame) {
 	images_ram_size += gr_frame_current_ram_size(frame);
 	frame->status = STATUS_RAM_LOADING_SUCCESS;
 
-	GR_LOG("After loading image %u frame %d ram: %ld KiB  (+ %u KiB)\n",
-	       frame->image->image_id, frame->index,
-	       images_ram_size / 1024, gr_frame_current_ram_size(frame) / 1024);
+	Milliseconds loading_end = gr_now_ms();
+	GR_LOG("After loading image %u frame %d ram: %ld KiB  (+ %u KiB)  Took "
+	       "%ld ms\n",
+	       frame->image->image_id, frame->index, images_ram_size / 1024,
+	       gr_frame_current_ram_size(frame) / 1024,
+	       loading_end - loading_start);
 }
 
 /// Premultiplies the alpha channel of the image data. The data is an array of
@@ -1719,6 +1729,7 @@ static void gr_premultiply_alpha(DATA32 *data, size_t num_pixels) {
 /// pixels. If the placement is already loaded, it will be reloaded only if the
 /// cell dimensions have changed.
 Pixmap gr_load_pixmap(ImagePlacement *placement, int frameidx, int cw, int ch) {
+	Milliseconds loading_start = gr_now_ms();
 	Image *img = placement->image;
 	ImageFrame *frame = gr_get_frame(img, frameidx);
 
@@ -1866,13 +1877,15 @@ Pixmap gr_load_pixmap(ImagePlacement *placement, int frameidx, int cw, int ch) {
 	// Assign the pixmap to the frame and increase the ram size.
 	gr_set_frame_pixmap(placement, frameidx, pixmap);
 	images_ram_size += gr_placement_single_frame_ram_size(placement);
-	this_redraw_cycle_loaded_pixmaps++;
+	debug_loaded_pixmaps_counter++;
 
+	Milliseconds loading_end = gr_now_ms();
 	GR_LOG("After loading placement %u/%u frame %d ram: %ld KiB  (+ %u "
-	       "KiB)\n",
+	       "KiB)  Took %ld ms\n",
 	       frame->image->image_id, placement->placement_id, frame->index,
 	       images_ram_size / 1024,
-	       gr_placement_single_frame_ram_size(placement) / 1024);
+	       gr_placement_single_frame_ram_size(placement) / 1024,
+	       loading_end - loading_start);
 
 	// Free up ram if needed, but keep the pixmap we've loaded no matter
 	// what.
@@ -2442,8 +2455,8 @@ static int gr_getrectbottom(ImageRect *rect) {
 void gr_start_drawing(Drawable buf, int cw, int ch) {
 	current_cw = cw;
 	current_ch = ch;
-	this_redraw_cycle_loaded_files = 0;
-	this_redraw_cycle_loaded_pixmaps = 0;
+	debug_loaded_files_counter = 0;
+	debug_loaded_pixmaps_counter = 0;
 	drawing_start_time = gr_now_ms();
 	imlib_context_set_drawable(buf);
 }
@@ -2502,8 +2515,8 @@ void gr_finish_drawing(Drawable buf) {
 
 		if (milliseconds > 0) {
 			fprintf(stderr, "%s  (loaded %d files, %d pixmaps)\n",
-				info, this_redraw_cycle_loaded_files,
-				this_redraw_cycle_loaded_pixmaps);
+				info, debug_loaded_files_counter,
+				debug_loaded_pixmaps_counter);
 		}
 	}
 
@@ -2646,14 +2659,14 @@ typedef struct {
 	uint32_t placement_id;
 	/// 'm=', may be 0 or 1.
 	int more;
-	/// True if either 'm=0' or 'm=1' is specified.
-	char is_data_transmission;
 	/// True if turns out that this command is a continuation of a data
 	/// transmission and not the first one for this image. Populated by
 	/// `gr_handle_transmit_command`.
 	char is_direct_transmission_continuation;
 	/// 'S=', used to check the size of uploaded data.
 	int size;
+	/// The offset of the frame image data in the shared memory ('O=').
+	unsigned offset;
 	/// 'U=', whether it's a virtual placement for Unicode placeholders.
 	int virtual;
 	/// 'C=', if true, do not move the cursor when displaying this placement
@@ -2885,6 +2898,31 @@ static void gr_schedule_image_redraw(Image *img) {
 	gr_schedule_image_redraw_by_id(img->image_id);
 }
 
+/// Appends `data` to the on-disk cache file of the frame `frame`. Creates the
+/// file if it doesn't exist. Updates `frame->disk_size` and the total disk
+/// size. Returns 1 on success and 0 on failure.
+static int gr_append_raw_data_to_file(ImageFrame *frame, const char *data,
+				      size_t data_size) {
+	// If there is no open file corresponding to the image, create it.
+	if (!frame->open_file) {
+		gr_make_sure_tmpdir_exists();
+		char filename[MAX_FILENAME_SIZE];
+		gr_get_frame_filename(frame, filename, MAX_FILENAME_SIZE);
+		FILE *file = fopen(filename, frame->disk_size ? "a" : "w");
+		if (!file)
+			return 0;
+		frame->open_file = file;
+	}
+
+	// Write data to the file and update disk size variables.
+	fwrite(data, 1, data_size, frame->open_file);
+	frame->disk_size += data_size;
+	frame->image->total_disk_size += data_size;
+	images_disk_size += data_size;
+	gr_touch_frame(frame);
+	return 1;
+}
+
 /// Appends data from `payload` to the frame `frame` when using direct
 /// transmission. Note that we report errors only for the final command
 /// (`!more`) to avoid spamming the client. If the frame is not specified, use
@@ -2935,29 +2973,15 @@ static void gr_append_data(ImageFrame *frame, const char *payload, int more) {
 		return;
 	}
 
-	// If there is no open file corresponding to the image, create it.
-	if (!frame->open_file) {
-		gr_make_sure_tmpdir_exists();
-		char filename[MAX_FILENAME_SIZE];
-		gr_get_frame_filename(frame, filename, MAX_FILENAME_SIZE);
-		FILE *file = fopen(filename, frame->disk_size ? "a" : "w");
-		if (!file) {
-			frame->status = STATUS_UPLOADING_ERROR;
-			frame->uploading_failure = ERROR_CANNOT_OPEN_CACHED_FILE;
-			if (!more)
-				gr_reportuploaderror(frame);
-			return;
-		}
-		frame->open_file = file;
+	// Append the data to the file.
+	if (!gr_append_raw_data_to_file(frame, data, data_size)) {
+		frame->status = STATUS_UPLOADING_ERROR;
+		frame->uploading_failure = ERROR_CANNOT_OPEN_CACHED_FILE;
+		if (!more)
+			gr_reportuploaderror(frame);
+		return;
 	}
-
-	// Write data to the file and update disk size variables.
-	fwrite(data, 1, data_size, frame->open_file);
 	free(data);
-	frame->disk_size += data_size;
-	frame->image->total_disk_size += data_size;
-	images_disk_size += data_size;
-	gr_touch_frame(frame);
 
 	if (more) {
 		current_upload_image_id = frame->image->image_id;
@@ -3055,7 +3079,8 @@ static ImageFrame *gr_new_image_or_frame_from_command(GraphicsCommand *cmd) {
 	ImageFrame *frame = gr_append_new_frame(img);
 	// Initialize the frame.
 	frame->expected_size = cmd->size;
-	frame->format = cmd->format;
+	// The default format is 32.
+	frame->format = cmd->format ? cmd->format : 32;
 	frame->compression = cmd->compression;
 	frame->background_color = cmd->background_color;
 	frame->background_frame_index = cmd->background_frame;
@@ -3067,6 +3092,15 @@ static ImageFrame *gr_new_image_or_frame_from_command(GraphicsCommand *cmd) {
 	if (cmd->action == 'f') {
 		frame->x = cmd->frame_dst_pix_x;
 		frame->y = cmd->frame_dst_pix_y;
+	}
+	// If the expected size is not specified, we can infer it from the pixel
+	// width and height if the format is 24 or 32 and there is no
+	// compression. This is required for the shared memory transmission.
+	if (!frame->expected_size && !frame->compression &&
+	    (frame->format == 24 || frame->format == 32)) {
+		frame->expected_size = frame->data_pix_width *
+				       frame->data_pix_height *
+				       (frame->format / 8);
 	}
 	// We save the quietness information in the frame because for direct
 	// transmission subsequent transmission command won't contain this info.
@@ -3205,11 +3239,6 @@ static ImageFrame *gr_handle_transmit_command(GraphicsCommand *cmd) {
 			gr_append_data(frame, cmd->payload, cmd->more);
 			return frame;
 		}
-		// If no action is specified, it's not the first transmission
-		// command. If we couldn't find the image, something went wrong
-		// and we should just drop this command.
-		if (cmd->action == 0)
-			return NULL;
 		// Otherwise create a new image or frame structure.
 		frame = gr_new_image_or_frame_from_command(cmd);
 		if (!frame)
@@ -3218,6 +3247,70 @@ static ImageFrame *gr_handle_transmit_command(GraphicsCommand *cmd) {
 		frame->status = STATUS_UPLOADING;
 		// Start appending data.
 		gr_append_data(frame, cmd->payload, cmd->more);
+	} else if (cmd->transmission_medium == 's') {
+		// Shared memory transmission.
+		// Create a new image or a new frame of an existing image.
+		frame = gr_new_image_or_frame_from_command(cmd);
+		if (!frame)
+			return NULL;
+		last_image_id = frame->image->image_id;
+		// Check the data size limit.
+		if (frame->expected_size > graphics_max_single_image_file_size) {
+			frame->uploading_failure = ERROR_OVER_SIZE_LIMIT;
+			gr_reportuploaderror(frame);
+			return NULL;
+		}
+		// Decode the filename.
+		char *original_filename = gr_base64dec(cmd->payload, NULL);
+		GR_LOG("Loading image from shared memory %s\n",
+		       sanitized_filename(original_filename));
+		// Open the shared memory object.
+		int fd = shm_open(original_filename, O_RDONLY, 0);
+		if (fd == -1) {
+			gr_reporterror_cmd(cmd,
+					   "EBADF: %s", strerror(errno));
+			frame->status = STATUS_UPLOADING_ERROR;
+			frame->uploading_failure = ERROR_CANNOT_OPEN_SHM;
+			fprintf(stderr, "shm_open failed\n");
+			free(original_filename);
+			return frame;
+		}
+		free(original_filename);
+		// Map the shared memory object.
+		void *data = mmap(NULL, frame->expected_size, PROT_READ,
+				  MAP_SHARED, fd, cmd->offset);
+		if (data == MAP_FAILED) {
+			gr_reporterror_cmd(cmd,
+					   "EBADF: %s", strerror(errno));
+			frame->status = STATUS_UPLOADING_ERROR;
+			frame->uploading_failure = ERROR_CANNOT_OPEN_SHM;
+			fprintf(stderr, "mmap failed\n");
+			close(fd);
+			return frame;
+		}
+		close(fd);
+		// Append the data to the cache file.
+		if (gr_append_raw_data_to_file(frame, data,
+					       frame->expected_size)) {
+			frame->status = STATUS_UPLOADING_SUCCESS;
+		} else {
+			frame->status = STATUS_UPLOADING_ERROR;
+			frame->uploading_failure =
+				ERROR_CANNOT_OPEN_CACHED_FILE;
+			gr_reportuploaderror(frame);
+		}
+		// Close the cache file.
+		if (frame->open_file) {
+			fclose(frame->open_file);
+			frame->open_file = NULL;
+		}
+		// Unmap the data
+		if (munmap(data, frame->expected_size) != 0)
+			fprintf(stderr, "munmap failed: %s\n", strerror(errno));
+		// Try to load and redraw existing instances.
+		gr_schedule_image_redraw(frame->image);
+		frame = gr_loadimage_and_report(frame);
+		gr_check_limits();
 	} else {
 		gr_reporterror_cmd(
 			cmd,
@@ -3422,14 +3515,7 @@ static void gr_handle_command(GraphicsCommand *cmd) {
 	ImageFrame *frame = NULL;
 	switch (cmd->action) {
 	case 0:
-		// If no action is specified, it may be a data transmission
-		// command if 'm=' is specified.
-		if (cmd->is_data_transmission) {
-			gr_handle_transmit_command(cmd);
-			break;
-		}
-		gr_reporterror_cmd(cmd, "EINVAL: no action specified");
-		break;
+		// If no action is specified, it is data transmission.
 	case 't':
 	case 'q':
 	case 'f':
@@ -3590,11 +3676,13 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, KeyAndValue *kv) {
 			cmd->rows = num;
 		break;
 	case 'm':
-		cmd->is_data_transmission = 1;
 		cmd->more = num;
 		break;
 	case 'S':
 		cmd->size = num;
+		break;
+	case 'O':
+		cmd->offset = num;
 		break;
 	case 'U':
 		cmd->virtual = num;
@@ -3633,10 +3721,13 @@ int gr_parse_command(char *buf, size_t len) {
 	if (buf[0] != 'G')
 		return 0;
 
-	memset(&graphics_command_result, 0, sizeof(GraphicsCommandResult));
-
+	Milliseconds command_start_time = gr_now_ms();
+	debug_loaded_files_counter = 0;
+	debug_loaded_pixmaps_counter = 0;
 	global_command_counter++;
 	GR_LOG("### Command %lu: %.80s\n", global_command_counter, buf);
+
+	memset(&graphics_command_result, 0, sizeof(GraphicsCommandResult));
 
 	// Eat the 'G'.
 	++buf;
@@ -3751,6 +3842,11 @@ int gr_parse_command(char *buf, size_t len) {
 		if (!graphics_command_result.error || cmd.quiet >= 2)
 			graphics_command_result.response[0] = '\0';
 	}
+
+	Milliseconds command_end_time = gr_now_ms();
+	GR_LOG("Command %lu took %ld ms  (loaded %d files, %d pixmaps)\n\n",
+	       global_command_counter, command_end_time - command_start_time,
+	       debug_loaded_files_counter, debug_loaded_pixmaps_counter);
 
 	return 1;
 }

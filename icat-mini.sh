@@ -28,7 +28,8 @@ trap "echo 'icat-mini was interrupted' >&2; exit 1" INT
 cols=""
 rows=""
 file=""
-tty="/dev/tty"
+command_tty=""
+response_tty=""
 uploading_method="auto"
 cell_size=""
 scale=1
@@ -97,24 +98,6 @@ done
 file="$(realpath "$file")"
 
 #####################################################################
-# Adjust the terminal state
-#####################################################################
-
-stty_orig="$(stty -g < "$tty")"
-stty -echo < "$tty"
-# Disable ctrl-z. Pressing ctrl-z during image uploading may cause some
-# horrible issues otherwise.
-stty susp undef < "$tty"
-stty -icanon < "$tty"
-
-restore_echo() {
-    [ -n "$stty_orig" ] || return
-    stty $stty_orig < "$tty"
-}
-
-trap restore_echo EXIT TERM
-
-#####################################################################
 # Detect imagemagick
 #####################################################################
 
@@ -135,12 +118,41 @@ fi
 # Check if we are inside tmux.
 inside_tmux=""
 if [ -n "$TMUX" ]; then
-    case "$TERM" in
-        *tmux*|*screen*)
-            inside_tmux=1
-            ;;
-    esac
+    inside_tmux=1
 fi
+
+if [ -z "$command_tty" ] && [ -n "$inside_tmux" ]; then
+    # Get the pty of the current tmux pane.
+    command_tty="$(tmux display-message -t "$TMUX_PANE" -p "#{pane_tty}")"
+    if [ ! -e "$command_tty" ]; then
+        command_tty=""
+    fi
+fi
+
+#####################################################################
+# Adjust the terminal state
+#####################################################################
+
+if [ -z "$command_tty" ]; then
+    command_tty="/dev/tty"
+fi
+if [ -z "$response_tty" ]; then
+    response_tty="/dev/tty"
+fi
+
+stty_orig="$(stty -g < "$response_tty")"
+stty -echo < "$response_tty"
+# Disable ctrl-z. Pressing ctrl-z during image uploading may cause some
+# horrible issues otherwise.
+stty susp undef < "$response_tty"
+stty -icanon < "$response_tty"
+
+restore_echo() {
+    [ -n "$stty_orig" ] || return
+    stty $stty_orig < "$response_tty"
+}
+
+trap restore_echo EXIT TERM
 
 #####################################################################
 # Compute the number of rows and columns
@@ -192,7 +204,7 @@ if [ -z "$cols" ] || [ -z "$rows" ]; then
     fi
     # Otherwise try to use TIOCGWINSZ ioctl via python.
     if [ -z "$cell_width" ] || [ -z "$cell_height" ]; then
-        cell_size_ioctl="$(python3 -c "$python_ioctl_command" < "$tty" 2> /dev/null)"
+        cell_size_ioctl="$(python3 -c "$python_ioctl_command" < "$command_tty" 2> /dev/null)"
         cell_width="${cell_size_ioctl% *}"
         cell_height="${cell_size_ioctl#* }"
         if ! is_pos_int "$cell_height" || ! is_pos_int "$cell_width"; then
@@ -203,14 +215,14 @@ if [ -z "$cols" ] || [ -z "$rows" ]; then
     # If it didn't work, try to use csi XTWINOPS.
     if [ -z "$cell_width" ] || [ -z "$cell_height" ]; then
         if [ -n "$inside_tmux" ]; then
-            printf '\ePtmux;\e\e[16t\e\\' >> "$tty"
+            printf '\ePtmux;\e\e[16t\e\\' >> "$command_tty"
         else
-            printf '\e[16t' >> "$tty"
+            printf '\e[16t' >> "$command_tty"
         fi
         # The expected response will look like ^[[6;<height>;<width>t
         term_response=""
         while true; do
-            char=$(dd bs=1 count=1 <"$tty" 2>/dev/null)
+            char=$(dd bs=1 count=1 <"$response_tty" 2>/dev/null)
             if [ "$char" = "t" ]; then
                 break
             fi
@@ -311,19 +323,31 @@ else
     graphics_command_end='\e\\'
 fi
 
-start_gr_command() {
-    printf "$graphics_command_start" >> "$tty"
-}
-end_gr_command() {
-    printf "$graphics_command_end" >> "$tty"
-}
-
 # Send a graphics command with the correct start and end
 gr_command() {
-    start_gr_command
-    printf '%s' "$1" >> "$tty"
-    end_gr_command
+    printf "${graphics_command_start}%s${graphics_command_end}" "$1" >> "$command_tty"
 }
+
+# Compute the size of a data chunk for direct transmission.
+if [ "$uploading_method" = "direct" ]; then
+    # Get the value of PIPE_BUF.
+    pipe_buf="$(getconf PIPE_BUF "$command_tty" 2> /dev/null)"
+    if is_pos_int "$pipe_buf"; then
+        # Make sure it's between 512 and 4096.
+        if [ "$(expr "$pipe_buf" \< 512)" -eq 1 ]; then
+            pipe_buf=512
+        elif [ "$(expr "$pipe_buf" \> 4096)" -eq 1 ]; then
+            pipe_buf=4096
+        fi
+    else
+        pipe_buf=512
+    fi
+
+    # The size of each graphics command shouldn't be more than PIPE_BUF, so we
+    # set the size of an encoded chunk to be PIPE_BUF - 128 to leave some space
+    # for the command.
+    chunk_size="$(expr "$pipe_buf" - 128)"
+fi
 
 # Send an uploading command. Usage: gr_upload <action> <command> <file>
 # Where <action> is a part of command that specifies the action, it will be
@@ -360,10 +384,7 @@ gr_upload() {
 
         # Transmit chunks.
         for chunk in "$chunkdir/chunk_"*; do
-            start_gr_command
-            printf '%s' "${arg_action},i=${image_id},m=1;" >> "$tty"
-            cat "$chunk" >> "$tty"
-            end_gr_command
+            gr_command "${arg_action},i=${image_id},m=1;$(cat "$chunk")"
             rm "$chunk"
         done
 
@@ -422,6 +443,8 @@ upload_image_and_print_placeholder() {
             fi
 
             if [ "$frame_number" -eq 1 ]; then
+                # Abort the previous transmission, just in case.
+                gr_command "q=2,a=t,i=${image_id},m=0"
                 # Upload the first frame with a=T
                 gr_upload "q=2,a=T" "f=100,U=1,i=${image_id},c=${cols},r=${rows}" "$frame"
                 # Set the delay for the first frame and also play the animation
@@ -474,19 +497,20 @@ print_placeholder() {
     # Fill the output with characters representing the image
     for y in $(seq 0 "$(expr "$rows" - 1)"); do
         eval "row_diacritic=\$d${y}"
-        printf '%s' "$line_start"
+        line="$line_start"
         for x in $(seq 0 "$(expr "$cols" - 1)"); do
             eval "col_diacritic=\$d${x}"
             # Note that when $x is out of bounds, the column diacritic will
             # be empty, meaning that the column should be guessed by the
             # terminal.
             if [ "$x" -ge "$num_diacritics" ]; then
-                printf '%s' "${placeholder}${row_diacritic}"
+                line="${line}${placeholder}${row_diacritic}"
             else
-                printf '%s' "${placeholder}${row_diacritic}${col_diacritic}${id_diacritic}"
+                line="${line}${placeholder}${row_diacritic}${col_diacritic}${id_diacritic}"
             fi
         done
-        printf '%s\n' "$line_end"
+        line="${line}${line_end}"
+        printf "%s\n" "$line"
     done
 
     printf "\e[0m"
