@@ -3254,11 +3254,20 @@ static ImageFrame *gr_handle_transmit_command(GraphicsCommand *cmd) {
 		if (!frame)
 			return NULL;
 		last_image_id = frame->image->image_id;
+		// Check that we know the size.
+		if (!frame->expected_size) {
+			frame->status = STATUS_UPLOADING_ERROR;
+			frame->uploading_failure = ERROR_UNEXPECTED_SIZE;
+			gr_reporterror_cmd(
+				cmd, "EINVAL: the size of the image is not "
+				     "specified and cannot be inferred");
+			return frame;
+		}
 		// Check the data size limit.
 		if (frame->expected_size > graphics_max_single_image_file_size) {
 			frame->uploading_failure = ERROR_OVER_SIZE_LIMIT;
 			gr_reportuploaderror(frame);
-			return NULL;
+			return frame;
 		}
 		// Decode the filename.
 		char *original_filename = gr_base64dec(cmd->payload, NULL);
@@ -3267,30 +3276,43 @@ static ImageFrame *gr_handle_transmit_command(GraphicsCommand *cmd) {
 		// Open the shared memory object.
 		int fd = shm_open(original_filename, O_RDONLY, 0);
 		if (fd == -1) {
-			gr_reporterror_cmd(cmd,
-					   "EBADF: %s", strerror(errno));
+			gr_reporterror_cmd(cmd, "EBADF: shm_open: %s",
+					   strerror(errno));
 			frame->status = STATUS_UPLOADING_ERROR;
 			frame->uploading_failure = ERROR_CANNOT_OPEN_SHM;
-			fprintf(stderr, "shm_open failed\n");
+			fprintf(stderr, "shm_open failed for %s\n",
+				sanitized_filename(original_filename));
+			shm_unlink(original_filename);
 			free(original_filename);
 			return frame;
 		}
+		shm_unlink(original_filename);
 		free(original_filename);
+		// The offset we pass to mmap must be a multiple of the page
+		// size. If it's not, adjust it and the size.
+		size_t page_size = sysconf(_SC_PAGESIZE);
+		if (page_size == -1)
+			page_size = 1;
+		size_t offset = cmd->offset - (cmd->offset % page_size);
+		size_t size = frame->expected_size + (cmd->offset - offset);
 		// Map the shared memory object.
-		void *data = mmap(NULL, frame->expected_size, PROT_READ,
-				  MAP_SHARED, fd, cmd->offset);
+		void *data =
+			mmap(NULL, size, PROT_READ, MAP_SHARED, fd, offset);
 		if (data == MAP_FAILED) {
-			gr_reporterror_cmd(cmd,
-					   "EBADF: %s", strerror(errno));
+			gr_reporterror_cmd(cmd, "EBADF: mmap: %s",
+					   strerror(errno));
 			frame->status = STATUS_UPLOADING_ERROR;
 			frame->uploading_failure = ERROR_CANNOT_OPEN_SHM;
-			fprintf(stderr, "mmap failed\n");
+			fprintf(stderr,
+				"mmap failed for size = %ld, offset = %ld\n",
+				size, offset);
 			close(fd);
 			return frame;
 		}
 		close(fd);
 		// Append the data to the cache file.
-		if (gr_append_raw_data_to_file(frame, data,
+		if (gr_append_raw_data_to_file(frame,
+					       data + (cmd->offset - offset),
 					       frame->expected_size)) {
 			frame->status = STATUS_UPLOADING_SUCCESS;
 		} else {

@@ -71,8 +71,9 @@ features.
         - ✅ Direct (`t=d`)
         - ✅ File (`t=f`)
         - ✅ Temporary file (`t=t`)
-        - ❌ Shared memory object (`t=s`)
-    - ❌ Size and offset specification (`S` and `O` keys)
+        - ✅ Shared memory object (`t=s`)
+    - ✅ Size and offset specification (`S` and `O` keys) for shared memory
+      - ❌ Not fully supported for files
     - ✅ Image numbers
     - ✅ Responses
     - ✅ Transmit and display (`a=T`)
@@ -80,7 +81,7 @@ features.
     - ✅ Classic placements (but see the note above)
     - ✅ Unicode placeholders
     - ✅ Placement IDs
-    - ❌ NOTE: Placement IDs must be 24-bit (between 1 and 16777215).
+      - ❌ NOTE: Placement IDs must be 24-bit (between 1 and 16777215).
     - ✅ Cursor movement policies `C=1` and `C=0`
     - ✅ Source rectangle (`x, y, w, h`)
     - ✅ The number of rows/columns (`r, c`)
@@ -131,6 +132,10 @@ features.
 ### Apps that sort of work
 - [hologram.nvim](https://github.com/edluffy/hologram.nvim) - There are some
   glitches, like erasure of parts of the status line.
+- [mpv](https://github.com/mpv-player/mpv) - shared memory works
+  (`mpv --vo=kitty --vo-kitty-use-shm=yes`), but slower than kitty, and there is
+  an annoying flickering status line at the top (unsupported z-index). There are
+  also some artifacts on high resolutions.
 
 ### Apps that don't work
 - [termvisage](https://github.com/AnonymouX47/termvisage) - seems to erase
