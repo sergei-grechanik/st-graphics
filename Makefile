@@ -4,7 +4,7 @@
 
 include config.mk
 
-SRC = st.c x.c rowcolumn_diacritics_helpers.c graphics.c boxdraw.c
+SRC = st.c x.c rowcolumn_diacritics_helpers.c graphics.c boxdraw.c hb.c
 OBJ = $(SRC:.c=.o)
 
 all: st
@@ -16,9 +16,10 @@ config.h:
 	$(CC) $(STCFLAGS) -c $<
 
 st.o: config.h st.h win.h graphics.h
-x.o: arg.h config.h st.h win.h graphics.h
+x.o: arg.h config.h st.h win.h graphics.h hb.h
 graphics.c: graphics.h khash.h kvec.h st.h
 boxdraw.o: config.h st.h boxdraw_data.h
+hb.o: st.h
 
 $(OBJ): config.h config.mk
 
