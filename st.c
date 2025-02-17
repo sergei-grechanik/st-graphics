@@ -828,6 +828,7 @@ ttynew(const char *line, char *cmd, const char *out, char **args)
 		close(s);
 		cmdfd = m;
 		signal(SIGCHLD, sigchld);
+		fcntl(cmdfd, F_SETFL, fcntl(cmdfd, F_GETFL, 0) | O_NONBLOCK);
 		break;
 	}
 	return cmdfd;
@@ -851,6 +852,8 @@ ttyread(void)
 	case 0:
 		exit(0);
 	case -1:
+		if (errno == EAGAIN)
+			return 0;
 		die("couldn't read from shell: %s\n", strerror(errno));
 	default:
 		buflen += ret;
@@ -943,8 +946,13 @@ ttywriteraw(const char *s, size_t n)
 			 * default of 256. This seems to be a reasonable value
 			 * for a serial line. Bigger values might clog the I/O.
 			 */
-			if ((r = write(cmdfd, s, (n < lim)? n : lim)) < 0)
-				goto write_error;
+			lim = 256;
+			if ((r = write(cmdfd, s, (n < lim)? n : lim)) < 0) {
+				if (errno == EAGAIN)
+					r = 0;
+				else
+					goto write_error;
+			}
 			if (r < n) {
 				/*
 				 * We weren't able to write out everything.
