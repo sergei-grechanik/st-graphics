@@ -349,6 +349,30 @@ if [ "$uploading_method" = "direct" ]; then
     chunk_size="$(expr "$pipe_buf" - 128)"
 fi
 
+# Check if the image format is supported.
+is_format_supported() {
+    arg_format="$1"
+    if [ "$arg_format" = "PNG" ]; then
+        return 0
+    elif [ "$arg_format" = "JPEG" ]; then
+        if [ -z "$inside_tmux" ]; then
+            actual_term="$TERM"
+        else
+            # Get the actual current terminal name from tmux.
+            actual_term="$(tmux display-message -p "#{client_termname}")"
+        fi
+        # st is known to support JPEG.
+        case "$actual_term" in
+            st | *-st | st-* | *-st-*)
+                return 0
+                ;;
+        esac
+        return 1
+    else
+        return 1
+    fi
+}
+
 # Send an uploading command. Usage: gr_upload <action> <command> <file>
 # Where <action> is a part of command that specifies the action, it will be
 # repeated for every chunk (if the method is direct), and <command> is the rest
@@ -363,7 +387,18 @@ gr_upload() {
     if [ "$uploading_method" = "file" ]; then
         # base64-encode the filename
         encoded_filename=$(printf '%s' "$arg_file" | base64 -w0)
-        gr_command "${arg_action},${arg_command},t=f;${encoded_filename}"
+        # If the file name contains 'tty-graphics-protocol', assume it's
+        # temporary and use t=t.
+        medium="t=f"
+        case "$arg_file" in
+            *tty-graphics-protocol*)
+                medium="t=t"
+                ;;
+            *)
+                medium="t=f"
+                ;;
+        esac
+        gr_command "${arg_action},${arg_command},${medium};${encoded_filename}"
     fi
     if [ "$uploading_method" = "direct" ]; then
         # Create a temporary directory to store the chunked image.
@@ -409,7 +444,10 @@ delayed_frame_dir_cleanup() {
 
 upload_image_and_print_placeholder() {
     # Check if the file is an animation.
-    frame_count=$($identify -format '%n\n' "$file" | head -n 1)
+    format_output=$($identify -format '%n %m\n' "$file" | head -n 1)
+    frame_count="$(printf '%s' "$format_output" | cut -d ' ' -f 1)"
+    image_format="$(printf '%s' "$format_output" | cut -d ' ' -f 2)"
+
     if [ "$frame_count" -gt 1 ]; then
         # The file is an animation, decompose into frames and upload each frame.
         frame_dir="$(mktemp -d)"
@@ -467,9 +505,21 @@ upload_image_and_print_placeholder() {
         # Remove the temporary directory, but do it in the background with a
         # delay to avoid removing files before they are loaded by the terminal.
         delayed_frame_dir_cleanup "$frame_dir" 2> /dev/null &
-    else
-        # The file is not an animation, upload it directly
+    elif is_format_supported "$image_format"; then
+        # The file is not an animation and has a supported format, upload it
+        # directly.
         gr_upload "q=2,a=T" "U=1,i=${image_id},f=100,c=${cols},r=${rows}" "$file"
+        # Print the placeholder
+        print_placeholder
+    else
+        # The format is not supported, try to convert it to png.
+        temp_file="$(mktemp --tmpdir "icat-mini-tty-graphics-protocol-XXXXX.png")"
+        if ! $convert "$file" "$temp_file"; then
+            echo "Failed to convert the image to PNG" >&2
+            exit 1
+        fi
+        # Upload the converted image.
+        gr_upload "q=2,a=T" "U=1,i=${image_id},f=100,c=${cols},r=${rows}" "$temp_file"
         # Print the placeholder
         print_placeholder
     fi

@@ -54,15 +54,19 @@ void gr_dump_state();
 /// Unloads images to reduce RAM usage.
 void gr_unload_images_to_reduce_ram();
 
-/// Executes `callback` for each image cell. `callback` may return 1 to erase
-/// the cell or 0 to keep it. This function is implemented in `st.c`.
-void gr_for_each_image_cell(int (*callback)(void *data, uint32_t image_id,
-					    uint32_t placement_id, int col,
-					    int row, char is_classic),
+/// Executes `callback` for each image cell. The callback should return 1 if it
+/// changed the glyph. This function is implemented in `st.c`.
+void gr_for_each_image_cell(int (*callback)(void *data, Glyph *gp),
 			    void *data);
 
 /// Marks all the rows containing the image with `image_id` as dirty.
 void gr_schedule_image_redraw_by_id(uint32_t image_id);
+
+/// Returns a pointer to the glyph under the classic placement with `image_id`
+/// and `placement_id` at `col` and `row` (1-based). May return NULL if the
+/// underneath text is unknown.
+Glyph *gr_get_glyph_underneath_image(uint32_t image_id, uint32_t placement_id,
+				     int col, int row);
 
 typedef enum {
 	GRAPHICS_DEBUG_NONE = 0,
@@ -100,6 +104,7 @@ typedef struct {
 		uint32_t rows, columns;
 		uint32_t image_id, placement_id;
 		char do_not_move_cursor;
+		Glyph *text_underneath;
 	} placeholder;
 } GraphicsCommandResult;
 

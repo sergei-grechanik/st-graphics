@@ -7,6 +7,10 @@ If you want this formatted as a single patch, take the last commit from this
 branch: [graphics-squashed](https://github.com/sergei-grechanik/st-graphics/tree/graphics-squashed)
 (may be slightly outdated).
 
+If you want to combine this with other patches, check out the
+[graphics-with-patches branch](https://github.com/sergei-grechanik/st-graphics/tree/graphics-with-patches)
+(see also [patch compatibility](#patch-compatibility)).
+
 ![Viewing images with icat-mini.sh in tmux in st with alpha patch](https://github.com/sergei-grechanik/st-graphics/assets/1084979/039e5d22-f831-4dbd-a10d-58715474c221)
 ![Animation](https://github.com/user-attachments/assets/4d4c056d-47bd-4e2a-b0e0-8ad80e4c25d7)
 
@@ -146,6 +150,24 @@ features.
 
 ## Patch compatibility
 
+The [graphics-with-patches branch](https://github.com/sergei-grechanik/st-graphics/tree/graphics-with-patches)
+contains several patches applied on top of the graphics branch. The patches
+include:
+
+- [Boxdraw](https://st.suckless.org/patches/boxdraw) - applied with minimal
+  conflicts.
+- [Scrollback](https://st.suckless.org/patches/scrollback) - quite a few
+  conflicts, but easy to resolve.
+- [Wide glyph support](https://st.suckless.org/patches/glyph_wide_support/)
+- [Ligatures](https://st.suckless.org/patches/ligatures) -
+  required some modifications.
+- [Alpha](https://st.suckless.org/patches/alpha)
+- [External pipe](https://st.suckless.org/patches/externalpipe)
+
+If you run into any problems with other patches, feel free to open an issue.
+
+### Patches and changes that are included in the graphics implementation
+
 This fork includes some patches and features that are not graphics-related
 per se, but are hard to disentangle from the graphics implementation:
 - [Anysize](https://st.suckless.org/patches/anysize/) - this patch is applied
@@ -159,20 +181,3 @@ per se, but are hard to disentangle from the graphics implementation:
   st: it's drawn behind the text and the thickness depends on the font size. You
   may need to tweak the code in `xdrawglyphfontspecs` in `x.c` if you don't like
   it.
-
-Patches that I have tried to apply together with graphics:
-- [Boxdraw](https://st.suckless.org/patches/boxdraw) - seems to work, applied
-  with minimal conflicts, see
-  [this branch](https://github.com/sergei-grechanik/st-graphics/tree/graphics-with-boxdraw).
-- [Scrollback](https://st.suckless.org/patches/scrollback) - quite a few
-  conflicts, but easy to resolve. Seems to work but more testing may be needed.
-  See [this branch](https://github.com/sergei-grechanik/st-graphics/tree/graphics-with-scrollback).
-- [Alpha](https://st.suckless.org/patches/alpha) - works. Check out the
-  [graphics-with-alpha](https://github.com/sergei-grechanik/st-graphics/tree/graphics-with-alpha)
-  branch where the alpha is adjustable with `Ctrl-Shift-[` and `Ctrl-Shift-]`.
-- [Background Image](https://st.suckless.org/patches/background_image) - seems
-  to work, see
-  [this branch](https://github.com/sergei-grechanik/st-graphics/tree/graphics-with-background-image).
-- [Ligatures](https://st.suckless.org/patches/ligatures) - seems to work, but it
-  required some minor modifications. See
-  [this branch](https://github.com/sergei-grechanik/st-graphics/tree/graphics-with-ligatures).

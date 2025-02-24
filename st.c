@@ -731,11 +731,14 @@ sigchld(int a)
 	int stat;
 	pid_t p;
 
-	if ((p = waitpid(pid, &stat, WNOHANG)) < 0)
+	if ((p = waitpid(-1, &stat, WNOHANG)) < 0)
 		die("waiting for pid %hd failed: %s\n", pid, strerror(errno));
 
-	if (pid != p)
+	if (pid != p) {
+		/* reinstall sigchld handler */
+		signal(SIGCHLD, sigchld);
 		return;
+	}
 
 	if (WIFEXITED(stat) && WEXITSTATUS(stat))
 		die("child exited with status %d\n", WEXITSTATUS(stat));
@@ -1318,10 +1321,9 @@ tclearregion(int x1, int y1, int x2, int y2)
 /// Fills a rectangle area with an image placeholder. The starting point is the
 /// cursor. Adds empty lines if needed. The placeholder will be marked as
 /// classic.
-void
-tcreateimgplaceholder(uint32_t image_id, uint32_t placement_id,
-		      int cols, int rows, char do_not_move_cursor)
-{
+void tcreateimgplaceholder(uint32_t image_id, uint32_t placement_id, int cols,
+			   int rows, char do_not_move_cursor,
+			   Glyph *text_underneath) {
 	for (int row = 0; row < rows; ++row) {
 		int y = term.c.y;
 		term.dirty[y] = 1;
@@ -1332,6 +1334,25 @@ tcreateimgplaceholder(uint32_t image_id, uint32_t placement_id,
 			Glyph *gp = &term.line[y][x];
 			if (selected(x, y))
 				selclear();
+			if (text_underneath) {
+				Glyph *to_save = gp;
+				// If there is already a classic placeholder,
+				// use the text underneath it. This will leave
+				// holes in images, but at least we are
+				// guaranteed to restore the original text.
+				if (gp->mode & ATTR_IMAGE &&
+				    tgetisclassicplaceholder(gp)) {
+					Glyph *under =
+						gr_get_glyph_underneath_image(
+							tgetimgid(gp),
+							tgetimgplacementid(gp),
+							tgetimgcol(gp),
+							tgetimgrow(gp));
+					if (under)
+						to_save = under;
+				}
+				text_underneath[cols * row + col] = *to_save;
+			}
 			gp->mode = ATTR_IMAGE;
 			gp->u = 0;
 			tsetimgrow(gp, row + 1);
@@ -1364,26 +1385,14 @@ tcreateimgplaceholder(uint32_t image_id, uint32_t placement_id,
 	}
 }
 
-void gr_for_each_image_cell(int (*callback)(void *data, uint32_t image_id,
-					    uint32_t placement_id, int col,
-					    int row, char is_classic),
+void gr_for_each_image_cell(int (*callback)(void *data, Glyph *gp),
 			    void *data) {
 	for (int row = 0; row < term.row; ++row) {
 		for (int col = 0; col < term.col; ++col) {
 			Glyph *gp = &term.line[row][col];
 			if (gp->mode & ATTR_IMAGE) {
-				uint32_t image_id = tgetimgid(gp);
-				uint32_t placement_id = tgetimgplacementid(gp);
-				int ret =
-					callback(data, tgetimgid(gp),
-						 tgetimgplacementid(gp),
-						 tgetimgcol(gp), tgetimgrow(gp),
-						 tgetisclassicplaceholder(gp));
-				if (ret == 1) {
+				if (callback(data, gp))
 					term.dirty[row] = 1;
-					gp->mode = 0;
-					gp->u = ' ';
-				}
 			}
 		}
 	}
@@ -1884,7 +1893,7 @@ csihandle(void)
 			}
 			break;
 		case 1: /* above */
-			if (term.c.y > 1)
+			if (term.c.y > 0)
 				tclearregion(0, 0, term.col-1, term.c.y-1);
 			tclearregion(0, term.c.y, term.c.x, term.c.y);
 			break;
@@ -1980,7 +1989,11 @@ csihandle(void)
 		tcursor(CURSOR_SAVE);
 		break;
 	case 'u': /* DECRC -- Restore cursor position (ANSI.SYS) */
-		tcursor(CURSOR_LOAD);
+		if (csiescseq.priv) {
+			goto unknown;
+		} else {
+			tcursor(CURSOR_LOAD);
+		}
 		break;
 	case ' ':
 		switch (csiescseq.mode[1]) {
@@ -2183,7 +2196,8 @@ strhandle(void)
 					res->placeholder.placement_id,
 					res->placeholder.columns,
 					res->placeholder.rows,
-					res->placeholder.do_not_move_cursor);
+					res->placeholder.do_not_move_cursor,
+					res->placeholder.text_underneath);
 			}
 			if (res->response[0])
 				ttywrite(res->response, strlen(res->response),
@@ -2699,6 +2713,15 @@ check_control_code:
 	if (selected(term.c.x, term.c.y))
 		selclear();
 
+	// wcwidth is broken on some systems, set the width to 0 if it's a known
+	// diacritic used for images.
+	uint16_t num = diacritic_to_num(u);
+	if (num != 0)
+		width = 0;
+	// Set the width to 1 if it's an image placeholder character.
+	if (u == IMAGE_PLACEHOLDER_CHAR || u == IMAGE_PLACEHOLDER_CHAR_OLD)
+		width = 1;
+
 	if (width == 0) {
 		// It's probably a combining char. Combining characters are not
 		// supported, so we just ignore them, unless it denotes the row and
@@ -2711,7 +2734,6 @@ check_control_code:
 			gp = &term.line[term.c.y][term.c.x];
 		else
 			gp = &term.line[term.c.y][term.c.x-1];
-		uint16_t num = diacritic_to_num(u);
 		if (num && (gp->mode & ATTR_IMAGE)) {
 			unsigned diaccount = tgetimgdiacriticcount(gp);
 			if (diaccount == 0)
