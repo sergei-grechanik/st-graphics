@@ -132,6 +132,10 @@ features.
   tmux!
 - [yazi](https://github.com/sxyazi/yazi) - works if you run it as
   `TERM="xterm-kitty" yazi`.
+- [mov-cli](https://github.com/mov-cli/mov-cli) - I had to explicitly set
+  `TERM="xterm-kitty"`.
+- [snacks.image](https://github.com/folke/snacks.nvim/blob/main/docs/image.md) -
+  works, you need to set the environment variable `SNACKS_KITTY=1`.
 
 ### Apps that sort of work
 - [hologram.nvim](https://github.com/edluffy/hologram.nvim) - There are some

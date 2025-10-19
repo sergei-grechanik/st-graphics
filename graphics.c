@@ -43,7 +43,9 @@
 
 #include <assert.h>
 #include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <spawn.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -53,7 +55,6 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-#include <errno.h>
 
 #include "khash.h"
 #include "kvec.h"
@@ -179,6 +180,17 @@ struct ImagePlacement;
 KHASH_MAP_INIT_INT(id2image, struct Image *)
 KHASH_MAP_INIT_INT(id2placement, struct ImagePlacement *)
 
+/// A transformation to apply to a pixmap before drawing it.
+typedef struct PixmapTransformation {
+	/// The width and height of the pixmap.
+	int pixmap_w, pixmap_h;
+	/// The width and height of the transformed pixmap.
+	int dst_w, dst_h;
+	/// The offset relative to the top-left corner of the box of cells where
+	/// the transformed pixmap is drawn.
+	int dst_x, dst_y;
+} PixmapTransformation;
+
 typedef struct ImageFrame {
 	/// The image this frame belongs to.
 	struct Image *image;
@@ -298,6 +310,8 @@ typedef struct ImagePlacement {
 	/// The dimensions of the cell used to scale the image. If cell
 	/// dimensions are changed (font change), the image will be rescaled.
 	uint16_t scaled_cw, scaled_ch;
+	/// The transformation to apply to the pixmap before drawing it.
+	PixmapTransformation pixmap_transformation;
 	/// If true, do not move the cursor when displaying this placement
 	/// (non-virtual placements only).
 	char do_not_move_cursor;
@@ -614,8 +628,8 @@ static unsigned gr_frame_current_ram_size(ImageFrame *frame) {
 
 /// Returns the (estimation) of the RAM size used by a single frame pixmap.
 static unsigned gr_placement_single_frame_ram_size(ImagePlacement *placement) {
-	return (unsigned)placement->rows * placement->cols *
-	       placement->scaled_ch * placement->scaled_cw * 4;
+	return (unsigned)placement->pixmap_transformation.pixmap_w *
+	       placement->pixmap_transformation.pixmap_h * 4;
 }
 
 /// Returns the (estimation) of the RAM size used by the placemenet right now.
@@ -1756,8 +1770,123 @@ static void gr_premultiply_alpha(DATA32 *data, size_t num_pixels) {
 	}
 }
 
-/// Creates a pixmap for the frame of an image placement. The pixmap contain the
-/// image data correctly scaled and fit to the box defined by the number of
+/// Computes the pixmap transformation, which is essentially the destination
+/// rectangle for drawing an image placement in a box of size `cols*cw` x
+/// `rows*ch`. The destination rectangle depends on the parameters of the
+/// placement, like scaling mode. The computed transformation is stored in the
+/// placement.
+void gr_compute_pixmap_transformation(ImagePlacement *placement) {
+	// Infer the placement size if needed.
+	gr_infer_placement_size_maybe(placement);
+
+	// The size of the box in which the image is placed.
+	int box_w = (int)placement->cols * placement->scaled_cw;
+	int box_h = (int)placement->rows * placement->scaled_ch;
+
+	int src_w = placement->src_pix_width;
+	int src_h = placement->src_pix_height;
+
+	// Whether the box is too small to use the true size of the image.
+	char box_too_small = box_w < src_w || box_h < src_h;
+	char mode = placement->scale_mode;
+
+	PixmapTransformation *tr = &placement->pixmap_transformation;
+
+	if (src_w <= 0 || src_h <= 0) {
+		tr->dst_x = tr->dst_y = tr->dst_w = tr->dst_h = 0;
+		fprintf(stderr, "warning: image of zero size\n");
+	} else if (mode == SCALE_MODE_FILL) {
+		tr->dst_x = tr->dst_y = 0;
+		tr->dst_w = box_w;
+		tr->dst_h = box_h;
+	} else if (mode == SCALE_MODE_NONE ||
+		   (mode == SCALE_MODE_NONE_OR_CONTAIN && !box_too_small)) {
+		tr->dst_x = tr->dst_y = 0;
+		tr->dst_w = src_w;
+		tr->dst_h = src_h;
+	} else {
+		if (mode != SCALE_MODE_CONTAIN &&
+		    mode != SCALE_MODE_NONE_OR_CONTAIN) {
+			fprintf(stderr,
+				"warning: unknown scale mode %u, using "
+				"'contain' instead\n",
+				mode);
+		}
+		if (box_w * src_h > src_w * box_h) {
+			// If the box is wider than the original image, fit to
+			// height.
+			tr->dst_h = box_h;
+			tr->dst_y = 0;
+			tr->dst_w = src_w * box_h / src_h;
+			tr->dst_x = (box_w - tr->dst_w) / 2;
+		} else {
+			// Otherwise, fit to width.
+			tr->dst_w = box_w;
+			tr->dst_x = 0;
+			tr->dst_h = src_h * box_w / src_w;
+			tr->dst_y = (box_h - tr->dst_h) / 2;
+		}
+	}
+
+	// Make sure that the size of the destination image is non-zero.
+	tr->dst_w = MAX(1, tr->dst_w);
+	tr->dst_h = MAX(1, tr->dst_h);
+
+	// Normally we want the pixmap to be exactly the size of the destination
+	// rectangle.
+	tr->pixmap_w = tr->dst_w;
+	tr->pixmap_h = tr->dst_h;
+	// However, if the pixmap would be larger than the source image, use the
+	// source image size. The upscaling will be done by XRender then.
+	if (tr->pixmap_w * tr->pixmap_h > src_w * src_h) {
+		tr->pixmap_w = MAX(1, src_w);
+		tr->pixmap_h = MAX(1, src_h);
+	}
+
+	// If the pixmap would be over the limit, scale it down.
+	if (tr->pixmap_w * tr->pixmap_h * 4 >
+	    graphics_max_single_image_ram_size) {
+		double scale = sqrt((double)graphics_max_single_image_ram_size /
+				    (tr->pixmap_w * tr->pixmap_h * 4));
+		tr->pixmap_w = MAX(1, (int)(tr->pixmap_w * scale));
+		tr->pixmap_h = MAX(1, (int)(tr->pixmap_h * scale));
+	}
+}
+
+/// Creates and returns a scaled imlib image for the image placement. The
+/// original imlib object must be loaded and the placement size must be inferred
+/// by the caller (by calling `gr_compute_pixmap_transformation`). The caller is
+/// responsible for freeing the returned image.
+Imlib_Image gr_create_scaled_image_object(ImagePlacement *placement,
+					  ImageFrame *frame) {
+	// The source rectangle (inside the original image).
+	int src_x = placement->src_pix_x;
+	int src_y = placement->src_pix_y;
+	int src_w = placement->src_pix_width;
+	int src_h = placement->src_pix_height;
+	// The pixmap dimensions.
+	int pixmap_w = placement->pixmap_transformation.pixmap_w;
+	int pixmap_h = placement->pixmap_transformation.pixmap_h;
+
+	if (pixmap_w * pixmap_h * 4 > graphics_max_single_image_ram_size) {
+		fprintf(stderr,
+			"error: placement %u/%u would be too big to load: %d x "
+			"%d x 4 > %u\n",
+			placement->image->image_id, placement->placement_id,
+			pixmap_w, pixmap_h, graphics_max_single_image_ram_size);
+		return 0;
+	}
+
+	imlib_context_set_image(frame->imlib_object);
+	imlib_context_set_anti_alias(1);
+	imlib_context_set_blend(1);
+
+	return imlib_create_cropped_scaled_image(src_x, src_y, src_w, src_h,
+						 pixmap_w, pixmap_h);
+}
+
+/// Creates a pixmap for the frame of an image placement. The pixmap contains
+/// the image data correctly scaled and fit to the box defined by the number of
 /// rows/columns of the image placement and the provided cell dimensions in
 /// pixels. If the placement is already loaded, it will be reloaded only if the
 /// cell dimensions have changed.
@@ -1766,16 +1895,18 @@ Pixmap gr_load_pixmap(ImagePlacement *placement, int frameidx, int cw, int ch) {
 	Image *img = placement->image;
 	ImageFrame *frame = gr_get_frame(img, frameidx);
 
-	// Update the atime uncoditionally.
+	// Update the atime unconditionally.
 	gr_touch_placement(placement);
 	if (frame)
 		gr_touch_frame(frame);
 
-	// If cw or ch are different, unload all the pixmaps.
+	// If cw or ch are different, unload all the pixmaps and recompute the
+	// pixmap geometry and transformation (shared for all pixmaps).
 	if (placement->scaled_cw != cw || placement->scaled_ch != ch) {
 		gr_unload_placement(placement);
 		placement->scaled_cw = cw;
 		placement->scaled_ch = ch;
+		gr_compute_pixmap_transformation(placement);
 	}
 
 	// If it's already loaded, do nothing.
@@ -1785,6 +1916,12 @@ Pixmap gr_load_pixmap(ImagePlacement *placement, int frameidx, int cw, int ch) {
 
 	GR_LOG("Loading placement: %u/%u frame %u\n", img->image_id,
 	       placement->placement_id, frameidx);
+
+	if (placement->pixmap_transformation.pixmap_w == 0 ||
+	    placement->pixmap_transformation.pixmap_h == 0) {
+		GR_LOG("Not loading because the pixmap size is zero\n");
+		return 0;
+	}
 
 	// Load the imlib object for the frame.
 	if (!frame) {
@@ -1797,92 +1934,19 @@ Pixmap gr_load_pixmap(ImagePlacement *placement, int frameidx, int cw, int ch) {
 	if (!frame->imlib_object)
 		return 0;
 
-	// Infer the placement size if needed.
-	gr_infer_placement_size_maybe(placement);
-
-	// Create the scaled image. This is temporary, we will scale it
-	// appropriately, upload to the X server, and then delete immediately.
-	int scaled_w = (int)placement->cols * cw;
-	int scaled_h = (int)placement->rows * ch;
-	if (scaled_w * scaled_h * 4 > graphics_max_single_image_ram_size) {
-		fprintf(stderr,
-			"error: placement %u/%u would be too big to load: %d x "
-			"%d x 4 > %u\n",
-			img->image_id, placement->placement_id, scaled_w,
-			scaled_h, graphics_max_single_image_ram_size);
+	// Create the scaled image. This is temporary, we will upload to the X
+	// server, and then delete immediately.
+	Imlib_Image scaled_image =
+		gr_create_scaled_image_object(placement, frame);
+	if (!scaled_image)
 		return 0;
-	}
-	Imlib_Image scaled_image = imlib_create_image(scaled_w, scaled_h);
-	if (!scaled_image) {
-		fprintf(stderr,
-			"error: imlib_create_image(%d, %d) returned "
-			"null\n",
-			scaled_w, scaled_h);
-		return 0;
-	}
 	imlib_context_set_image(scaled_image);
-	imlib_image_set_has_alpha(1);
-
-	// First fill the scaled image with the transparent color.
-	imlib_context_set_blend(0);
-	imlib_context_set_color(0, 0, 0, 0);
-	imlib_image_fill_rectangle(0, 0, scaled_w, scaled_h);
-	imlib_context_set_anti_alias(1);
-	imlib_context_set_blend(1);
-
-	// The source rectangle.
-	int src_x = placement->src_pix_x;
-	int src_y = placement->src_pix_y;
-	int src_w = placement->src_pix_width;
-	int src_h = placement->src_pix_height;
-	// Whether the box is too small to use the true size of the image.
-	char box_too_small = scaled_w < src_w || scaled_h < src_h;
-	char mode = placement->scale_mode;
-
-	// Then blend the original image onto the transparent background.
-	if (src_w <= 0 || src_h <= 0) {
-		fprintf(stderr, "warning: image of zero size\n");
-	} else if (mode == SCALE_MODE_FILL) {
-		imlib_blend_image_onto_image(frame->imlib_object, 1, src_x,
-					     src_y, src_w, src_h, 0, 0,
-					     scaled_w, scaled_h);
-	} else if (mode == SCALE_MODE_NONE ||
-		   (mode == SCALE_MODE_NONE_OR_CONTAIN && !box_too_small)) {
-		imlib_blend_image_onto_image(frame->imlib_object, 1, src_x,
-					     src_y, src_w, src_h, 0, 0, src_w,
-					     src_h);
-	} else {
-		if (mode != SCALE_MODE_CONTAIN &&
-		    mode != SCALE_MODE_NONE_OR_CONTAIN) {
-			fprintf(stderr,
-				"warning: unknown scale mode %u, using "
-				"'contain' instead\n",
-				mode);
-		}
-		int dest_x, dest_y;
-		int dest_w, dest_h;
-		if (scaled_w * src_h > src_w * scaled_h) {
-			// If the box is wider than the original image, fit to
-			// height.
-			dest_h = scaled_h;
-			dest_y = 0;
-			dest_w = src_w * scaled_h / src_h;
-			dest_x = (scaled_w - dest_w) / 2;
-		} else {
-			// Otherwise, fit to width.
-			dest_w = scaled_w;
-			dest_x = 0;
-			dest_h = src_h * scaled_w / src_w;
-			dest_y = (scaled_h - dest_h) / 2;
-		}
-		imlib_blend_image_onto_image(frame->imlib_object, 1, src_x,
-					     src_y, src_w, src_h, dest_x,
-					     dest_y, dest_w, dest_h);
-	}
+	int pixmap_w = imlib_image_get_width();
+	int pixmap_h = imlib_image_get_height();
 
 	// XRender needs the alpha channel premultiplied.
 	DATA32 *data = imlib_image_get_data();
-	gr_premultiply_alpha(data, scaled_w * scaled_h);
+	gr_premultiply_alpha(data, pixmap_w * pixmap_h);
 
 	// Upload the image to the X server.
 	Display *disp = imlib_context_get_display();
@@ -1891,7 +1955,7 @@ Pixmap gr_load_pixmap(ImagePlacement *placement, int frameidx, int cw, int ch) {
 	Drawable drawable = imlib_context_get_drawable();
 	if (!drawable)
 		drawable = DefaultRootWindow(disp);
-	pixmap = XCreatePixmap(disp, drawable, scaled_w, scaled_h, 32);
+	pixmap = XCreatePixmap(disp, drawable, pixmap_w, pixmap_h, 32);
 	XVisualInfo visinfo = {0};
 	Status visual_found = XMatchVisualInfo(disp, DefaultScreen(disp), 32,
 					       TrueColor, &visinfo) ||
@@ -1904,7 +1968,7 @@ Pixmap gr_load_pixmap(ImagePlacement *placement, int frameidx, int cw, int ch) {
 		visinfo.visual = NULL;
 	}
 	XImage *ximage = XCreateImage(disp, visinfo.visual, 32, ZPixmap, 0,
-				      (char *)data, scaled_w, scaled_h, 32, 0);
+				      (char *)data, pixmap_w, pixmap_h, 32, 0);
 	if (!ximage) {
 		fprintf(stderr, "error: could not create XImage\n");
 		imlib_image_put_back_data(data);
@@ -1912,8 +1976,7 @@ Pixmap gr_load_pixmap(ImagePlacement *placement, int frameidx, int cw, int ch) {
 		return 0;
 	}
 	GC gc = XCreateGC(disp, pixmap, 0, NULL);
-	XPutImage(disp, pixmap, gc, ximage, 0, 0, 0, 0, scaled_w,
-		  scaled_h);
+	XPutImage(disp, pixmap, gc, ximage, 0, 0, 0, 0, pixmap_w, pixmap_h);
 	XFreeGC(disp, gc);
 	// XDestroyImage will free the data as well, but it is managed by imlib,
 	// so set it to NULL.
@@ -2141,6 +2204,11 @@ static void gr_dump_placement_info(FILE *file, ImagePlacement *placement,
 		    placement->rows);
 	fprintf_ind(file, ind, "cell size: %ux%u\n", placement->scaled_cw,
 		    placement->scaled_ch);
+	PixmapTransformation *tr = &placement->pixmap_transformation;
+	fprintf_ind(file, ind, "pixmap size: %ux%u\n", tr->pixmap_w,
+		    tr->pixmap_h);
+	fprintf_ind(file, ind, "dst size: %ux%u  offset: (%d, %d)\n", tr->dst_w,
+		    tr->dst_h, tr->dst_x, tr->dst_y);
 	fprintf_ind(file, ind, "ram per frame: %u KiB\n",
 		    gr_placement_single_frame_ram_size(placement) / 1024);
 	unsigned ram_size = gr_placement_current_ram_size(placement);
@@ -2442,14 +2510,17 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 		return;
 	}
 
+	// The coordinates and size (in pixels) of the src rectangle inside the
+	// box of cells (not the pixmap).
 	int src_x = rect->img_start_col * rect->cw;
 	int src_y = rect->img_start_row * rect->ch;
-	int width = (rect->img_end_col - rect->img_start_col) * rect->cw;
-	int height = (rect->img_end_row - rect->img_start_row) * rect->ch;
-	int dst_x = rect->screen_x_pix;
-	int dst_y = rect->screen_y_pix;
+	int src_w = (rect->img_end_col - rect->img_start_col) * rect->cw;
+	int src_h = (rect->img_end_row - rect->img_start_row) * rect->ch;
+	// The coordinates of the dst rectangle inside the window. The size is
+	// the same as the src size in the box (src_w, src_h).
+	int window_x = rect->screen_x_pix;
+	int window_y = rect->screen_y_pix;
 
-	// Display the image.
 	Display *disp = imlib_context_get_display();
 	Visual *vis = imlib_context_get_visual();
 
@@ -2464,10 +2535,8 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 	// premultiplied. But the result is good enough to visually indicate
 	// selection.
 	if (rect->reverse) {
-		unsigned pixmap_w =
-			(unsigned)placement->cols * placement->scaled_cw;
-		unsigned pixmap_h =
-			(unsigned)placement->rows * placement->scaled_ch;
+		unsigned pixmap_w = placement->pixmap_transformation.pixmap_w;
+		unsigned pixmap_h = placement->pixmap_transformation.pixmap_h;
 		Pixmap invpixmap =
 			XCreatePixmap(disp, buf, pixmap_w, pixmap_h, 32);
 		XGCValues gcv = {.function = GXcopyInverted};
@@ -2481,16 +2550,71 @@ static void gr_drawimagerect(Drawable buf, ImageRect *rect) {
 	// Create a picture for the image pixmap.
 	XRenderPictFormat *pic_format =
 		XRenderFindStandardFormat(disp, PictStandardARGB32);
-	Picture pixmap_pic =
-		XRenderCreatePicture(disp, pixmap, pic_format, 0, NULL);
+	// We use RepeatPad to avoid bilinear filtering halo.
+	XRenderPictureAttributes attrs = {0};
+	attrs.repeat = RepeatPad;
+	Picture pixmap_pic = XRenderCreatePicture(disp, pixmap, pic_format,
+						  CPRepeat, &attrs);
+
+	// Since the pixmap may be of different size than the destination box of
+	// cells, we must apply a transformation to it.
+	// The XTransform structure describes a matrix to transform the
+	// destination picture coordinates (i.e. in the box) to the source
+	// coordinates (i.e. in the pixmap). We apply only scaling (translation
+	// will be applied to the src coordinates directly):
+	//
+	//   pixmap_x = picture_x * pixmap_w / dst_w
+	//   pixmap_y = picture_y * pixmap_h / dst_h
+	//
+	// Where dst_w, dst_h, pixmap_w, pixmap_h are from the placement's
+	// pixmap_transformation structure.
+	PixmapTransformation *tr = &placement->pixmap_transformation;
+	double xs = (double)tr->pixmap_w / MAX(tr->dst_w, 1);
+	double ys = (double)tr->pixmap_h / MAX(tr->dst_h, 1);
+	// clang-format off
+	XTransform xform = {{
+	    { XDoubleToFixed(xs), XDoubleToFixed( 0), XDoubleToFixed( 0) },
+	    { XDoubleToFixed( 0), XDoubleToFixed(ys), XDoubleToFixed( 0) },
+	    { XDoubleToFixed( 0), XDoubleToFixed( 0), XDoubleToFixed( 1) }
+	}};
+	// clang-format on
+	XRenderSetPictureTransform(disp, pixmap_pic, &xform);
+	XRenderSetPictureFilter(disp, pixmap_pic, FilterBilinear, NULL, 0);
+
+	// Do the translation: modify the src coordinates to make them
+	// coordinates into the picture rather than into the box.
+	src_x -= tr->dst_x;
+	src_y -= tr->dst_y;
+	// At this point src_x, src_y, src_w, src_h are coordinates of the
+	// source rectangle inside the picture (scaled pixmap).
+
+	// Now do clipping. If src coordinates are negative, adjust the dst
+	// coordinates (into the window) and the width/height. We do clipping
+	// instead of using the values as is to avoid rendering the pad area
+	// outside the pixmap.
+	if (src_x < 0) {
+		window_x += -src_x;
+		src_w -= -src_x;
+		src_x = 0;
+	}
+	if (src_y < 0) {
+		window_y += -src_y;
+		src_h -= -src_y;
+		src_y = 0;
+	}
+
+	// Adjust width and height if the src rectangle exceeds the picture.
+	src_w = MIN(src_w, tr->dst_w - src_x);
+	src_h = MIN(src_h, tr->dst_h - src_y);
 
 	// Composite the image onto the window. In the reverse mode we ignore
 	// the alpha channel of the image because the naive inversion above
 	// seems to invert the alpha channel as well.
 	int pictop = rect->reverse ? PictOpSrc : PictOpOver;
-	XRenderComposite(disp, pictop, pixmap_pic, 0, window_pic,
-			 src_x, src_y, src_x, src_y, dst_x, dst_y, width,
-			 height);
+	if (src_w > 0 && src_h > 0)
+		XRenderComposite(disp, pictop, pixmap_pic, 0, window_pic, src_x,
+				 src_y, src_x, src_y, window_x, window_y, src_w,
+				 src_h);
 
 	// Free resources
 	XRenderFreePicture(disp, pixmap_pic);
