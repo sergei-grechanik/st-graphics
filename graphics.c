@@ -106,7 +106,6 @@ enum ImageStatus {
 	STATUS_UPLOADING_ERROR = 2,
 	STATUS_UPLOADING_SUCCESS = 3,
 	STATUS_RAM_LOADING_ERROR = 4,
-	STATUS_RAM_LOADING_IN_PROGRESS = 5,
 	STATUS_RAM_LOADING_SUCCESS = 6,
 };
 
@@ -218,6 +217,9 @@ typedef struct ImageFrame {
 	char compression;
 	/// The status (see `ImageStatus`).
 	char status;
+	/// Whether loading into ram is in progress. This is used to avoid
+	/// cyclic dependencies between frames.
+	char ram_loading_in_progress;
 	/// The reason of uploading failure (see `ImageUploadingFailure`).
 	char uploading_failure;
 	/// Whether failures and successes should be reported ('q=').
@@ -1623,14 +1625,17 @@ static void gr_load_imlib_object(ImageFrame *frame) {
 	}
 
 	// Prevent recursive dependences between frames.
-	if (frame->status == STATUS_RAM_LOADING_IN_PROGRESS) {
-		fprintf(stderr,
-			"error: recursive loading of image %u frame %u\n",
-			frame->image->image_id, frame->index);
+	if (frame->ram_loading_in_progress) {
+		if (frame->status != STATUS_RAM_LOADING_ERROR) {
+			fprintf(stderr,
+				"error: recursive loading of image %u frame "
+				"%u\n",
+				frame->image->image_id, frame->index);
+		}
 		frame->status = STATUS_RAM_LOADING_ERROR;
 		return;
 	}
-	frame->status = STATUS_RAM_LOADING_IN_PROGRESS;
+	frame->ram_loading_in_progress = 1;
 
 	// Load the background frame if needed. Hopefully it's not recursive.
 	ImageFrame *bg_frame = NULL;
@@ -1638,25 +1643,31 @@ static void gr_load_imlib_object(ImageFrame *frame) {
 		bg_frame = gr_get_frame(frame->image,
 					frame->background_frame_index);
 		if (!bg_frame) {
-			fprintf(stderr,
-				"error: could not find background "
-				"frame %d for image %u frame %d\n",
-				frame->background_frame_index,
-				frame->image->image_id, frame->index);
-			frame->status = STATUS_RAM_LOADING_ERROR;
+			if (frame->status != STATUS_RAM_LOADING_ERROR) {
+				fprintf(stderr,
+					"error: could not find background "
+					"frame %d for image %u frame %d\n",
+					frame->background_frame_index,
+					frame->image->image_id, frame->index);
+				frame->status = STATUS_RAM_LOADING_ERROR;
+			}
 			return;
 		}
 		gr_load_imlib_object(bg_frame);
 		if (!bg_frame->imlib_object) {
-			fprintf(stderr,
-				"error: could not load background frame %d for "
-				"image %u frame %d\n",
-				frame->background_frame_index,
-				frame->image->image_id, frame->index);
+			if (frame->status != STATUS_RAM_LOADING_ERROR) {
+				fprintf(stderr,
+					"error: could not load background "
+					"frame %d for image %u frame %d\n",
+					frame->background_frame_index,
+					frame->image->image_id, frame->index);
+			}
 			frame->status = STATUS_RAM_LOADING_ERROR;
 			return;
 		}
 	}
+
+	frame->ram_loading_in_progress = 0;
 
 	// We exclude background frames from the time to load the frame.
 	Milliseconds loading_start = gr_now_ms();
@@ -1684,6 +1695,25 @@ static void gr_load_imlib_object(ImageFrame *frame) {
 	imlib_context_set_image(frame_data_image);
 	int frame_data_width = imlib_image_get_width();
 	int frame_data_height = imlib_image_get_height();
+
+	// Check that the size of the image we are loading does not exceed the
+	// limit.
+	if (frame_data_width * frame_data_height * 4 >
+	    graphics_max_single_image_ram_size) {
+		if (frame->status != STATUS_RAM_LOADING_ERROR) {
+			fprintf(stderr,
+				"error: image %u frame %u is too big too load: "
+				"%d x %d * 4 = %d > %u\n",
+				frame->image->image_id, frame->index,
+				frame_data_width, frame_data_height,
+				frame_data_width * frame_data_height * 4,
+				graphics_max_single_image_ram_size);
+		}
+		imlib_free_image();
+		frame->status = STATUS_RAM_LOADING_ERROR;
+		return;
+	}
+
 	GR_LOG("Successfully loaded, size %d x %d\n", frame_data_width,
 	       frame_data_height);
 	// If imlib loading succeeded, and it is the first frame, set the
@@ -1794,7 +1824,6 @@ void gr_compute_pixmap_transformation(ImagePlacement *placement) {
 
 	if (src_w <= 0 || src_h <= 0) {
 		tr->dst_x = tr->dst_y = tr->dst_w = tr->dst_h = 0;
-		fprintf(stderr, "warning: image of zero size\n");
 	} else if (mode == SCALE_MODE_FILL) {
 		tr->dst_x = tr->dst_y = 0;
 		tr->dst_w = box_w;
@@ -1876,6 +1905,9 @@ Imlib_Image gr_create_scaled_image_object(ImagePlacement *placement,
 			pixmap_w, pixmap_h, graphics_max_single_image_ram_size);
 		return 0;
 	}
+
+	if (pixmap_w == 0 || pixmap_h == 0)
+		fprintf(stderr, "warning: image of zero size\n");
 
 	imlib_context_set_image(frame->imlib_object);
 	imlib_context_set_anti_alias(1);
