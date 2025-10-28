@@ -106,7 +106,6 @@ enum ImageStatus {
 	STATUS_UPLOADING_ERROR = 2,
 	STATUS_UPLOADING_SUCCESS = 3,
 	STATUS_RAM_LOADING_ERROR = 4,
-	STATUS_RAM_LOADING_IN_PROGRESS = 5,
 	STATUS_RAM_LOADING_SUCCESS = 6,
 };
 
@@ -218,6 +217,9 @@ typedef struct ImageFrame {
 	char compression;
 	/// The status (see `ImageStatus`).
 	char status;
+	/// Whether loading into ram is in progress. This is used to avoid
+	/// cyclic dependencies between frames.
+	char ram_loading_in_progress;
 	/// The reason of uploading failure (see `ImageUploadingFailure`).
 	char uploading_failure;
 	/// Whether failures and successes should be reported ('q=').
@@ -431,6 +433,11 @@ extern unsigned graphics_max_total_placements;
 extern double graphics_excess_tolerance_ratio;
 extern unsigned graphics_animation_min_delay;
 
+// Constants that are not important enough to expose in the config.
+
+/// The time after which an interrupted (with another command) direct
+/// transmission cannot be resumed.
+static Milliseconds graphics_direct_transmission_timeout_ms = 2000;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Basic helpers.
@@ -718,14 +725,19 @@ static void gr_unload_pixmap(ImagePlacement *placement, int frameidx) {
 	       gr_placement_single_frame_ram_size(placement) / 1024);
 }
 
+/// Closes the on-disk cache file of the frame `frame`.
+static void gr_close_disk_cache_file(ImageFrame *frame) {
+	if (frame && frame->open_file) {
+		fclose(frame->open_file);
+		frame->open_file = NULL;
+	}
+}
+
 /// Deletes the on-disk cache file corresponding to the frame. The in-ram image
 /// object (if it exists) is not deleted, placements are not unloaded either.
 static void gr_delete_imagefile(ImageFrame *frame) {
 	// It may still be being loaded. Close the file in this case.
-	if (frame->open_file) {
-		fclose(frame->open_file);
-		frame->open_file = NULL;
-	}
+	gr_close_disk_cache_file(frame);
 
 	if (frame->disk_size == 0)
 		return;
@@ -1623,14 +1635,17 @@ static void gr_load_imlib_object(ImageFrame *frame) {
 	}
 
 	// Prevent recursive dependences between frames.
-	if (frame->status == STATUS_RAM_LOADING_IN_PROGRESS) {
-		fprintf(stderr,
-			"error: recursive loading of image %u frame %u\n",
-			frame->image->image_id, frame->index);
+	if (frame->ram_loading_in_progress) {
+		if (frame->status != STATUS_RAM_LOADING_ERROR) {
+			fprintf(stderr,
+				"error: recursive loading of image %u frame "
+				"%u\n",
+				frame->image->image_id, frame->index);
+		}
 		frame->status = STATUS_RAM_LOADING_ERROR;
 		return;
 	}
-	frame->status = STATUS_RAM_LOADING_IN_PROGRESS;
+	frame->ram_loading_in_progress = 1;
 
 	// Load the background frame if needed. Hopefully it's not recursive.
 	ImageFrame *bg_frame = NULL;
@@ -1638,25 +1653,31 @@ static void gr_load_imlib_object(ImageFrame *frame) {
 		bg_frame = gr_get_frame(frame->image,
 					frame->background_frame_index);
 		if (!bg_frame) {
-			fprintf(stderr,
-				"error: could not find background "
-				"frame %d for image %u frame %d\n",
-				frame->background_frame_index,
-				frame->image->image_id, frame->index);
-			frame->status = STATUS_RAM_LOADING_ERROR;
+			if (frame->status != STATUS_RAM_LOADING_ERROR) {
+				fprintf(stderr,
+					"error: could not find background "
+					"frame %d for image %u frame %d\n",
+					frame->background_frame_index,
+					frame->image->image_id, frame->index);
+				frame->status = STATUS_RAM_LOADING_ERROR;
+			}
 			return;
 		}
 		gr_load_imlib_object(bg_frame);
 		if (!bg_frame->imlib_object) {
-			fprintf(stderr,
-				"error: could not load background frame %d for "
-				"image %u frame %d\n",
-				frame->background_frame_index,
-				frame->image->image_id, frame->index);
+			if (frame->status != STATUS_RAM_LOADING_ERROR) {
+				fprintf(stderr,
+					"error: could not load background "
+					"frame %d for image %u frame %d\n",
+					frame->background_frame_index,
+					frame->image->image_id, frame->index);
+			}
 			frame->status = STATUS_RAM_LOADING_ERROR;
 			return;
 		}
 	}
+
+	frame->ram_loading_in_progress = 0;
 
 	// We exclude background frames from the time to load the frame.
 	Milliseconds loading_start = gr_now_ms();
@@ -1684,6 +1705,25 @@ static void gr_load_imlib_object(ImageFrame *frame) {
 	imlib_context_set_image(frame_data_image);
 	int frame_data_width = imlib_image_get_width();
 	int frame_data_height = imlib_image_get_height();
+
+	// Check that the size of the image we are loading does not exceed the
+	// limit.
+	if (frame_data_width * frame_data_height * 4 >
+	    graphics_max_single_image_ram_size) {
+		if (frame->status != STATUS_RAM_LOADING_ERROR) {
+			fprintf(stderr,
+				"error: image %u frame %u is too big too load: "
+				"%d x %d * 4 = %d > %u\n",
+				frame->image->image_id, frame->index,
+				frame_data_width, frame_data_height,
+				frame_data_width * frame_data_height * 4,
+				graphics_max_single_image_ram_size);
+		}
+		imlib_free_image();
+		frame->status = STATUS_RAM_LOADING_ERROR;
+		return;
+	}
+
 	GR_LOG("Successfully loaded, size %d x %d\n", frame_data_width,
 	       frame_data_height);
 	// If imlib loading succeeded, and it is the first frame, set the
@@ -1794,7 +1834,6 @@ void gr_compute_pixmap_transformation(ImagePlacement *placement) {
 
 	if (src_w <= 0 || src_h <= 0) {
 		tr->dst_x = tr->dst_y = tr->dst_w = tr->dst_h = 0;
-		fprintf(stderr, "warning: image of zero size\n");
 	} else if (mode == SCALE_MODE_FILL) {
 		tr->dst_x = tr->dst_y = 0;
 		tr->dst_w = box_w;
@@ -1876,6 +1915,9 @@ Imlib_Image gr_create_scaled_image_object(ImagePlacement *placement,
 			pixmap_w, pixmap_h, graphics_max_single_image_ram_size);
 		return 0;
 	}
+
+	if (pixmap_w == 0 || pixmap_h == 0)
+		fprintf(stderr, "warning: image of zero size\n");
 
 	imlib_context_set_image(frame->imlib_object);
 	imlib_context_set_anti_alias(1);
@@ -3089,6 +3131,96 @@ static void gr_schedule_image_redraw(Image *img) {
 	gr_schedule_image_redraw_by_id(img->image_id);
 }
 
+/// Closes the file currently being uploaded. This doesn't necessarily finish
+/// the upload since the file may be reopened.
+static void gr_close_current_upload_file() {
+	Image *img = gr_find_image(current_upload_image_id);
+	ImageFrame *frame = gr_get_frame(img, current_upload_frame_index);
+	gr_close_disk_cache_file(frame);
+}
+
+/// Sets the current image and frame being uploaded. Closes the previous upload
+/// file if it's changed. If `frame` is NULL, clears the current upload
+/// image/frame.
+static void gr_set_current_upload_frame(ImageFrame *frame) {
+	if (frame) {
+		if (current_upload_image_id != frame->image->image_id ||
+		    current_upload_frame_index != frame->index) {
+			gr_close_current_upload_file();
+		}
+		current_upload_image_id = frame->image->image_id;
+		current_upload_frame_index = frame->index;
+		GR_LOG("Set current_upload_image_id = %u, "
+		       "current_upload_frame_index = %u\n",
+		       current_upload_image_id, current_upload_frame_index);
+	} else {
+		gr_close_current_upload_file();
+		current_upload_image_id = 0;
+		current_upload_frame_index = 0;
+		GR_LOG("Set current_upload_image_id = 0\n");
+	}
+}
+
+/// Returns whether direct transmission continuation is allowed for the given
+/// command and frame.
+static int gr_transmission_continuation_is_allowed(GraphicsCommand *cmd,
+						   ImageFrame *frame) {
+	if (!frame || frame->status != STATUS_UPLOADING)
+		return 0;
+
+	// If it's the same image and frame as the current upload, allow it.
+	if (current_upload_image_id == frame->image->image_id &&
+	    current_upload_frame_index == frame->index)
+		return 1;
+
+	// Otherwise it's a continuation of an interrupted upload. The kitty
+	// graphics protocol doesn't allow interleaving of direct transmission
+	// with other commands, so interrupted uploads must be aborted. However,
+	// we still allow it as an extension, because it's useful for
+	// protocol-unaware multiplexer. We check that there are no
+	// contradictions, and the time since the last upload activity is small.
+
+	if (cmd->size && cmd->size != frame->expected_size) {
+		fprintf(stderr, "warning: Not resuming interrupted upload "
+				"because of expected size mismatch\n");
+		return 0;
+	}
+	if (cmd->format && cmd->format != frame->format) {
+		fprintf(stderr, "warning: Not resuming interrupted upload "
+				"because of format mismatch\n");
+		return 0;
+	}
+	if (cmd->compression && cmd->compression != frame->compression) {
+		fprintf(stderr, "warning: Not resuming interrupted upload "
+				"because of compression mismatch\n");
+		return 0;
+	}
+	if ((cmd->frame_pix_width &&
+	     cmd->frame_pix_width != frame->data_pix_width) ||
+	    (cmd->frame_pix_height &&
+	     cmd->frame_pix_height != frame->data_pix_height) ||
+	    (cmd->background_color &&
+	     cmd->background_color != frame->background_color) ||
+	    (cmd->background_frame &&
+	     cmd->background_frame != frame->background_frame_index) ||
+	    (cmd->gap && cmd->gap != frame->gap) ||
+	    (cmd->replace_instead_of_blending &&
+	     cmd->replace_instead_of_blending != !frame->blend)) {
+		fprintf(stderr, "warning: Not resuming interrupted upload "
+				"because of frame parameters mismatch\n");
+		return 0;
+	}
+
+	Milliseconds now = gr_now_ms();
+	if (now - frame->atime > graphics_direct_transmission_timeout_ms) {
+		fprintf(stderr, "warning: Not resuming interrupted upload "
+				"because of time out\n");
+		return 0;
+	}
+
+	return 1;
+}
+
 /// Appends `data` to the on-disk cache file of the frame `frame`. Creates the
 /// file if it doesn't exist. Updates `frame->disk_size` and the total disk
 /// size. Returns 1 on success and 0 on failure.
@@ -3119,29 +3251,12 @@ static int gr_append_raw_data_to_file(ImageFrame *frame, const char *data,
 /// (`!more`) to avoid spamming the client. If the frame is not specified, use
 /// the image id and frame index we are currently uploading.
 static void gr_append_data(ImageFrame *frame, const char *payload, int more) {
-	if (!frame) {
-		Image *img = gr_find_image(current_upload_image_id);
-		frame = gr_get_frame(img, current_upload_frame_index);
-		GR_LOG("Appending data to image %u frame %d\n",
-		       current_upload_image_id, current_upload_frame_index);
-		if (!img)
-			GR_LOG("ERROR: this image doesn't exist\n");
-		if (!frame)
-			GR_LOG("ERROR: this frame doesn't exist\n");
-	}
-	if (!more) {
-		current_upload_image_id = 0;
-		current_upload_frame_index = 0;
-	}
-	if (!frame) {
-		if (!more)
-			gr_reporterror_frame(NULL, "ENOENT: could not find the "
-						   "image to append data to");
-		return;
-	}
+	gr_set_current_upload_frame(frame);
+
 	if (frame->status != STATUS_UPLOADING) {
 		if (!more)
 			gr_reportuploaderror(frame);
+		gr_set_current_upload_frame(NULL);
 		return;
 	}
 
@@ -3161,6 +3276,7 @@ static void gr_append_data(ImageFrame *frame, const char *payload, int more) {
 		frame->uploading_failure = ERROR_OVER_SIZE_LIMIT;
 		if (!more)
 			gr_reportuploaderror(frame);
+		gr_set_current_upload_frame(NULL);
 		return;
 	}
 
@@ -3170,21 +3286,13 @@ static void gr_append_data(ImageFrame *frame, const char *payload, int more) {
 		frame->uploading_failure = ERROR_CANNOT_OPEN_CACHED_FILE;
 		if (!more)
 			gr_reportuploaderror(frame);
+		gr_set_current_upload_frame(NULL);
 		return;
 	}
 	free(data);
 
-	if (more) {
-		current_upload_image_id = frame->image->image_id;
-		current_upload_frame_index = frame->index;
-	} else {
-		current_upload_image_id = 0;
-		current_upload_frame_index = 0;
-		// Close the file.
-		if (frame->open_file) {
-			fclose(frame->open_file);
-			frame->open_file = NULL;
-		}
+	if (!more) {
+		gr_set_current_upload_frame(NULL);
 		frame->status = STATUS_UPLOADING_SUCCESS;
 		uint32_t placement_id = frame->image->default_placement;
 		if (frame->expected_size &&
@@ -3423,7 +3531,7 @@ static ImageFrame *gr_handle_transmit_command(GraphicsCommand *cmd) {
 	} else if (cmd->transmission_medium == 'd') {
 		// Direct transmission (default if 't' is not specified).
 		frame = gr_get_last_frame(gr_find_image_for_command(cmd));
-		if (frame && frame->status == STATUS_UPLOADING) {
+		if (gr_transmission_continuation_is_allowed(cmd, frame)) {
 			// This is a continuation of the previous transmission.
 			cmd->is_direct_transmission_continuation = 1;
 			cmd->image_id = frame->image->image_id;
@@ -3513,10 +3621,7 @@ static ImageFrame *gr_handle_transmit_command(GraphicsCommand *cmd) {
 			gr_reportuploaderror(frame);
 		}
 		// Close the cache file.
-		if (frame->open_file) {
-			fclose(frame->open_file);
-			frame->open_file = NULL;
-		}
+		gr_close_disk_cache_file(frame);
 		// Unmap the data
 		if (munmap(data, size) != 0)
 			fprintf(stderr, "munmap failed: %s\n", strerror(errno));
@@ -3791,13 +3896,17 @@ static void gr_handle_command(GraphicsCommand *cmd) {
 		// response, so set quiet to 2.
 		cmd->quiet = 2;
 	}
+
+	int was_transmission = 0;
 	ImageFrame *frame = NULL;
+
 	switch (cmd->action) {
 	case 0:
 		// If no action is specified, it is data transmission.
 	case 't':
 	case 'q':
 	case 'f':
+		was_transmission = 1;
 		// Transmit data. 'q' means query, which is basically the same
 		// as transmit, but the image is discarded, and the id is fake.
 		// 'f' appends a frame to an existing image.
@@ -3808,6 +3917,7 @@ static void gr_handle_command(GraphicsCommand *cmd) {
 		gr_handle_put_command(cmd);
 		break;
 	case 'T':
+		was_transmission = 1;
 		// Transmit and display.
 		frame = gr_handle_transmit_command(cmd);
 		if (frame && !cmd->is_direct_transmission_continuation) {
@@ -3826,7 +3936,16 @@ static void gr_handle_command(GraphicsCommand *cmd) {
 	default:
 		gr_reporterror_cmd(cmd, "EINVAL: unsupported action: %c",
 				   cmd->action);
-		return;
+		break;
+	}
+
+	if (!was_transmission ||
+	    (cmd->transmission_medium && cmd->transmission_medium != 'd')) {
+		// If it wasn't a transmission command, or if the transmission
+		// wasn't direct, clear the current upload frame and close the
+		// file. (If it was a direct transmission, the current upload
+		// was handled inside `gr_append_data`.)
+		gr_set_current_upload_frame(NULL);
 	}
 }
 
