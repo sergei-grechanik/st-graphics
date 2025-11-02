@@ -124,15 +124,17 @@ enum ImageUploadingFailure {
 	ERROR_UNEXPECTED_SIZE = 3,
 	ERROR_CANNOT_COPY_FILE = 4,
 	ERROR_CANNOT_OPEN_SHM = 5,
+	ERROR_MTIME_MISMATCH = 3,
 };
 
-const char *image_uploading_failure_strings[6] = {
+const char *image_uploading_failure_strings[7] = {
 	"NO_ERROR",
 	"ERROR_OVER_SIZE_LIMIT",
 	"ERROR_CANNOT_OPEN_CACHED_FILE",
 	"ERROR_UNEXPECTED_SIZE",
 	"ERROR_CANNOT_COPY_FILE",
 	"ERROR_CANNOT_OPEN_SHM",
+	"ERROR_MTIME_MISMATCH",
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -226,6 +228,11 @@ typedef struct ImageFrame {
 	char quiet;
 	/// Whether to blend the frame with the background or replace it.
 	char blend;
+	/// The original file name used with file transmission. Malloced.
+	char *original_filename;
+	/// The modification time of the original file used with file
+	/// transmission.
+	time_t original_file_mtime;
 	/// The file corresponding to the on-disk cache, used when uploading.
 	FILE *open_file;
 	/// The size of the corresponding file cached on disk.
@@ -374,6 +381,7 @@ static void gr_get_frame_filename(ImageFrame *frame, char *out, size_t max_len);
 static void gr_delete_image(Image *img);
 static void gr_erase_placement(ImagePlacement *placement);
 static void gr_check_limits();
+static void gr_try_restore_imagefile(ImageFrame *frame);
 static char *gr_base64dec(const char *src, size_t *size);
 static void sanitize_str(char *str, size_t max_len);
 static const char *sanitized_filename(const char *str);
@@ -801,6 +809,8 @@ static void gr_delete_image_keep_id(Image *img) {
 	foreach_frame(*img, frame, {
 		gr_delete_imagefile(frame);
 		gr_unload_frame(frame);
+		if (frame->original_filename)
+			free(frame->original_filename);
 	});
 	kv_destroy(img->frames_beyond_the_first);
 	gr_delete_all_placements(img);
@@ -1113,6 +1123,25 @@ static void gr_update_frame_index(Image *img, Milliseconds now) {
 ////////////////////////////////////////////////////////////////////////////////
 // Unloading and deleting images to save resources.
 ////////////////////////////////////////////////////////////////////////////////
+
+/// Returns whether the original file of the frame is still available (exists,
+/// is a regular file, has the same size and mtime).
+static int gr_is_original_file_still_available(ImageFrame *frame) {
+	if (!frame->original_filename)
+		return 0;
+	struct stat st;
+	if (stat(frame->original_filename, &st) != 0)
+		return 0;
+	if (!S_ISREG(st.st_mode))
+		return 0;
+	if (st.st_size == 0 || st.st_size > graphics_max_single_image_file_size)
+		return 0;
+	if (frame->expected_size && st.st_size != frame->expected_size)
+		return 0;
+	if (st.st_mtime != frame->original_file_mtime)
+		return 0;
+	return 1;
+}
 
 /// A helper to compare frames by atime for qsort.
 static int gr_cmp_frames_by_atime(const void *a, const void *b) {
@@ -1625,7 +1654,13 @@ static void gr_load_imlib_object(ImageFrame *frame) {
 	if (frame->status < STATUS_UPLOADING_SUCCESS)
 		return;
 	if (frame->disk_size == 0) {
-		if (frame->status != STATUS_RAM_LOADING_ERROR) {
+		// In some cases the original image file may still be available,
+		// try to restore it.
+		gr_try_restore_imagefile(frame);
+	}
+	if (frame->disk_size == 0) {
+		if (frame->status != STATUS_RAM_LOADING_ERROR &&
+		    frame->status >= STATUS_UPLOADING_SUCCESS) {
 			fprintf(stderr,
 				"error: cached image was deleted: %u frame %u\n",
 				frame->image->image_id, frame->index);
@@ -2200,6 +2235,14 @@ static void gr_dump_frame_info(FILE *file, ImageFrame *frame, int ind) {
 	if (frame->index == 0) {
 		fprintf_ind(file, ind, "NOT INITIALIZED\n");
 		return;
+	}
+	if (frame->original_filename) {
+		fprintf_ind(file, ind, "original filename (sanitized): %s\n",
+			    sanitized_filename(frame->original_filename));
+		fprintf_ind(file, ind, "original file %s\n",
+			    gr_is_original_file_still_available(frame)
+				    ? "is still available"
+				    : "is NOT available anymore");
 	}
 	if (frame->uploading_failure)
 		fprintf_ind(file, ind, "uploading failure: %s\n",
@@ -3419,6 +3462,120 @@ static void gr_delete_tmp_file(const char *filename) {
 	unlink(filename);
 }
 
+/// Copy the image file `frame->original_filename` to the cache directory. This
+/// is done when the image is transmitted via file transfer, or when we have
+/// evicted the image from the disk cache and need to restore it.
+/// If `cmd` is not NULL, it's used to report errors, otherwise errors are only
+/// printed to stderr.
+static void gr_copy_imagefile(ImageFrame *frame, GraphicsCommand *cmd) {
+	GR_LOG("Copying image %s\n",
+	       sanitized_filename(frame->original_filename));
+	// Stat the file and check that it's a regular file and not too big.
+	struct stat st;
+	int stat_res = stat(frame->original_filename, &st);
+
+	const char *stat_error = NULL;
+	if (stat_res)
+		stat_error = strerror(errno);
+	else if (!S_ISREG(st.st_mode))
+		stat_error = "Not a regular file";
+	else if (st.st_size == 0)
+		stat_error = "The size of the file is zero";
+	else if (st.st_size > graphics_max_single_image_file_size)
+		stat_error = "The file is too large";
+	if (stat_error) {
+		fprintf(stderr, "Could not load the file %s: %s\n",
+			sanitized_filename(frame->original_filename),
+			stat_error);
+		if (cmd)
+			gr_reporterror_cmd(cmd, "EBADF: %s", stat_error);
+		frame->status = STATUS_UPLOADING_ERROR;
+		frame->uploading_failure = ERROR_CANNOT_COPY_FILE;
+		return;
+	}
+
+	// Check the expected size if specified.
+	if (frame->expected_size && frame->expected_size != st.st_size) {
+		fprintf(stderr,
+			"Could not load, the size doesn't match: %s expected "
+			"%u vs actual %ld\n",
+			sanitized_filename(frame->original_filename),
+			frame->expected_size, st.st_size);
+		// The file has unexpected size.
+		frame->status = STATUS_UPLOADING_ERROR;
+		frame->uploading_failure = ERROR_UNEXPECTED_SIZE;
+		if (cmd)
+			gr_reportuploaderror(frame);
+		return;
+	}
+
+	// If we know the original modification time, we are trying to restore
+	// the evicted image file. Check that the modification time matches.
+	if (frame->original_file_mtime &&
+	    frame->original_file_mtime != st.st_mtime) {
+		fprintf(stderr, "Could not load, the mtime doesn't match: %s\n",
+			sanitized_filename(frame->original_filename));
+		frame->status = STATUS_UPLOADING_ERROR;
+		frame->uploading_failure = ERROR_MTIME_MISMATCH;
+		if (cmd)
+			gr_reportuploaderror(frame);
+		return;
+	}
+
+	frame->original_file_mtime = st.st_mtime;
+
+	gr_make_sure_tmpdir_exists();
+	// Build the filename for the cached copy of the file.
+	char cache_filename[MAX_FILENAME_SIZE];
+	gr_get_frame_filename(frame, cache_filename, MAX_FILENAME_SIZE);
+	// We will create a symlink to the original file, and
+	// then copy the file to the temporary cache dir. We do
+	// this symlink trick mostly to be able to use cp for
+	// copying, and avoid escaping file name characters when
+	// calling system at the same time.
+	char tmp_filename_symlink[MAX_FILENAME_SIZE + 4] = {0};
+	strcat(tmp_filename_symlink, cache_filename);
+	strcat(tmp_filename_symlink, ".sym");
+	char command[MAX_FILENAME_SIZE + 256];
+	size_t len = snprintf(command, MAX_FILENAME_SIZE + 255, "cp '%s' '%s'",
+			      tmp_filename_symlink, cache_filename);
+
+	if (len > MAX_FILENAME_SIZE + 255 ||
+	    symlink(frame->original_filename, tmp_filename_symlink) ||
+	    system(command) != 0) {
+		fprintf(stderr,
+			"Could not copy the image "
+			"%s (symlink %s) to %s",
+			sanitized_filename(frame->original_filename),
+			tmp_filename_symlink, cache_filename);
+		if (cmd)
+			gr_reporterror_cmd(cmd, "EBADF: could not copy the "
+						"image to the cache dir");
+		frame->status = STATUS_UPLOADING_ERROR;
+		frame->uploading_failure = ERROR_CANNOT_COPY_FILE;
+		// Delete the symlink.
+		unlink(tmp_filename_symlink);
+		return;
+	}
+
+	// Delete the symlink.
+	unlink(tmp_filename_symlink);
+	// Set the status and update disk size variables.
+	frame->status = STATUS_UPLOADING_SUCCESS;
+	frame->disk_size = st.st_size;
+	frame->image->total_disk_size += st.st_size;
+	images_disk_size += frame->disk_size;
+}
+
+/// Tries to restore the image file for `frame` if the original file is still
+/// available.
+static void gr_try_restore_imagefile(ImageFrame *frame) {
+	if (frame->disk_size != 0)
+		return;
+	if (gr_is_original_file_still_available(frame))
+		gr_copy_imagefile(frame, NULL);
+}
+
 /// Handles a data transmission command.
 static ImageFrame *gr_handle_transmit_command(GraphicsCommand *cmd) {
 	// The default is direct transmission.
@@ -3445,88 +3602,18 @@ static ImageFrame *gr_handle_transmit_command(GraphicsCommand *cmd) {
 			return NULL;
 		last_image_id = frame->image->image_id;
 		// Decode the filename.
-		char *original_filename = gr_base64dec(cmd->payload, NULL);
-		GR_LOG("Copying image %s\n",
-		       sanitized_filename(original_filename));
-		// Stat the file and check that it's a regular file and not too
-		// big.
-		struct stat st;
-		int stat_res = stat(original_filename, &st);
-		const char *stat_error = NULL;
-		if (stat_res)
-			stat_error = strerror(errno);
-		else if (!S_ISREG(st.st_mode))
-			stat_error = "Not a regular file";
-		else if (st.st_size == 0)
-			stat_error = "The size of the file is zero";
-		else if (st.st_size > graphics_max_single_image_file_size)
-			stat_error = "The file is too large";
-		if (stat_error) {
-			gr_reporterror_cmd(cmd,
-					   "EBADF: %s", stat_error);
-			fprintf(stderr, "Could not load the file %s\n",
-				sanitized_filename(original_filename));
-			frame->status = STATUS_UPLOADING_ERROR;
-			frame->uploading_failure = ERROR_CANNOT_COPY_FILE;
-		} else {
-			gr_make_sure_tmpdir_exists();
-			// Build the filename for the cached copy of the file.
-			char cache_filename[MAX_FILENAME_SIZE];
-			gr_get_frame_filename(frame, cache_filename,
-					      MAX_FILENAME_SIZE);
-			// We will create a symlink to the original file, and
-			// then copy the file to the temporary cache dir. We do
-			// this symlink trick mostly to be able to use cp for
-			// copying, and avoid escaping file name characters when
-			// calling system at the same time.
-			char tmp_filename_symlink[MAX_FILENAME_SIZE + 4] = {0};
-			strcat(tmp_filename_symlink, cache_filename);
-			strcat(tmp_filename_symlink, ".sym");
-			char command[MAX_FILENAME_SIZE + 256];
-			size_t len =
-				snprintf(command, MAX_FILENAME_SIZE + 255,
-					 "cp '%s' '%s'", tmp_filename_symlink,
-					 cache_filename);
-			if (len > MAX_FILENAME_SIZE + 255 ||
-			    symlink(original_filename, tmp_filename_symlink) ||
-			    system(command) != 0) {
-				gr_reporterror_cmd(cmd,
-						   "EBADF: could not copy the "
-						   "image to the cache dir");
-				fprintf(stderr,
-					"Could not copy the image "
-					"%s (symlink %s) to %s",
-					sanitized_filename(original_filename),
-					tmp_filename_symlink, cache_filename);
-				frame->status = STATUS_UPLOADING_ERROR;
-				frame->uploading_failure = ERROR_CANNOT_COPY_FILE;
-			} else {
-				// Get the file size of the copied file.
-				frame->status = STATUS_UPLOADING_SUCCESS;
-				frame->disk_size = st.st_size;
-				frame->image->total_disk_size += st.st_size;
-				images_disk_size += frame->disk_size;
-				if (frame->expected_size &&
-				    frame->expected_size != frame->disk_size) {
-					// The file has unexpected size.
-					frame->status = STATUS_UPLOADING_ERROR;
-					frame->uploading_failure =
-						ERROR_UNEXPECTED_SIZE;
-					gr_reportuploaderror(frame);
-				} else {
-					// Everything seems fine, try to load
-					// and redraw existing instances.
-					gr_schedule_image_redraw(frame->image);
-					frame = gr_loadimage_and_report(frame);
-				}
-			}
-			// Delete the symlink.
-			unlink(tmp_filename_symlink);
-			// Delete the original file if it's temporary.
-			if (cmd->transmission_medium == 't')
-				gr_delete_tmp_file(original_filename);
+		frame->original_filename = gr_base64dec(cmd->payload, NULL);
+		// Copy the file to the cache directory.
+		gr_copy_imagefile(frame, cmd);
+		if (frame->status == STATUS_UPLOADING_SUCCESS) {
+			// Everything seems fine, try to load and redraw
+			// existing instances.
+			gr_schedule_image_redraw(frame->image);
+			frame = gr_loadimage_and_report(frame);
 		}
-		free(original_filename);
+		// Delete the original file if it's temporary.
+		if (cmd->transmission_medium == 't')
+			gr_delete_tmp_file(frame->original_filename);
 		gr_check_limits();
 	} else if (cmd->transmission_medium == 'd') {
 		// Direct transmission (default if 't' is not specified).
