@@ -73,6 +73,8 @@ features.
           value is the same as for png (`f=100`).
     - Transmission mediums:
         - ✅ Direct (`t=d`)
+          - ⚡ Concurrent direct uploading is supported when the image id or
+            number is specified for each chunk.
         - ✅ File (`t=f`)
         - ✅ Temporary file (`t=t`)
         - ✅ Shared memory object (`t=s`)
