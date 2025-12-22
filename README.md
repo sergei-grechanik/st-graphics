@@ -138,6 +138,12 @@ features.
   `TERM="xterm-kitty"`.
 - [snacks.image](https://github.com/folke/snacks.nvim/blob/main/docs/image.md) -
   works, you need to set the environment variable `SNACKS_KITTY=1`.
+- [chafa](https://github.com/hpjansson/chafa) - pass `-f kitty` explicitly (and
+  `--passthrough=tmux` if you are in tmux).
+- [fzf](https://github.com/junegunn/fzf) with the default preview script
+  ([fzf-preview.sh](https://github.com/junegunn/fzf/blob/master/bin/fzf-preview.sh))
+  works if you have the `kitten` command installed and you pretend that you
+  are running kitty: `KITTY_WINDOW_ID=1 fzf --preview 'fzf-preview.sh {}'`.
 
 ### Apps that sort of work
 - [hologram.nvim](https://github.com/edluffy/hologram.nvim) - There are some
