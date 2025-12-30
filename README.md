@@ -120,7 +120,7 @@ features.
 ## Things I have tested
 
 ### Apps that seem to work
-- Kitty's icat (including from within tmux).
+- Kitty's icat kitten (works in tmux too).
 - [termpdf](https://github.com/dsanson/termpdf.py)
 - [ranger](https://github.com/ranger/ranger) - I had to explicitly set
   `TERM=kitty`.
@@ -144,6 +144,7 @@ features.
   ([fzf-preview.sh](https://github.com/junegunn/fzf/blob/master/bin/fzf-preview.sh))
   works if you have the `kitten` command installed and you pretend that you
   are running kitty: `KITTY_WINDOW_ID=1 fzf --preview 'fzf-preview.sh {}'`.
+- [mcat](https://github.com/Skardyy/mcat) - run as `mcat --kitty <image>`.
 
 ### Apps that sort of work
 - [hologram.nvim](https://github.com/edluffy/hologram.nvim) - There are some
