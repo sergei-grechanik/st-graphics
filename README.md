@@ -5,7 +5,7 @@ This is a fork of [st](https://st.suckless.org/) that implements a subset of
 
 If you want this formatted as a single patch, take the last commit from this
 branch: [graphics-squashed](https://github.com/sergei-grechanik/st-graphics/tree/graphics-squashed)
-(may be slightly outdated).
+(may be slightly outdated). See also [patch releases](#patch-releases).
 
 If you want to combine this with other patches, check out the
 [graphics-with-patches branch](https://github.com/sergei-grechanik/st-graphics/tree/graphics-with-patches)
@@ -194,3 +194,34 @@ per se, but are hard to disentangle from the graphics implementation:
   st: it's drawn behind the text and the thickness depends on the font size. You
   may need to tweak the code in `xdrawglyphfontspecs` in `x.c` if you don't like
   it.
+
+## Patch releases
+
+### 2025-12-30
+Patch: [st-kitty-graphics-20251230-0.9.3.diff](https://github.com/sergei-grechanik/st-graphics/releases/download/graphics-20251230-0.9.3/st-kitty-graphics-20251230-0.9.3.diff)
+```
+git cherry-pick graphics-20251230-0.9.3-squashed
+git checkout graphics-20251230-0.9.3
+```
+* Restore evicted images from original files when available.
+* Fix an issue that caused too many files to be opened during
+  concurrent direct uploads.
+* Optimize scaled pixmap generation (don't store pad pixels; upscale
+  with XRender).
+
+### 2025-02-22
+Patch: [st-kitty-graphics-20250222-98610fc.diff](https://github.com/sergei-grechanik/st-graphics/releases/download/graphics-20250222-98610fc/st-kitty-graphics-20250222-98610fc.diff)
+```
+git cherry-pick graphics-20250222-98610fc-squashed
+git checkout graphics-20250222-98610fc
+```
+* Restore text under classic placements on deletion.
+* Support uploading via shared memory (t=s).
+* Bug fixes.
+
+### 2024-09-22
+Patch: [st-kitty-graphics-20240922-a0274bc.diff](https://github.com/sergei-grechanik/st-graphics/releases/download/graphics-20240922-a0274bc/st-kitty-graphics-20240922-a0274bc.diff)
+```
+git cherry-pick graphics-20240922-a0274bc-squashed
+git checkout graphics-20240922-a0274bc
+```
