@@ -550,6 +550,23 @@ bpress(XEvent *e)
 	struct timespec now;
 	int snap;
 
+	if (btn == Button4 || btn == Button5) {
+		Arg a;
+		if (IS_SET(MODE_MOUSE) && !(e->xbutton.state & forcemousemod)) {
+			mousereport(e);
+			return;
+		}
+		if (!tisaltscreen()) {
+			a.i = 1;
+			if (btn == Button4) {
+				kscrollup(&a);
+			} else {
+				kscrolldown(&a);
+			}
+		}
+		return;
+	}
+
 	if (1 <= btn && btn <= 11)
 		buttons |= 1 << (btn-1);
 
