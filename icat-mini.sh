@@ -293,11 +293,24 @@ fi
 
 image_id=""
 while [ -z "$image_id" ]; do
-    image_id="$(shuf -i 16777217-4294967295 -n 1)"
-    # Check that the id requires 24-bit fg colors.
-    if [ "$(expr \( "$image_id" / 256 \) % 65536)" -eq 0 ]; then
-        image_id=""
+    # Read 4 bytes from /dev/urandom, convert them to decimal numbers and assign
+    # them to b1, b2, b3, b4.
+    set -- $(od -A n -t u1 -N 4 -v /dev/urandom 2>/dev/null)
+    if [ $# -lt 4 ]; then
+        echo "Failed to read from /dev/urandom" >&2
+        exit 1
     fi
+    b1=$1 b2=$2 b3=$3 b4=$4
+
+    # Require the MSB and one of the middle bytes to be non-zero.
+    if [ "$b1" -eq 0 ]; then
+        continue
+    elif [ "$b2" -eq 0 ] && [ "$b3" -eq 0 ]; then
+        continue
+    fi
+
+    # Build a 32-bit number.
+    image_id=$(expr \( \( "$b1" \* 256 + "$b2" \) \* 256 + "$b3" \) \* 256 + "$b4")
 done
 
 #####################################################################
