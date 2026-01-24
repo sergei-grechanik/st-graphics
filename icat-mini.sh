@@ -215,9 +215,9 @@ if [ -z "$cols" ] || [ -z "$rows" ]; then
     # If it didn't work, try to use csi XTWINOPS.
     if [ -z "$cell_width" ] || [ -z "$cell_height" ]; then
         if [ -n "$inside_tmux" ]; then
-            printf '\ePtmux;\e\e[16t\e\\' >> "$command_tty"
+            printf '\033Ptmux;\033\033[16t\033\\' >> "$command_tty"
         else
-            printf '\e[16t' >> "$command_tty"
+            printf '\033[16t' >> "$command_tty"
         fi
         # The expected response will look like ^[[6;<height>;<width>t
         term_response=""
@@ -329,11 +329,11 @@ fi
 # Functions to emit the start and the end of a graphics command.
 if [ -n "$inside_tmux" ]; then
     # If we are in tmux we have to wrap the command in Ptmux.
-    graphics_command_start='\ePtmux;\e\e_G'
-    graphics_command_end='\e\e\\\e\\'
+    graphics_command_start='\033Ptmux;\033\033_G'
+    graphics_command_end='\033\033\\\033\\'
 else
-    graphics_command_start='\e_G'
-    graphics_command_end='\e\\'
+    graphics_command_start='\033_G'
+    graphics_command_end='\033\\'
 fi
 
 # Send a graphics command with the correct start and end
@@ -548,14 +548,14 @@ print_placeholder() {
     blue="$(expr "$image_id" % 256 )"
     green="$(expr \( "$image_id" / 256 \) % 256 )"
     red="$(expr \( "$image_id" / 65536 \) % 256 )"
-    line_start="$(printf "\e[38;2;%d;%d;%dm" "$red" "$green" "$blue")"
-    line_end="$(printf "\e[39;m")"
+    line_start="$(printf "\033[38;2;%d;%d;%dm" "$red" "$green" "$blue")"
+    line_end="$(printf "\033[39;m")"
 
     id4th="$(expr \( "$image_id" / 16777216 \) % 256 )"
     eval "id_diacritic=\$d${id4th}"
 
     # Reset the brush state, mostly to reset the underline color.
-    printf "\e[0m"
+    printf "\033[0m"
 
     # Fill the output with characters representing the image
     for y in $(seq 0 "$(expr "$rows" - 1)"); do
@@ -576,7 +576,7 @@ print_placeholder() {
         printf "%s\n" "$line"
     done
 
-    printf "\e[0m"
+    printf "\033[0m"
 }
 
 d0="̅"
