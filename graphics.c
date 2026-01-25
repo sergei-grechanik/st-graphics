@@ -309,6 +309,10 @@ typedef struct ImagePlacement {
 	uint16_t rows, cols;
 	/// Top-left corner of the source rectangle ('x=' and 'y=').
 	int src_pix_x, src_pix_y;
+	/// Pixel offset within the first cell ('X=' and 'Y='). The protocol
+	/// requires these values to be less than the current cell width/height,
+	/// but we don't enforce it and allow larger offsets.
+	int x_offset, y_offset;
 	/// Height and width of the source rectangle (zero if full image).
 	int src_pix_width, src_pix_height;
 	/// The image appropriately scaled and uploaded to the X server. This
@@ -446,6 +450,9 @@ extern unsigned graphics_animation_min_delay;
 /// The time after which an interrupted (with another command) direct
 /// transmission cannot be resumed.
 static Milliseconds graphics_direct_transmission_timeout_ms = 2000;
+
+/// The max number of rows or columns.
+static const int max_rows_cols = 4096;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Basic helpers.
@@ -981,12 +988,21 @@ static void gr_infer_placement_size_maybe(ImagePlacement *placement) {
 	if (current_cw == 0 || current_ch == 0)
 		return;
 
-	// If no size is specified, use the image size.
-	if (placement->cols == 0 && placement->rows == 0) {
-		placement->cols =
-			ceil_div(placement->src_pix_width, current_cw);
-		placement->rows =
-			ceil_div(placement->src_pix_height, current_ch);
+	int src_pix_width = placement->src_pix_width;
+	int src_pix_height = placement->src_pix_height;
+	int x_offset = placement->x_offset;
+	int y_offset = placement->y_offset;
+
+	int rows = placement->rows;
+	int cols = placement->cols;
+
+	// If no size is specified, use the image size. Account for X/Y cell
+	// offset - the image will need more cells when offset.
+	if (cols == 0 && rows == 0) {
+		cols = ceil_div(src_pix_width + x_offset, current_cw);
+		rows = ceil_div(src_pix_height + y_offset, current_ch);
+		placement->cols = MIN(max_rows_cols, MAX(1, cols));
+		placement->rows = MIN(max_rows_cols, MAX(1, rows));
 		return;
 	}
 
@@ -996,36 +1012,43 @@ static void gr_infer_placement_size_maybe(ImagePlacement *placement) {
 		// logical thing is to find the minimum size of the
 		// non-specified dimension that allows the image to fit the
 		// specified dimension.
-		if (placement->cols == 0) {
-			placement->cols = ceil_div(
-				placement->src_pix_width * placement->rows *
-					current_ch,
-				placement->src_pix_height * current_cw);
-			return;
+		// The formulas below are derived from this ratio:
+		//
+		//  src_pix_width      current_cw * cols - x_offset
+		// ---------------- = ------------------------------
+		//  src_pix_height     current_ch * rows - y_offset
+		//
+		// (The ratio naively assumes that rows and columns may be
+		// fractional, but in practice we round them up).
+		if (cols == 0) {
+			int box_h = MAX(1, rows * current_ch - y_offset);
+			cols = ceil_div(src_pix_width * box_h +
+						x_offset * src_pix_height,
+					src_pix_height * current_cw);
 		}
-		if (placement->rows == 0) {
-			placement->rows =
-				ceil_div(placement->src_pix_height *
-						 placement->cols * current_cw,
-					 placement->src_pix_width * current_ch);
-			return;
+		if (rows == 0) {
+			int box_w = MAX(1, cols * current_cw - x_offset);
+			rows = ceil_div(src_pix_height * box_w +
+						y_offset * src_pix_width,
+					src_pix_width * current_ch);
 		}
 	} else {
 		// Otherwise we stretch the image or preserve the original size.
 		// In both cases we compute the best number of columns from the
-		// pixel size and cell size.
+		// pixel size (including the offset) and cell size.
 		// TODO: In the case of stretching it's not the most logical
 		//       thing to do, may need to revisit in the future.
 		//       Currently we switch to SCALE_MODE_CONTAIN when only one
 		//       of the dimensions is specified, so this case shouldn't
 		//       happen in practice.
-		if (!placement->cols)
-			placement->cols =
-				ceil_div(placement->src_pix_width, current_cw);
-		if (!placement->rows)
-			placement->rows =
-				ceil_div(placement->src_pix_height, current_ch);
+		if (!cols)
+			cols = ceil_div(src_pix_width + x_offset, current_cw);
+		if (!rows)
+			rows = ceil_div(src_pix_height + y_offset, current_ch);
 	}
+
+	placement->cols = MIN(max_rows_cols, MAX(1, cols));
+	placement->rows = MIN(max_rows_cols, MAX(1, rows));
 }
 
 /// Adjusts the current frame index if enough time has passed since the display
@@ -1858,6 +1881,10 @@ void gr_compute_pixmap_transformation(ImagePlacement *placement) {
 	int box_w = (int)placement->cols * placement->scaled_cw;
 	int box_h = (int)placement->rows * placement->scaled_ch;
 
+	// Take the offset into account.
+	box_w = MAX(1, box_w - placement->x_offset);
+	box_h = MAX(1, box_h - placement->y_offset);
+
 	int src_w = placement->src_pix_width;
 	int src_h = placement->src_pix_height;
 
@@ -1901,6 +1928,10 @@ void gr_compute_pixmap_transformation(ImagePlacement *placement) {
 			tr->dst_y = (box_h - tr->dst_h) / 2;
 		}
 	}
+
+	// Apply the offset (X= and Y= keys) to the destination position.
+	tr->dst_x += placement->x_offset;
+	tr->dst_y += placement->y_offset;
 
 	// Make sure that the size of the destination image is non-zero.
 	tr->dst_w = MAX(1, tr->dst_w);
@@ -2287,6 +2318,8 @@ static void gr_dump_placement_info(FILE *file, ImagePlacement *placement,
 	fprintf_ind(file, ind, "scale_mode: %u\n", placement->scale_mode);
 	fprintf_ind(file, ind, "size: %u cols x %u rows\n", placement->cols,
 		    placement->rows);
+	fprintf_ind(file, ind, "offset: X=%d, Y=%d\n", placement->x_offset,
+		    placement->y_offset);
 	fprintf_ind(file, ind, "cell size: %ux%u\n", placement->scaled_cw,
 		    placement->scaled_ch);
 	PixmapTransformation *tr = &placement->pixmap_transformation;
@@ -2952,11 +2985,14 @@ typedef struct {
 	// 'x=' and 'y=', the relative position of the frame image when it's
 	// composed on top of another frame.
 	int frame_dst_pix_x, frame_dst_pix_y;
-	/// 'X=', 'X=1' to replace colors instead of alpha blending on top of
-	/// the background color or frame.
+	/// 'X=' and 'Y=' for display commands: pixel offset within the first
+	/// cell at which to start displaying the image.
+	int x_offset, y_offset;
+	/// 'X=' for animation frames: 'X=1' to replace colors instead of alpha
+	/// blending on top of the background color or frame.
 	char replace_instead_of_blending;
-	/// 'Y=', the background color in the 0xRRGGBBAA format (still
-	/// transmitted as a decimal number).
+	/// 'Y=' for animation frames: the background color in the 0xRRGGBBAA
+	/// format (still transmitted as a decimal number).
 	uint32_t background_color;
 	/// (Only for 'a=f'). 'c=', the 1-based index of the background frame.
 	int background_frame;
@@ -3745,6 +3781,12 @@ static void gr_handle_put_command(GraphicsCommand *cmd) {
 		return;
 	}
 
+	if (cmd->x_offset < 0 || cmd->y_offset < 0) {
+		gr_reporterror_cmd(
+			cmd, "EINVAL: cell offsets X/Y cannot be negative");
+		return;
+	}
+
 	// Create a placement. If a placement with the same id already exists,
 	// it will be deleted. If the id is zero, a random id will be generated.
 	ImagePlacement *placement = gr_new_placement(img, cmd->placement_id);
@@ -3756,6 +3798,8 @@ static void gr_handle_put_command(GraphicsCommand *cmd) {
 	placement->cols = cmd->columns;
 	placement->rows = cmd->rows;
 	placement->do_not_move_cursor = cmd->do_not_move_cursor;
+	placement->x_offset = MAX(0, cmd->x_offset);
+	placement->y_offset = MAX(0, cmd->y_offset);
 
 	if (placement->virtual) {
 		placement->scale_mode = SCALE_MODE_CONTAIN;
@@ -4176,13 +4220,13 @@ static void gr_set_keyvalue(GraphicsCommand *cmd, KeyAndValue *kv) {
 		if (cmd->action == 'f')
 			cmd->replace_instead_of_blending = num;
 		else
-			break; /*ignore*/
+			cmd->x_offset = num;
 		break;
 	case 'Y':
 		if (cmd->action == 'f')
 			cmd->background_color = num;
 		else
-			break; /*ignore*/
+			cmd->y_offset = num;
 		break;
 	case 'z':
 		if (cmd->action == 'f' || cmd->action == 'a')
