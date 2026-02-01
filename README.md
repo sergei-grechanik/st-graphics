@@ -176,6 +176,9 @@ include:
   required some modifications.
 - [Alpha](https://st.suckless.org/patches/alpha)
 - [External pipe](https://st.suckless.org/patches/externalpipe)
+- [Synchronized updates](https://st.suckless.org/patches/sync) - required some
+  manual conflict resolution. Note that the patch in `graphics-with-patches`
+  additionally supports the newer `\033[?2026h`/`\033[?2026l`.
 
 If you run into any problems with other patches, feel free to open an issue.
 
