@@ -91,7 +91,7 @@ features.
     - ✅ Cursor movement policies `C=1` and `C=0`
     - ✅ Source rectangle (`x, y, w, h`)
     - ✅ The number of rows/columns (`r, c`)
-    - ❌ Cell offsets (`X, Y`)
+    - ✅ Cell offsets (`X, Y`)
     - ❌ z-index. Classic placements will erase old placements and the text on
       overlap.
     - ❌ Relative placements (`P, Q, H, V`)
