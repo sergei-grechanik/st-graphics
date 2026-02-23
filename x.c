@@ -1537,9 +1537,20 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 	int charlen = len * ((base.mode & ATTR_WIDE) ? 2 : 1);
 	int winx = win.hborderpx + x * win.cw, winy = win.vborderpx + y * win.ch,
 	    width = charlen * win.cw;
+	uint32_t decorcolor;
 	Color *fg, *bg, *temp, revfg, revbg, truefg, truebg;
 	XRenderColor colfg, colbg;
 	XRectangle r;
+
+	/*
+	 * Some patches encode extra metadata in Glyph color fields; if such
+	 * values leak into normal rendering paths, clamp them to avoid OOB
+	 * access into dc.col.
+	 */
+	if (!IS_TRUECOL(base.fg) && !BETWEEN(base.fg, 0, dc.collen - 1))
+		base.fg = defaultfg;
+	if (!IS_TRUECOL(base.bg) && !BETWEEN(base.bg, 0, dc.collen - 1))
+		base.bg = defaultbg;
 
 	/* Fallback on color display for attributes not supported by the font */
 	if (base.mode & ATTR_ITALIC && base.mode & ATTR_BOLD) {
@@ -1650,7 +1661,7 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 
 	/* Decoration color. */
 	Color decor;
-	uint32_t decorcolor = tgetdecorcolor(&base);
+	decorcolor = tgetdecorcolor(&base);
 	if (decorcolor == DECOR_DEFAULT_COLOR) {
 		decor = *fg;
 	} else if (IS_TRUECOL(decorcolor)) {
@@ -1659,8 +1670,10 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 		colfg.green = TRUEGREEN(decorcolor);
 		colfg.blue = TRUEBLUE(decorcolor);
 		XftColorAllocValue(xw.dpy, xw.vis, xw.cmap, &colfg, &decor);
-	} else {
+	} else if (BETWEEN(decorcolor, 0, dc.collen - 1)) {
 		decor = dc.col[decorcolor];
+	} else {
+		decor = *fg;
 	}
 	decor.color.alpha = 0xffff;
 	decor.pixel |= 0xff << 24;

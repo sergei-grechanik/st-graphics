@@ -3312,7 +3312,6 @@ tresize(int col, int row)
 	int min_limit;
 	int minrow = MIN(row, term.row);
 	int old_row = term.row;
-	int old_col = term.col;
 	int save_end = 0; /* Track effective pushed height */
 	int loaded = 0;
 	int pop_width = 0;
@@ -3352,17 +3351,12 @@ tresize(int col, int row)
 		for (i = 0; i < save_end; i++) {
 			sb_push(term.line[i]);
 		}
-		/* Optimization: Only reflow if content doesn't fit in new width.
-		 * This avoids expensive reflow operations when resizing doesn't
-		 * affect line wrapping (e.g., when terminal is wide enough). */
-		if (col > term.col) {
-			/* Growing: Only reflow if history was wrapped at old width */
-			needs_reflow = sb.max_width >= term.col;
-		} else if (col < term.col) {
-			/* Shrinking: Only reflow if content is wider than new width. */
-			if (sb.max_width > col)
-				needs_reflow = 1;
-		}
+		/*
+		 * Keep scrollback line width uniform across all entries.
+		 * Skipping reflow creates mixed-width history, which can later
+		 * be copied/rendered using the wrong width.
+		 */
+		needs_reflow = (col != term.col);
 		if (needs_reflow) {
 			sb_resize(col);
 		} else {
@@ -3415,7 +3409,7 @@ tresize(int col, int row)
 
 	if (minrow > 0) {
 		loaded = MIN(sb.len, term.row);
-		pop_width = needs_reflow ? col : MIN(col, old_col);
+		pop_width = col;
 		sb_pop_screen(loaded, pop_width);
 	}
 	if (is_alt) {
