@@ -248,18 +248,22 @@ bc_round() {
     LC_NUMERIC=C printf '%.0f' "$(printf '%s\n' "scale=2;($1) + 0.5" | bc)"
 }
 
+# Read image metadata. If it's an animation, this uses the first frame
+# dimensions along with the full image frame count and format.
+metadata_output="$($identify -format '%w %h %n %m\n' "$file" | head -n 1)"
+img_width="$(printf '%s' "$metadata_output" | cut -d ' ' -f 1)"
+img_height="$(printf '%s' "$metadata_output" | cut -d ' ' -f 2)"
+frame_count="$(printf '%s' "$metadata_output" | cut -d ' ' -f 3)"
+image_format="$(printf '%s' "$metadata_output" | cut -d ' ' -f 4)"
+if ! is_pos_int "$img_width" || ! is_pos_int "$img_height" ||
+        ! is_pos_int "$frame_count" || [ -z "$image_format" ]; then
+    echo "Couldn't get image metadata from identify: $metadata_output" >&2
+    echo >&2
+    exit 1
+fi
+
 # Compute the number of rows and columns of the image.
 if [ -z "$cols" ] || [ -z "$rows" ]; then
-    # Get the size of the image and its resolution. If it's an animation, use
-    # the first frame.
-    format_output="$($identify -format '%w %h\n' "$file" | head -1)"
-    img_width="$(printf '%s' "$format_output" | cut -d ' ' -f 1)"
-    img_height="$(printf '%s' "$format_output" | cut -d ' ' -f 2)"
-    if ! is_pos_int "$img_width" || ! is_pos_int "$img_height"; then
-        echo "Couldn't get image size from identify: $format_output" >&2
-        echo >&2
-        exit 1
-    fi
     opt_cols_expr="(${scale}*${img_width}/${cell_width})"
     opt_rows_expr="(${scale}*${img_height}/${cell_height})"
     if [ -z "$cols" ] && [ -z "$rows" ]; then
@@ -462,11 +466,6 @@ delayed_frame_dir_cleanup() {
 }
 
 upload_image_and_print_placeholder() {
-    # Check if the file is an animation.
-    format_output=$($identify -format '%n %m\n' "$file" | head -n 1)
-    frame_count="$(printf '%s' "$format_output" | cut -d ' ' -f 1)"
-    image_format="$(printf '%s' "$format_output" | cut -d ' ' -f 2)"
-
     if [ "$frame_count" -gt 1 ] && [ -n "$first_frame_only" ]; then
         # The file is an animation, but the user wants to display only the first
         # frame as a static image.
