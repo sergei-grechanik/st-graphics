@@ -20,6 +20,7 @@ Options:
   --cell-size WxH     The cell size in pixels.
   -m METHOD           The uploading method, may be 'file', 'direct' or 'auto'.
   --speed SPEED       The multiplier for the animation speed (float).
+  --first-frame       Display only the first frame (good for preview).
 "
 
 # Exit the script on keyboard interrupt
@@ -36,6 +37,7 @@ scale=1
 max_cols=""
 max_rows=""
 speed=""
+first_frame_only=""
 
 # Parse the command line.
 while [ $# -gt 0 ]; do
@@ -75,6 +77,10 @@ while [ $# -gt 0 ]; do
         --speed)
             speed="$2"
             shift 2
+            ;;
+        --first-frame)
+            first_frame_only=1
+            shift
             ;;
         --)
             file="$2"
@@ -461,7 +467,17 @@ upload_image_and_print_placeholder() {
     frame_count="$(printf '%s' "$format_output" | cut -d ' ' -f 1)"
     image_format="$(printf '%s' "$format_output" | cut -d ' ' -f 2)"
 
-    if [ "$frame_count" -gt 1 ]; then
+    if [ "$frame_count" -gt 1 ] && [ -n "$first_frame_only" ]; then
+        # The file is an animation, but the user wants to display only the first
+        # frame as a static image.
+        temp_file="$(mktemp --tmpdir "icat-mini-tty-graphics-protocol-XXXXX.png")"
+        if ! $convert "${file}[0]" "$temp_file"; then
+            echo "Failed to extract the first frame" >&2
+            exit 1
+        fi
+        gr_upload "q=2,a=T" "U=1,i=${image_id},f=100,c=${cols},r=${rows}" "$temp_file"
+        print_placeholder
+    elif [ "$frame_count" -gt 1 ]; then
         # The file is an animation, decompose into frames and upload each frame.
         frame_dir="$(mktemp -d)"
         frame_dir="$HOME/temp/frames${frame_dir}"
