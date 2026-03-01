@@ -21,6 +21,8 @@ Options:
   -m METHOD           The uploading method, may be 'file', 'direct' or 'auto'.
   --speed SPEED       The multiplier for the animation speed (float).
   --first-frame       Display only the first frame (good for preview).
+  --formats LIST      Comma-separated supported formats. Empty means autodetect.
+                      If conversion is needed, use the first format in the list.
 "
 
 # Exit the script on keyboard interrupt
@@ -38,6 +40,8 @@ max_cols=""
 max_rows=""
 speed=""
 first_frame_only=""
+formats=""
+conversion_format="PNG"
 
 # Parse the command line.
 while [ $# -gt 0 ]; do
@@ -78,6 +82,10 @@ while [ $# -gt 0 ]; do
             speed="$2"
             shift 2
             ;;
+        --formats)
+            formats="$2"
+            shift 2
+            ;;
         --first-frame)
             first_frame_only=1
             shift
@@ -102,6 +110,28 @@ while [ $# -gt 0 ]; do
 done
 
 file="$(realpath "$file")"
+
+formats="$(printf '%s' "$formats" | tr '[:lower:]' '[:upper:]')"
+if [ -n "$(printf '%s' "$formats" | tr -d '[:alnum:],')" ]; then
+    echo "Invalid formats list: '$formats'" >&2
+    exit 1
+fi
+
+if [ -n "$formats" ]; then
+    conversion_format="${formats%%,*}"
+    if [ -z "$conversion_format" ]; then
+        echo "Invalid formats list: '$formats'" >&2
+        exit 1
+    fi
+fi
+
+format_in_supported_list() {
+    arg_format="$1"
+    case ",$formats," in
+        *",$arg_format,"*) return 0 ;;
+    esac
+    return 1
+}
 
 #####################################################################
 # Detect imagemagick
@@ -392,6 +422,13 @@ fi
 # Check if the image format is supported.
 is_format_supported() {
     arg_format="$1"
+    if [ -n "$formats" ]; then
+        if format_in_supported_list "$arg_format"; then
+            return 0
+        fi
+        return 1
+    fi
+
     if [ "$arg_format" = "PNG" ]; then
         return 0
     elif [ "$arg_format" = "JPEG" ]; then
@@ -468,9 +505,10 @@ gr_upload() {
 
 delayed_frame_dir_cleanup() {
     arg_frame_dir="$1"
+    arg_frame_ext="$2"
     sleep 2
     if [ -n "$arg_frame_dir" ]; then
-        for frame in "$arg_frame_dir"/frame_*.png; do
+        for frame in "$arg_frame_dir"/frame_*."$arg_frame_ext"; do
             rm "$frame"
         done
         rmdir "$arg_frame_dir"
@@ -481,7 +519,7 @@ upload_image_and_print_placeholder() {
     if [ "$frame_count" -gt 1 ] && [ -n "$first_frame_only" ]; then
         # The file is an animation, but the user wants to display only the first
         # frame as a static image.
-        temp_file="$(mktemp --tmpdir "icat-mini-tty-graphics-protocol-XXXXX.png")"
+        temp_file="$(mktemp --tmpdir "icat-mini-tty-graphics-protocol-XXXXX.${conversion_format}")"
         if ! $convert "${file}[0]" "$temp_file"; then
             echo "Failed to extract the first frame" >&2
             exit 1
@@ -499,14 +537,14 @@ upload_image_and_print_placeholder() {
         fi
 
         # Decompose the animation into separate frames.
-        $convert "$file" -coalesce "$frame_dir/frame_%06d.png"
+        $convert "$file" -coalesce "$frame_dir/frame_%06d.${conversion_format}"
 
         # Get all frame delays at once, in centiseconds, as a space-separated
         # string.
         delays=$($identify -format "%T " "$file")
 
         frame_number=1
-        for frame in "$frame_dir"/frame_*.png; do
+        for frame in "$frame_dir"/frame_*."$conversion_format"; do
             # Read the delay for the current frame and convert it from
             # centiseconds to milliseconds.
             delay=$(printf '%s' "$delays" | cut -d ' ' -f "$frame_number")
@@ -544,7 +582,7 @@ upload_image_and_print_placeholder() {
 
         # Remove the temporary directory, but do it in the background with a
         # delay to avoid removing files before they are loaded by the terminal.
-        delayed_frame_dir_cleanup "$frame_dir" 2> /dev/null &
+        delayed_frame_dir_cleanup "$frame_dir" "$conversion_format" 2> /dev/null &
     elif is_format_supported "$image_format"; then
         # The file is not an animation and has a supported format, upload it
         # directly.
@@ -552,10 +590,10 @@ upload_image_and_print_placeholder() {
         # Print the placeholder
         print_placeholder
     else
-        # The format is not supported, try to convert it to png.
-        temp_file="$(mktemp --tmpdir "icat-mini-tty-graphics-protocol-XXXXX.png")"
+        # The format is not supported, try to convert it.
+        temp_file="$(mktemp --tmpdir "icat-mini-tty-graphics-protocol-XXXXX.${conversion_format}")"
         if ! $convert "$file" "$temp_file"; then
-            echo "Failed to convert the image to PNG" >&2
+            echo "Failed to convert the image to ${conversion_format}" >&2
             exit 1
         fi
         # Upload the converted image.
