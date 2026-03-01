@@ -127,9 +127,26 @@ if [ -n "$TMUX" ]; then
     inside_tmux=1
 fi
 
+tmux_info_loaded=""
+actual_term="$TERM"
+tmux_pane_tty=""
+
+load_tmux_info() {
+    [ -n "$inside_tmux" ] || return
+    [ -z "$tmux_info_loaded" ] || return
+    tmux_info_loaded=1
+
+    tmux_pane_info="$(tmux display-message -t "$TMUX_PANE" -p "#{pane_tty}|#{client_termname}")"
+    tmux_pane_tty="${tmux_pane_info%%|*}"
+    tmux_client_term="${tmux_pane_info#*|}"
+    if [ -n "$tmux_client_term" ]; then
+        actual_term="$tmux_client_term"
+    fi
+}
+
 if [ -z "$command_tty" ] && [ -n "$inside_tmux" ]; then
-    # Get the pty of the current tmux pane.
-    command_tty="$(tmux display-message -t "$TMUX_PANE" -p "#{pane_tty}")"
+    load_tmux_info
+    command_tty="$tmux_pane_tty"
     if [ ! -e "$command_tty" ]; then
         command_tty=""
     fi
@@ -378,12 +395,7 @@ is_format_supported() {
     if [ "$arg_format" = "PNG" ]; then
         return 0
     elif [ "$arg_format" = "JPEG" ]; then
-        if [ -z "$inside_tmux" ]; then
-            actual_term="$TERM"
-        else
-            # Get the actual current terminal name from tmux.
-            actual_term="$(tmux display-message -p "#{client_termname}")"
-        fi
+        load_tmux_info
         # st is known to support JPEG.
         case "$actual_term" in
             st | *-st | st-* | *-st-*)
