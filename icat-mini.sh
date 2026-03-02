@@ -25,6 +25,11 @@ Options:
   --first-frame       Display only the first frame (good for preview).
   --formats LIST      Comma-separated supported formats. Empty means autodetect.
                       If conversion is needed, use the first format in the list.
+
+Environment variables:
+  ICAT_MINI_DEFAULT_ARGS
+          Default options prepended to CLI arguments. Example:
+          ICAT_MINI_DEFAULT_ARGS='--cell-size-fallback 8x16 --scale 2.0'
 "
 
 # Exit the script on keyboard interrupt
@@ -44,6 +49,12 @@ speed=""
 first_frame_only=""
 formats=""
 conversion_format="PNG"
+
+# Apply default arguments from the environment first, so explicit CLI arguments
+# can override them later.
+if [ -n "$ICAT_MINI_DEFAULT_ARGS" ]; then
+    set -- $ICAT_MINI_DEFAULT_ARGS "$@"
+fi
 
 # Parse the command line.
 while [ $# -gt 0 ]; do
