@@ -18,6 +18,8 @@ Options:
   --max-cols N        The maximum number of columns.
   --max-rows N        The maximum number of rows.
   --cell-size WxH     The cell size in pixels.
+  --cell-size-fallback WxH
+                      The cell size in pixels, used if autodetect fails.
   -m METHOD           The uploading method, may be 'file', 'direct' or 'auto'.
   --speed SPEED       The multiplier for the animation speed (float).
   --first-frame       Display only the first frame (good for preview).
@@ -32,9 +34,9 @@ cols=""
 rows=""
 file=""
 command_tty=""
-response_tty=""
 uploading_method="auto"
 cell_size=""
+cell_size_fallback=""
 scale=1
 max_cols=""
 max_rows=""
@@ -68,6 +70,10 @@ while [ $# -gt 0 ]; do
             ;;
         --cell-size)
             cell_size="$2"
+            shift 2
+            ;;
+        --cell-size-fallback)
+            cell_size_fallback="$2"
             shift 2
             ;;
         --max-cols)
@@ -182,30 +188,9 @@ if [ -z "$command_tty" ] && [ -n "$inside_tmux" ]; then
     fi
 fi
 
-#####################################################################
-# Adjust the terminal state
-#####################################################################
-
 if [ -z "$command_tty" ]; then
     command_tty="/dev/tty"
 fi
-if [ -z "$response_tty" ]; then
-    response_tty="/dev/tty"
-fi
-
-stty_orig="$(stty -g < "$response_tty")"
-stty -echo < "$response_tty"
-# Disable ctrl-z. Pressing ctrl-z during image uploading may cause some
-# horrible issues otherwise.
-stty susp undef < "$response_tty"
-stty -icanon < "$response_tty"
-
-restore_echo() {
-    [ -n "$stty_orig" ] || return
-    stty $stty_orig < "$response_tty"
-}
-
-trap restore_echo EXIT TERM
 
 #####################################################################
 # Compute the number of rows and columns
@@ -261,31 +246,18 @@ if [ -z "$cols" ] || [ -z "$rows" ]; then
         cell_width="${cell_size_ioctl% *}"
         cell_height="${cell_size_ioctl#* }"
         if ! is_pos_int "$cell_height" || ! is_pos_int "$cell_width"; then
-            cell_width=""
-            cell_height=""
-        fi
-    fi
-    # If it didn't work, try to use csi XTWINOPS.
-    if [ -z "$cell_width" ] || [ -z "$cell_height" ]; then
-        if [ -n "$inside_tmux" ]; then
-            printf '\033Ptmux;\033\033[16t\033\\' >> "$command_tty"
-        else
-            printf '\033[16t' >> "$command_tty"
-        fi
-        # The expected response will look like ^[[6;<height>;<width>t
-        term_response=""
-        while true; do
-            char=$(dd bs=1 count=1 <"$response_tty" 2>/dev/null)
-            if [ "$char" = "t" ]; then
-                break
+            if [ -n "$cell_size_fallback" ]; then
+                cell_width="${cell_size_fallback%x*}"
+                cell_height="${cell_size_fallback#*x}"
+                if ! is_pos_int "$cell_height" || ! is_pos_int "$cell_width"; then
+                    echo "Invalid cell size fallback: $cell_size_fallback" >&2
+                    exit 1
+                fi
+            else
+                echo "WARNING: Could not detect cell size (use --cell-size or --cell-size-fallback to suppress this warning)" >&2
+                cell_width=8
+                cell_height=16
             fi
-            term_response="$term_response$char"
-        done
-        cell_height="$(printf '%s' "$term_response" | cut -d ';' -f 2)"
-        cell_width="$(printf '%s' "$term_response" | cut -d ';' -f 3)"
-        if ! is_pos_int "$cell_height" || ! is_pos_int "$cell_width"; then
-            cell_width=8
-            cell_height=16
         fi
     fi
 fi
