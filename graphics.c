@@ -2756,6 +2756,12 @@ static int gr_getrectbottom(ImageRect *rect) {
 	       (rect->img_end_row - rect->img_start_row) * rect->ch;
 }
 
+/// Returns the right coordinate of the rect.
+static int gr_getrectright(ImageRect *rect) {
+	return rect->screen_x_pix +
+	       (rect->img_end_col - rect->img_start_col) * rect->cw;
+}
+
 /// Prepare for image drawing. `cw` and `ch` are dimensions of the cell.
 void gr_start_drawing(Drawable buf, int cw, int ch) {
 	current_cw = cw;
@@ -2874,14 +2880,23 @@ void gr_append_imagerect(Drawable buf, uint32_t image_id, uint32_t placement_id,
 		    rect->ch != ch || rect->reverse != reverse)
 			continue;
 		// We only support the case when the new stripe is added to the
-		// bottom of an existing rectangle and they are perfectly
-		// aligned.
+		// bottom or to the right of an existing rectangle and they are
+		// perfectly aligned.
 		if (rect->img_end_row == img_start_row &&
 		    gr_getrectbottom(rect) == y_pix) {
 			if (rect->img_start_col == img_start_col &&
 			    rect->img_end_col == img_end_col &&
 			    rect->screen_x_pix == x_pix) {
 				rect->img_end_row = img_end_row;
+				return;
+			}
+		}
+		if (rect->img_end_col == img_start_col &&
+		    gr_getrectright(rect) == x_pix) {
+			if (rect->img_start_row == img_start_row &&
+			    rect->img_end_row == img_end_row &&
+			    rect->screen_y_pix == y_pix) {
+				rect->img_end_col = img_end_col;
 				return;
 			}
 		}
