@@ -441,7 +441,7 @@ gr_upload() {
     arg_file="$3"
     if [ "$uploading_method" = "file" ]; then
         # base64-encode the filename
-        encoded_filename=$(printf '%s' "$arg_file" | base64 -w0)
+        encoded_filename=$(printf '%s' "$arg_file" | base64 | tr -d '\n')
         # If the file name contains 'tty-graphics-protocol', assume it's
         # temporary and use t=t.
         medium="t=f"
@@ -466,7 +466,7 @@ gr_upload() {
         # graphics command shouldn't be more than 4096, so we set the size of an
         # encoded chunk to be 3968, slightly less than that.
         chunk_size=3968
-        cat "$arg_file" | base64 -w0 | split -b "$chunk_size" - "$chunkdir/chunk_"
+        cat "$arg_file" | base64 | tr -d '\n' | split -b "$chunk_size" - "$chunkdir/chunk_"
 
         # Issue a command indicating that we want to start data transmission for
         # a new image.
@@ -574,7 +574,7 @@ upload_image_and_print_placeholder() {
         print_placeholder
     else
         # The format is not supported, try to convert it.
-        temp_file="$(mktemp --tmpdir "icat-mini-tty-graphics-protocol-XXXXX.${conversion_format}")"
+        temp_file="$(mktemp "${TMPDIR:-/tmp}/icat-mini-tty-graphics-protocol-XXXXXXXXXX.${conversion_format}")"
         if ! $convert "$file" "$temp_file"; then
             echo "Failed to convert the image to ${conversion_format}" >&2
             exit 1

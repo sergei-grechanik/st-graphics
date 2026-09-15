@@ -30,9 +30,11 @@ STLDFLAGS = $(LIBS) $(LDFLAGS)
 
 # OpenBSD:
 #CPPFLAGS = -DVERSION=\"$(VERSION)\" -D_XOPEN_SOURCE=600 -D_BSD_SOURCE
-#LIBS = -L$(X11LIB) -lm -lX11 -lutil -lXft \
+#LIBS = -L$(X11LIB) -lm -lX11 -lutil -lXft -lXrender \
 #       `$(PKG_CONFIG) --libs fontconfig` \
-#       `$(PKG_CONFIG) --libs freetype2`
+#       `$(PKG_CONFIG) --libs freetype2`  \
+#       `$(PKG_CONFIG) --libs zlib`       \
+#       `$(PKG_CONFIG) --libs imlib2`
 #MANPREFIX = ${PREFIX}/man
 
 # compiler and linker

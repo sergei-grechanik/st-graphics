@@ -822,7 +822,10 @@ ttynew(const char *line, char *cmd, const char *out, char **args)
 		break;
 	default:
 #ifdef __OpenBSD__
-		if (pledge("stdio rpath tty proc", NULL) == -1)
+		// wpath and cpath are required for the graphics cache
+		// prot_exec is required for loading imlib2 modules
+		// exec is required for copying image files with cp
+		if (pledge("stdio rpath tty proc wpath cpath prot_exec exec", NULL) == -1)
 			die("pledge\n");
 #endif
 		close(s);
