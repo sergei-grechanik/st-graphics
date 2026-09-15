@@ -822,7 +822,8 @@ ttynew(const char *line, char *cmd, const char *out, char **args)
 		break;
 	default:
 #ifdef __OpenBSD__
-		if (pledge("stdio rpath tty proc", NULL) == -1)
+		// wpath and cpath are required for the graphics cache.
+		if (pledge("stdio rpath tty proc wpath cpath", NULL) == -1)
 			die("pledge\n");
 #endif
 		close(s);
