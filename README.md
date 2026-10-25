@@ -132,8 +132,9 @@ features.
 - [timg](https://github.com/hzeller/timg) - I had to explicitly pass `-pk`
   (i.e. `timg -pk <image>`). If your timg is fresh enough, it even works in
   tmux!
-- [yazi](https://github.com/sxyazi/yazi) - works if you run it as
-  `TERM="xterm-kitty" yazi`.
+- [yazi](https://github.com/sxyazi/yazi) - should work out of the box
+  by recognizing `st-graphics` in the terminal's XTVERSION response,
+  see [Yazi PR #4414](https://github.com/sxyazi/yazi/pull/4414).
 - [mov-cli](https://github.com/mov-cli/mov-cli) - I had to explicitly set
   `TERM="xterm-kitty"`.
 - [snacks.image](https://github.com/folke/snacks.nvim/blob/main/docs/image.md) -
