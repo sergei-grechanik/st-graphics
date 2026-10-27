@@ -441,7 +441,7 @@ gr_upload() {
     arg_file="$3"
     if [ "$uploading_method" = "file" ]; then
         # base64-encode the filename
-        encoded_filename=$(printf '%s' "$arg_file" | base64 | tr -d '\n')
+        encoded_filename=$(printf '%s' "$arg_file" | base64 | tr -d '\r\n')
         # If the file name contains 'tty-graphics-protocol', assume it's
         # temporary and use t=t.
         medium="t=f"
@@ -466,7 +466,7 @@ gr_upload() {
         # graphics command shouldn't be more than 4096, so we set the size of an
         # encoded chunk to be 3968, slightly less than that.
         chunk_size=3968
-        cat "$arg_file" | base64 | tr -d '\n' | split -b "$chunk_size" - "$chunkdir/chunk_"
+        cat "$arg_file" | base64 | tr -d '\r\n' | split -b "$chunk_size" - "$chunkdir/chunk_"
 
         # Issue a command indicating that we want to start data transmission for
         # a new image.
